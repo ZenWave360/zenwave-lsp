@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<idea-plugin>
+    <id>io.zenwave360.zdl.lsp</id>
+    <name>ZDL Language Server</name>
+    <vendor email="info@zenwave360.io" url="https://www.zenwave360.io">ZenWave360</vendor>
+    
+    <description><![CDATA[
+        Language Server Protocol (LSP) implementation for ZDL (ZenWave Domain Language).
+        Provides code completion, validation, hover information, and other language features for ZDL files.
+    ]]></description>
+    
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+    
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Project service for the language server extension -->
+        <projectService serviceImplementation="io.zenwave360.zdl.lsp.intellij.ZdlLanguageServerExtension" />
+        
+        <!-- File type factory -->
+        <fileType name="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlFileType"
+                  fieldName="INSTANCE" language="ZDL" extensions="zdl" />
+        
+        <!-- Language support -->
+        <lang.parserDefinition language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlParserDefinition" />
+        
+        <!-- Syntax highlighting -->
+        <lang.syntaxHighlighterFactory language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlSyntaxHighlighterFactory" />
+        
+        <!-- Code completion -->
+        <completion.contributor language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlCompletionContributor" />
+        
+        <!-- Documentation provider -->
+        <lang.documentationProvider language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlDocumentationProvider" />
+        
+        <!-- Go to declaration -->
+        <gotoDeclarationHandler implementation="io.zenwave360.zdl.lsp.intellij.ZdlGotoDeclarationHandler" />
+        
+        <!-- Find usages -->
+        <lang.findUsagesProvider language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlFindUsagesProvider" />
+        
+        <!-- Formatter -->
+        <lang.formatter language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlFormattingModelBuilder" />
+        
+        <!-- Annotator for diagnostics -->
+        <annotator language="ZDL" implementationClass="io.zenwave360.zdl.lsp.intellij.ZdlAnnotator" />
+    </extensions>
+    
+    <projectListeners>
+        <!-- Project open/close listener -->
+        <listener class="io.zenwave360.zdl.lsp.intellij.ZdlProjectListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener" />
+    </projectListeners>
+    
+    <actions>
+        <!-- Add actions here -->
+    </actions>
+</idea-plugin>
