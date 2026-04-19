@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.spec
 import io.zenwave360.jsonrefparser.RefParser
 import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.ResolvedRef
+import io.zenwave360.jsonrefparser.model.getOriginalRef
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.contracts.SourceLocation
@@ -13,12 +14,17 @@ class YamlDocumentModel(
     val rawModel: Any?,
     val locationTable: Map<String, SourceLocation>,
     val resolvedRefs: Map<String, String>,
+    val referenceTable: Map<String, String> = emptyMap(),
+    private val documentLocationTables: Map<String, Map<String, SourceLocation>> = mapOf(uri to locationTable),
 ) {
     fun pathAtPosition(position: Position): String? =
         SemanticPointerEvaluator.pathAtPosition(locationTable, position)
 
     fun locationOf(path: String): SourceLocation? =
         SemanticPointerEvaluator.locationOf(locationTable, path)
+
+    fun locationOf(uri: String, path: String): SourceLocation? =
+        documentLocationTables[uri]?.let { SemanticPointerEvaluator.locationOf(it, path) }
 
     fun resolveRef(ref: String, baseUri: String = uri): String? =
         resolvedRefs[ref] ?: canonicalTarget(ref, baseUri)
@@ -33,6 +39,14 @@ class YamlDocumentModel(
                 rawModel = parsedDocument.schema,
                 locationTable = buildCanonicalLocationTable(parsedDocument.schema, parsedDocument.locations),
                 resolvedRefs = parsedDocument.resolvedRefs.associateResolvedRefs(uri),
+                referenceTable = buildReferenceTable(parsedDocument),
+                documentLocationTables = parsedDocument.documentLocations
+                    .mapValues { (documentUri, locations) ->
+                        buildCanonicalLocationTableForUri(documentUri, locations)
+                    }
+                    .ifEmpty {
+                        mapOf(uri to buildCanonicalLocationTable(parsedDocument.schema, parsedDocument.locations))
+                    },
             )
 
         private fun buildCanonicalLocationTable(
@@ -48,6 +62,57 @@ class YamlDocumentModel(
                 output = canonicalLocations,
             )
             return canonicalLocations
+        }
+
+        private fun buildCanonicalLocationTableForUri(
+            uri: String,
+            locations: Map<String, io.zenwave360.jsonrefparser.model.SourceLocation>,
+        ): Map<String, SourceLocation> =
+            locations.entries.associate { (pointer, location) ->
+                pointerFragmentToCanonicalPath("#$pointer") to location.toContractsLocation(uri)
+            }
+
+        private fun buildReferenceTable(parsedDocument: ParsedDocument): Map<String, String> {
+            val refs = linkedMapOf<String, String>()
+            visitReferences(
+                value = parsedDocument.schema,
+                canonicalPath = "$",
+                parsedDocument = parsedDocument,
+                output = refs
+            )
+            return refs
+        }
+
+        private fun visitReferences(
+            value: Any?,
+            canonicalPath: String,
+            parsedDocument: ParsedDocument,
+            output: MutableMap<String, String>,
+        ) {
+            parsedDocument.getOriginalRef(value)?.refString?.let { output[canonicalPath] = it }
+
+            when (value) {
+                is Map<*, *> -> value.forEach { (rawKey, child) ->
+                    val key = rawKey as? String ?: return@forEach
+                    visitReferences(
+                        value = child,
+                        canonicalPath = SemanticPointerEvaluator.appendProperty(canonicalPath, key),
+                        parsedDocument = parsedDocument,
+                        output = output
+                    )
+                }
+                is List<*> -> {
+                    val namedPaths = namedListPaths(canonicalPath, value)
+                    value.forEachIndexed { index, child ->
+                        visitReferences(
+                            value = child,
+                            canonicalPath = namedPaths[index] ?: SemanticPointerEvaluator.appendIndex(canonicalPath, index),
+                            parsedDocument = parsedDocument,
+                            output = output
+                        )
+                    }
+                }
+            }
         }
 
         private fun visitNode(
@@ -98,9 +163,9 @@ class YamlDocumentModel(
             return if (pointer.isEmpty()) "/$escaped" else "$pointer/$escaped"
         }
 
-        private fun io.zenwave360.jsonrefparser.model.SourceLocation.toContractsLocation(): SourceLocation =
+        private fun io.zenwave360.jsonrefparser.model.SourceLocation.toContractsLocation(uriOverride: String? = null): SourceLocation =
             SourceLocation(
-                uri = file,
+                uri = uriOverride ?: file,
                 range = Range(
                     start = Position(line, column),
                     end = Position(endLine, endColumn),
