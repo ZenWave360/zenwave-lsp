@@ -6,31 +6,27 @@ config {
     persistence mongodb
 }
 
+systems {
+    @zdl("subscription/model.zdl")
+    Subscription {
+        service SubscriptionService
+    }
+
+    @zdl("payments/model.zdl")
+    Payments {
+        service PaymentService
+    }
+
+    @zdl("billing/model.zdl")
+    Billing {
+        service BillingService
+    }
+}
+
 /**
  * Payment Flow for Subscription Renewals
  */
 flow PaymentsFlow {
-
-    systems {
-        @zdl("subscription/model.zdl")
-        Subscription {
-            service {
-                commands: renewSubscription, suspendSubscription, cancelRenewal
-            }
-        }
-
-        Payments {
-            service PaymentService {
-                commands: chargePayment, retryPayment, recordPayment
-            }
-        }
-
-        Billing {
-            service BillingService {
-                commands: generateInvoice
-            }
-        }
-    }
 
     @actor(Customer)
     start CustomerRequestsSubscriptionRenewal {
@@ -49,33 +45,40 @@ flow PaymentsFlow {
     }
 
     when CustomerRequestsSubscriptionRenewal {
+        service Subscription.SubscriptionService
         command renewSubscription
         event SubscriptionRenewed
     }
 
     when SubscriptionRenewed {
+        service Payments.PaymentService
         command chargePayment
         event PaymentSucceeded
         event PaymentFailed
     }
 
+    @if("less than 3 attempts")
     when PaymentFailed {
-        if "less than 3 attempts" {
-            command retryPayment
-            event PaymentRetryScheduled
-        } else {
-            policy "Suspend after 3 failed attempts"
-            command suspendSubscription
-            event SubscriptionSuspended
-        }
+        service Payments.PaymentService
+        command retryPayment
+        event PaymentRetryScheduled
+    }
+
+    @if("3 or more attempts")
+    when PaymentFailed {
+        service Subscription.SubscriptionService
+        command suspendSubscription
+        event SubscriptionSuspended
     }
 
     when PaymentSucceeded and BillingCycleEnded {
+        service Payments.PaymentService
         command recordPayment
         event PaymentRecorded
     }
 
     when PaymentTimeout {
+        service Subscription.SubscriptionService
         command cancelRenewal
         event RenewalCancelled
     }
@@ -86,4 +89,3 @@ flow PaymentsFlow {
         cancelled: RenewalCancelled
     }
 }
-
