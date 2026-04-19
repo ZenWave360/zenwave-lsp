@@ -21,8 +21,8 @@ kotlin {
                 implementation(kotlin("stdlib-common"))
 
                 // DSL Kotlin parsers for ZDL and ZFL languages
-                // Parser implementation will be provided externally
                 implementation("io.zenwave360.dsl:dsl-kotlin:1.5.0-SNAPSHOT")
+                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.1.0-SNAPSHOT")
 
                 // If you already use kotlinx.serialization in core IR
                 // implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.7.3")
@@ -62,4 +62,3 @@ kotlin {
         }
     }
 }
-

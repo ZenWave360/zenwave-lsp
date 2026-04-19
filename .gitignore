@@ -24,6 +24,8 @@ replay_pid*
 .kotlintest/
 *.kotlin_module
 
+.*
+
 ### IntelliJ IDEA ###
 .idea/
 *.iml
@@ -77,3 +79,5 @@ logs/
 /target/
 /out/
 /build/
+/.mcp_data/embeddings-cache.json
+/.mcp_data/identifier-embeddings-cache.json
