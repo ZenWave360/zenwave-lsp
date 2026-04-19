@@ -70,6 +70,19 @@ class ZenwaveLanguageServer(
 
     private fun resolveModule(snapshot: DocumentSnapshot): LanguageModule? {
         val byLanguageId = modules.firstOrNull { it.languageId == snapshot.ref.languageId }
-        return byLanguageId ?: modules.firstOrNull { it.canHandle(snapshot.ref.uri, snapshot.text) }
+        if (byLanguageId != null) return byLanguageId
+
+        return modules
+            .mapIndexedNotNull { index, module ->
+                if (!module.canHandle(snapshot.ref.uri, snapshot.text)) return@mapIndexedNotNull null
+                val specificity = module.capabilities.extensions
+                    .filter { snapshot.ref.uri.endsWith(it) }
+                    .maxOfOrNull { it.length }
+                    ?: 0
+                Triple(specificity, -index, module)
+            }
+            .sortedWith(compareByDescending<Triple<Int, Int, LanguageModule>> { it.first }.thenByDescending { it.second })
+            .firstOrNull()
+            ?.third
     }
 }
