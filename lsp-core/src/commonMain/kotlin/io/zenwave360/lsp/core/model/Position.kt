@@ -1,7 +1,3 @@
 package io.zenwave360.lsp.core.model
 
-data class Position(
-    val line: Int,
-    val character: Int
-)
-
+typealias Position = io.zenwave360.lsp.core.contracts.Position

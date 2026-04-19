@@ -3,6 +3,10 @@ package io.zenwave360.lsp.core
 import io.zenwave360.lsp.core.features.*
 import io.zenwave360.lsp.core.model.*
 
+@Deprecated(
+    message = "Use the shared contracts plus ZenwaveLanguageServer facade instead.",
+    replaceWith = ReplaceWith("ZenwaveLanguageServer")
+)
 interface ZenwaveLanguageService {
 
     fun parse(language: ZenwaveLanguage, text: String): SemanticModel
@@ -24,4 +28,3 @@ interface ZenwaveLanguageService {
         request: DefinitionRequest
     ): Location?
 }
-
