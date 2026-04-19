@@ -34,6 +34,12 @@ class ZenwaveLanguageServer(
         crossReferenceIndex.remove(uri)
     }
 
+    fun canHandle(snapshot: DocumentSnapshot): Boolean =
+        resolveModule(snapshot) != null
+
+    fun canHandle(uri: String): Boolean =
+        sessionStore.get(uri)?.let(::resolveModule) != null
+
     fun diagnostics(uri: String): List<Diagnostic> =
         withModule(uri) { module, snapshot -> module.diagnostics(snapshot) } ?: emptyList()
 
