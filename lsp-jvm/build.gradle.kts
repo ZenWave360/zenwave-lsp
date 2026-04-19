@@ -15,10 +15,9 @@ dependencies {
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
 application {
     mainClass.set("io.zenwave360.lsp.jvm.MainKt")
 }
-

@@ -13,10 +13,11 @@ import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 class ZdlLanguageModule(
-    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter(),
-    private val hierarchyBuilder: ZdlHierarchyBuilder = ZdlHierarchyBuilder(),
-    private val crossReferenceContributor: ZdlCrossReferenceContributor = ZdlCrossReferenceContributor()
+    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter()
 ) : LanguageModule {
+
+    private val hierarchyBuilder = ZdlHierarchyBuilder()
+    private val crossReferenceContributor = ZdlCrossReferenceContributor()
 
     override val languageId: String = "zdl"
 
