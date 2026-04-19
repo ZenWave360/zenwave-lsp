@@ -9,6 +9,7 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.jsonpath.SemanticPointerEvaluator
 import io.zenwave360.lsp.core.spec.defaultSpecDefinition
 import io.zenwave360.lsp.core.spec.defaultSpecHover
 import io.zenwave360.lsp.core.spec.detectSpecFile
@@ -62,9 +63,28 @@ class AsyncApiLanguageModule(
         val paths = model.referenceTable.keys.filter { path ->
             path.contains(".subscribe.message") || path.contains(".publish.message")
         }
-        return paths.mapNotNull { path -> refContribution(model, path, path.substringAfterLast('.'), "schema-of") }
+        return paths.flatMap { path -> schemaContributions(model, path) }
     }
 
     override fun canHandle(uri: String, text: String?): Boolean =
         detectSpecFile(uri, text, "asyncapi")
+
+    private fun schemaContributions(
+        model: io.zenwave360.lsp.core.spec.YamlDocumentModel,
+        path: String,
+    ): List<CrossReferenceContribution> {
+        val direct = refContribution(model, path, path.substringAfterLast('.'), "schema-of") ?: return emptyList()
+        val nestedPayload = direct.targetSemanticId
+            ?.takeIf { direct.targetUri == model.uri }
+            ?.substringAfter('#')
+            ?.let { messagePath -> SemanticPointerEvaluator.appendProperty(messagePath, "payload") }
+            ?.let { payloadPath -> refContribution(model, payloadPath, path.substringAfterLast('.'), "schema-of") }
+            ?.copy(
+                sourceUri = model.uri,
+                sourceSemanticId = "${model.uri}#$path",
+                sourceRange = model.locationOf(path)?.range,
+                sourceLabel = path.substringAfterLast('.')
+            )
+        return listOfNotNull(direct, nestedPayload)
+    }
 }

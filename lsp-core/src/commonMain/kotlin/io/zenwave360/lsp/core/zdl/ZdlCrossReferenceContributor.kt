@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.zdl
 
+import io.zenwave360.lsp.core.jsonpath.SemanticPointerEvaluator
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 internal class ZdlCrossReferenceContributor {
@@ -67,13 +68,14 @@ internal class ZdlCrossReferenceContributor {
     ): CrossReferenceContribution? {
         val resolvedApiUri = targetApiUri ?: return null
         val resolvedChannel = channel ?: return null
+        val targetPath = SemanticPointerEvaluator.appendProperty("$.channels", resolvedChannel)
         return CrossReferenceContribution(
             sourceUri = ownerUri,
             sourceSemanticId = zdlSemanticId(ownerUri, ownerPath),
             sourceRange = locations.findSource(ownerUri, ownerPath).range,
             sourceLabel = ownerLabel,
             targetUri = resolvedApiUri,
-            targetSemanticId = "$resolvedApiUri#channels.$resolvedChannel",
+            targetSemanticId = "$resolvedApiUri#$targetPath",
             targetRange = null,
             targetLabel = resolvedChannel,
             relationType = relationType
