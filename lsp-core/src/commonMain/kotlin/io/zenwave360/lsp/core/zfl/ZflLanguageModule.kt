@@ -9,6 +9,8 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
@@ -43,10 +45,27 @@ class ZflLanguageModule(
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
-        parseModel(snapshot)
-            .asZflMap()["problems"]
-            .asZflList()
-            .map { toZflDiagnostic(snapshot.ref.uri, it.asZflMap()) }
+        parseModel(snapshot).asZflMap().let { model ->
+            val problems = model["problems"]
+                .asZflList()
+                .map { toZflDiagnostic(snapshot.ref.uri, it.asZflMap()) }
+            if (problems.isNotEmpty()) {
+                problems
+            } else if (model.mapAt("flows").isEmpty()) {
+                listOf(
+                    Diagnostic(
+                        uri = snapshot.ref.uri,
+                        range = Range(Position(0, 0), Position(0, 0)),
+                        severity = DiagnosticSeverity.ERROR,
+                        message = "ZFL document must declare at least one flow",
+                        code = "$",
+                        data = mapOf("language" to languageId)
+                    )
+                )
+            } else {
+                emptyList()
+            }
+        }
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val model = parseModel(snapshot).asZflMap()

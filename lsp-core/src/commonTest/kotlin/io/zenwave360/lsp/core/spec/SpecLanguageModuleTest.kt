@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.spec
 
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.spec.asyncapi.AsyncApiLanguageModule
 import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
@@ -88,6 +89,9 @@ class SpecLanguageModuleTest {
         )
 
         assertTrue(diagnostics.any { it.message.contains("Missing required field: paths") })
+        assertTrue(diagnostics.filter { it.message.contains("Missing required field") }.all { it.severity == DiagnosticSeverity.ERROR })
+        assertTrue(diagnostics.filter { it.message.contains("Missing required field") }.all { it.code?.startsWith("$.") == true })
+        assertTrue(diagnostics.filter { it.message.contains("Missing required field") }.all { it.data["language"] == "openapi" })
     }
 
     private fun snapshot(uri: String, languageId: String, text: String) =

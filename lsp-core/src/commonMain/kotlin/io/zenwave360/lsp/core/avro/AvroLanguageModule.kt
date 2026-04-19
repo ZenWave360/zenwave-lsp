@@ -160,7 +160,8 @@ class AvroLanguageModule(
             range = model.locationOf(path)?.range ?: rootLocation(model.uri).range,
             severity = DiagnosticSeverity.ERROR,
             message = message,
-            code = code
+            code = path,
+            data = mapOf("language" to languageId, "rule" to code)
         )
 }
 

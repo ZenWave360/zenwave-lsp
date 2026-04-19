@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.avro
 
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Position
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -39,8 +40,12 @@ class AvroLanguageModuleTest {
     @Test
     fun diagnosticsReportUnknownPrimitiveType() {
         val diagnostics = module.diagnostics(snapshot(invalidAvroText))
+        val diagnostic = diagnostics.firstOrNull { it.message.contains("Unknown Avro type: strng") }
 
-        assertTrue(diagnostics.any { it.message.contains("Unknown Avro type: strng") })
+        assertNotNull(diagnostic)
+        assertEquals(DiagnosticSeverity.ERROR, diagnostic.severity)
+        assertEquals("$.BrokenOrder.fields.id.type", diagnostic.code)
+        assertEquals("avro", diagnostic.data["language"])
     }
 
     private fun snapshot(text: String) =

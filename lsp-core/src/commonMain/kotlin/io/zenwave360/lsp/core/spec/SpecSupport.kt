@@ -64,6 +64,7 @@ internal fun detectSpecFile(uri: String, text: String?, topLevelKey: String): Bo
 internal fun requiredFieldDiagnostics(
     document: SpecDocument,
     requiredFields: List<String>,
+    language: String,
 ): List<Diagnostic> =
     requiredFields.mapNotNull { field ->
         val path = "$.${field}"
@@ -76,8 +77,8 @@ internal fun requiredFieldDiagnostics(
                 range = document.model.locationOf("$")?.range ?: Range(Position(0, 0), Position(0, 0)),
                 severity = DiagnosticSeverity.ERROR,
                 message = "Missing required field: $field",
-                code = "missing-field",
-                data = mapOf("semanticPath" to path)
+                code = path,
+                data = mapOf("semanticPath" to path, "language" to language)
             )
         }
     }

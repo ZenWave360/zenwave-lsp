@@ -45,7 +45,7 @@ class OpenApiLanguageModule(
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
         val document = parseSpecDocument(snapshot)
-        return document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"))
+        return document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
     }
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? =

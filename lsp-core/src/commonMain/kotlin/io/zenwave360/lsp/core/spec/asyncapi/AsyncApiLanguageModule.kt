@@ -46,7 +46,7 @@ class AsyncApiLanguageModule(
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
         val document = parseSpecDocument(snapshot)
-        return document.diagnostics + requiredFieldDiagnostics(document, listOf("asyncapi", "info", "channels"))
+        return document.diagnostics + requiredFieldDiagnostics(document, listOf("asyncapi", "info", "channels"), languageId)
     }
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? =
