@@ -1,5 +1,20 @@
 # ZenWave Multi-Language LSP — Architecture and Contracts
 
+## Status Note
+
+This document started as a design-and-gap analysis. The repository has since moved beyond the earlier scaffold state.
+
+Current implemented reality as of 2026-04-19:
+
+- `lsp-core` is the shared Kotlin Multiplatform semantic core
+- `lsp-jvm` now contains a runnable LSP4J transport
+- first-class language modules exist for ZDL, ZFL, OpenAPI, AsyncAPI, and Avro
+- canonical semantic identity is `uri#<path>` using the ZenWave-owned semantic pointer evaluator
+- document activation is extension-based for `.zdl`, `.zfl`, `.avsc` and extension plus lightweight content detection for `.yml`, `.yaml`, `.json`
+- forward and reverse cross-reference indexing is implemented in the shared core
+
+When older sections below describe something as "planned" or "not yet implemented", prefer this status note plus `docs/agentic-coding-plan.md` as the source of truth.
+
 ## 1. Purpose
 
 The ZenWave language server project is the language-intelligence layer for ZenWave DSLs and related API/schema formats, with shared infrastructure supporting:
@@ -17,12 +32,12 @@ Its role is to:
 - answer editor-oriented queries from that semantic model
 - provide a transport-neutral core that can later be exposed over standard LSP transports
 
-In the current repository state, the implemented center of gravity is `lsp-core`: a Kotlin Multiplatform service API that accepts document text plus a language selector and returns semantic data, diagnostics, and a small set of query results.
+In the current repository state, the implemented center of gravity is `lsp-core`, paired with a working JVM transport in `lsp-jvm`.
 
 This means the project is currently best understood as:
 
-- implemented today: language-service core
-- planned: transport adapters that expose the core as an actual LSP server/service
+- implemented today: shared language-service core plus JVM LSP transport
+- planned later: JS transport and workspace-aware activation/refinement
 
 ## 2. Scope of responsibility
 
@@ -44,7 +59,7 @@ The language server does not own:
 - IntelliJ PSI trees, stubs, indexing, or editor rendering
 - event flow diagram rendering or layout decisions
 - code generation, project scaffolding, or artifact generation
-- authoritative ownership of OpenAPI or AsyncAPI files
+- editor/plugin UX ownership of OpenAPI or AsyncAPI files
 
 ### Boundary with parser
 
@@ -57,8 +72,8 @@ The parser is a dependency, not a responsibility of this repository's core contr
 
 The IntelliJ plugin should treat this project as a document/URI/range-driven language intelligence service.
 
-- Plugin responsibility: editor wiring, transport/session lifecycle, UI presentation, tool windows, icon mapping, caching on the client if desired.
-- Language server responsibility: semantic lookup, diagnostics, navigation payloads, hierarchy payloads, and related-resource payloads when implemented.
+- Plugin responsibility: editor wiring, process lifecycle, UI presentation, tool windows, icon mapping, caching on the client if desired.
+- Language server responsibility: semantic lookup, diagnostics, navigation payloads, hierarchy payloads, related-resource payloads, and cross-reference payloads.
 
 The plugin should not assume direct access to parser internals, Kotlin classes, or semantic-map implementation details beyond documented contracts.
 
@@ -78,47 +93,50 @@ The language server should expose semantic structure, not rendering instructions
 - Language: Kotlin
 - Core module: Kotlin Multiplatform
 - Targets configured today: JVM and JS IR
-- JVM toolchain: Java 17
+- JVM toolchain: Java 21
 - Parser dependency: `io.zenwave360.dsl:dsl-kotlin:1.5.0-SNAPSHOT`
 
 ### Real LSP server or planned LSP-compatible service
 
 Current state:
 
-- `lsp-core` is implemented and usable as an in-process language service API.
-- `lsp-jvm` and `lsp-js` declare dependencies on LSP transport libraries but do not currently contain transport/server source code in this repository snapshot.
+- `lsp-core` is implemented and usable as an in-process shared language service API.
+- `lsp-jvm` implements a runnable LSP4J server that maps the shared facade to LSP lifecycle methods and custom ZenWave requests.
+- `lsp-js` remains a future transport target.
 
 Therefore:
 
-- current implementation is not yet a complete runnable LSP server in this repo
-- current implementation is a planned LSP-compatible core intended to sit behind a future JVM or JS transport layer
+- current implementation is a complete runnable JVM LSP server in this repo
+- current implementation still plans a future JS transport layer
 
 ### Transport assumptions
 
-Transport is not implemented here, but the repository structure strongly implies these intended adapters:
+Transport adapters in the repository or immediate plan:
 
 - JVM side: `lsp4j`
-- JS side: `vscode-languageserver`
+- JS side: `vscode-languageserver` planned
 
-Expected transport style for future integration:
+Current transport style:
 
 - standard LSP request/response and notification flow
 - text document identified by URI
 - position/range addressed in LSP-style zero-based lines/characters
+- custom requests for hierarchy and cross-reference navigation
 
 ### Runtime assumptions
 
-Current runtime assumptions for the implemented core:
+Current runtime assumptions for the implemented server:
 
 - parser invocation is synchronous
 - requests are text-based, not file-system-index-based
-- the service reparses on demand from provided text
-- no internal workspace indexing or persistent document store exists in `lsp-core`
-- no concurrency/caching contract is documented or implemented
+- the service reparses from the current in-memory document snapshot
+- there is an in-memory document session store in `lsp-core`
+- there is an in-memory cross-reference index in `lsp-core`
+- no persistent workspace index is implemented yet
 
 ## 4. Dependency on parser
 
-The language server depends directly on the ZenWave parser library and currently embeds parser usage as an in-process library call.
+The language server depends directly on the ZenWave parser library and currently embeds parser usage as an in-process library call for ZDL and ZFL. OpenAPI, AsyncAPI, and Avro are parsed in the shared core through `json-schema-ref-parser-kmp` plus ZenWave-owned semantic-pointer logic.
 
 Implementation model today:
 

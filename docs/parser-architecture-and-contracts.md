@@ -1,5 +1,21 @@
 # ZFL/ZDL Parser - Architecture and Contracts
 
+## Status Note
+
+This document remains the reference for parser responsibilities and parser-side model contracts.
+
+For language-server architecture, transport behavior, semantic-pointer identity, and cross-language navigation, prefer:
+
+- `docs/agentic-coding-plan.md`
+- `docs/lsp-architecture-and-contracts.md`
+
+Current relationship as of 2026-04-19:
+
+- the parser remains the source of syntax interpretation for ZDL and ZFL
+- the language server is now implemented as a multi-language shared core in `lsp-core`
+- the JVM transport is implemented in `lsp-jvm`
+- OpenAPI, AsyncAPI, and Avro support live in the language-server layer, not in this parser document
+
 ## 1. Purpose
 
 The parser project is the canonical model producer for the ZenWave DSL ecosystem. Its job is to accept source text for two DSLs and return structured models that other tools can consume without re-implementing grammar rules:

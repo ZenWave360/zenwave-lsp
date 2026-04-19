@@ -1,5 +1,25 @@
 # ZDL + ZFL Shared LSP Agentic Coding Plan
 
+## Status
+
+This document is now historical context.
+
+The active execution record is `docs/agentic-coding-plan.md`. That newer plan expanded the scope from shared ZDL/ZFL services to a single server with first-class support for:
+
+- ZDL
+- ZFL
+- OpenAPI
+- AsyncAPI
+- Avro
+
+Implementation status as of 2026-04-19:
+
+- the shared-core architecture described here was adopted
+- the JVM LSP transport is implemented in `lsp-jvm`
+- cross-language navigation and shared semantic-pointer identity are implemented in `lsp-core`
+
+Use this document for rationale and early decomposition, but prefer `agentic-coding-plan.md` and `lsp-architecture-and-contracts.md` for the current architecture.
+
 ## Goal
 
 This document captures the earlier shared-platform direction for ZDL and ZFL.

@@ -1,5 +1,28 @@
 # ZenWave LSP — Agentic Coding Plan
 
+## Status
+
+Implementation status as of 2026-04-19:
+
+- Phase 1 complete: shared contracts, session store, facade, and cross-reference index foundations are in `lsp-core`
+- Phase 2 complete: ZDL language module is implemented
+- Phase 3 complete: canonical semantic pointer evaluator and YAML document model are implemented
+- Phase 4 complete: OpenAPI and AsyncAPI language modules are implemented
+- Phase 5 complete: Avro language module is implemented
+- Phase 6 complete: ZFL language module is implemented
+- Phase 7 complete: forward and reverse cross-reference indexing is implemented
+- Phase 8 complete: document routing and lightweight format detection are implemented
+- Phase 9 complete: diagnostics contracts now carry URI and normalized metadata
+- Phase 10 complete: JVM LSP transport is implemented in `lsp-jvm` using LSP4J
+- Phase 11 complete: architecture docs were aligned with the implemented server
+
+Current known follow-ups:
+
+- workspace identification is still deferred; activation remains extension plus lightweight content detection
+- ZDL cross-file definition remains deferred
+- ZFL diagnostics are intentionally thinner than ZDL/spec diagnostics
+- the build currently source-links selected `dsl-kotlin` common sources into `lsp-core` to work around composite-build visibility issues
+
 ## Goals
 
 Build a single multi-language LSP server supporting four language modules in one shared platform:
