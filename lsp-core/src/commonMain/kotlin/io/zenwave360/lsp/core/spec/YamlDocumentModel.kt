@@ -49,6 +49,27 @@ class YamlDocumentModel(
                     },
             )
 
+        fun fromRawModel(
+            uri: String,
+            rawModel: Any?,
+            rootLocations: Map<String, io.zenwave360.jsonrefparser.model.SourceLocation>,
+            documentLocations: Map<String, Map<String, io.zenwave360.jsonrefparser.model.SourceLocation>> = emptyMap(),
+            resolvedRefs: Map<String, String> = emptyMap(),
+            referenceTable: Map<String, String> = emptyMap(),
+        ): YamlDocumentModel {
+            val rootCanonicalTable = buildCanonicalLocationTable(rawModel, rootLocations)
+            return YamlDocumentModel(
+                uri = uri,
+                rawModel = rawModel,
+                locationTable = rootCanonicalTable,
+                resolvedRefs = resolvedRefs,
+                referenceTable = referenceTable,
+                documentLocationTables = documentLocations
+                    .mapValues { (documentUri, locations) -> buildCanonicalLocationTableForUri(documentUri, locations) }
+                    .ifEmpty { mapOf(uri to rootCanonicalTable) }
+            )
+        }
+
         private fun buildCanonicalLocationTable(
             rawModel: Any?,
             locations: Map<String, io.zenwave360.jsonrefparser.model.SourceLocation>,
