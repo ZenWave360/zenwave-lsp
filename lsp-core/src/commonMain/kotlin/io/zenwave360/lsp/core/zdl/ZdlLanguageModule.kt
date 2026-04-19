@@ -1,0 +1,130 @@
+package io.zenwave360.lsp.core.zdl
+
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.HierarchyNode
+import io.zenwave360.lsp.core.contracts.HoverResult
+import io.zenwave360.lsp.core.contracts.LanguageCapabilities
+import io.zenwave360.lsp.core.contracts.LanguageModule
+import io.zenwave360.lsp.core.contracts.NavigationTarget
+import io.zenwave360.lsp.core.contracts.ParseResult
+import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.model.SemanticModel
+import io.zenwave360.lsp.core.xref.CrossReferenceContribution
+
+class ZdlLanguageModule(
+    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter(),
+    private val hierarchyBuilder: ZdlHierarchyBuilder = ZdlHierarchyBuilder(),
+    private val crossReferenceContributor: ZdlCrossReferenceContributor = ZdlCrossReferenceContributor()
+) : LanguageModule {
+
+    override val languageId: String = "zdl"
+
+    override val capabilities: LanguageCapabilities =
+        LanguageCapabilities(
+            languageId = languageId,
+            extensions = listOf(".zdl"),
+            supportsHover = true,
+            supportsDefinition = true,
+            supportsCompletion = false,
+            supportsDiagnostics = true,
+            supportsHierarchy = true,
+            supportsReferences = true
+        )
+
+    override fun parse(snapshot: DocumentSnapshot): ParseResult {
+        val semanticModel = parseModel(snapshot)
+        return ParseResult(
+            semanticId = "${snapshot.ref.uri}#document",
+            model = semanticModel.asZdlMap(),
+            diagnostics = diagnostics(snapshot)
+        )
+    }
+
+    override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
+        val model = parseModel(snapshot).asZdlMap()
+        val problems = model["problems"].asList()
+        return problems.map { toDiagnostic(snapshot.ref.uri, it.asMap()) }
+    }
+
+    override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
+        val semanticModel = parseModel(snapshot)
+        val path = semanticModel.getLocation(position.line, position.character) ?: return null
+        val model = semanticModel.asZdlMap()
+        return HoverResult(
+            semanticId = zdlSemanticId(snapshot.ref.uri, path),
+            markdown = describeZdlNode(path, findNodeAtPath(model, path.substringBeforeLast('.', path))),
+            range = model.locationTable().findSource(snapshot.ref.uri, path).range
+        )
+    }
+
+    override fun definition(snapshot: DocumentSnapshot, position: Position): List<NavigationTarget> {
+        val semanticModel = parseModel(snapshot)
+        val path = semanticModel.getLocation(position.line, position.character) ?: return emptyList()
+        val model = semanticModel.asZdlMap()
+        val locations = model.locationTable()
+
+        val targetPath = resolveDefinitionPath(model, path) ?: return emptyList()
+        val targetLabel = targetPath.substringAfterLast('.')
+        return listOf(
+            NavigationTarget(
+                targetKind = "definition",
+                label = targetLabel,
+                uri = snapshot.ref.uri,
+                range = locations.findSource(snapshot.ref.uri, targetPath).range,
+                category = "zdl",
+                relationType = "declares"
+            )
+        )
+    }
+
+    override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
+        hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
+
+    override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
+        crossReferenceContributor.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
+
+    override fun canHandle(uri: String, text: String?): Boolean =
+        uri.endsWith(".zdl")
+
+    private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
+        parserAdapter.parse(snapshot.text)
+
+    private fun resolveDefinitionPath(model: Map<String, Any?>, path: String): String? {
+        val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)\.type$""").matchEntire(path)
+        if (fieldTypeMatch != null) {
+            val fieldPath = "${fieldTypeMatch.groupValues[1]}.${fieldTypeMatch.groupValues[2]}.fields.${fieldTypeMatch.groupValues[3]}"
+            val fieldMap = findNodeAtPath(model, fieldPath).asMap()
+            return resolveNamedType(model, fieldMap["type"].asString())
+        }
+
+        val serviceAggregateMatch = Regex("""^services\.([^.]+)\.aggregates(?:\.[^.]+)?$""").matchEntire(path)
+        if (serviceAggregateMatch != null) {
+            val service = model.mapAt("services")[serviceAggregateMatch.groupValues[1]].asMap()
+            val aggregateName = service["aggregates"].asList().firstOrNull().asString()
+            return aggregateName?.let { "entities.$it" }
+        }
+
+        val eventNameMatch = Regex("""^services\.([^.]+)\.methods\.([^.]+)\.withEvents(?:\.[^.]+)?$""").matchEntire(path)
+        if (eventNameMatch != null) {
+            val method = model.mapAt("services")[eventNameMatch.groupValues[1]].asMap()
+                .mapAt("methods")[eventNameMatch.groupValues[2]].asMap()
+            val eventName = method["withEvents"].asList().firstOrNull().asString()
+            return eventName?.let { "events.$it" }
+        }
+
+        return null
+    }
+
+    private fun resolveNamedType(model: Map<String, Any?>, typeName: String?): String? {
+        val name = typeName ?: return null
+        return when {
+            model.mapAt("entities").containsKey(name) -> "entities.$name"
+            model.mapAt("enums").containsKey(name) -> "enums.$name"
+            model.mapAt("inputs").containsKey(name) -> "inputs.$name"
+            model.mapAt("outputs").containsKey(name) -> "outputs.$name"
+            model.mapAt("events").containsKey(name) -> "events.$name"
+            else -> null
+        }
+    }
+}

@@ -70,6 +70,8 @@ $RECYCLE.BIN/
 ### LSP specific ###
 .lsp/
 logs/
+.gradle-logs/
+gradle-*.log
 
 ### Project specific ###
 !gradle/wrapper/gradle-wrapper.jar
