@@ -16,6 +16,8 @@ interface LanguageModule {
 
     fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode>
 
+    fun format(snapshot: DocumentSnapshot): String?
+
     fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution>
 
     fun canHandle(uri: String, text: String?): Boolean

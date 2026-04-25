@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.language.zfl.formatter.ZflFormatter
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
@@ -20,6 +21,7 @@ class ZflLanguageModule(
 
     private val hierarchyBuilder = ZflHierarchyBuilder()
     private val crossReferenceContributor = ZflCrossReferenceContributor()
+    private val formatter = ZflFormatter()
 
     override val languageId: String = "zfl"
 
@@ -32,7 +34,8 @@ class ZflLanguageModule(
             supportsCompletion = false,
             supportsDiagnostics = true,
             supportsHierarchy = true,
-            supportsReferences = true
+            supportsReferences = true,
+            supportsFormatting = true
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
@@ -104,6 +107,9 @@ class ZflLanguageModule(
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZflMap())
+
+    override fun format(snapshot: DocumentSnapshot): String =
+        formatter.format(snapshot.text)
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         crossReferenceContributor.build(snapshot.ref.uri, parseModel(snapshot).asZflMap())

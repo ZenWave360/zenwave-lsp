@@ -32,7 +32,8 @@ class AsyncApiLanguageModule(
             supportsCompletion = false,
             supportsDiagnostics = true,
             supportsHierarchy = true,
-            supportsReferences = true
+            supportsReferences = true,
+            supportsFormatting = false
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
@@ -57,6 +58,9 @@ class AsyncApiLanguageModule(
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(parseSpecDocument(snapshot).model)
+
+    override fun format(snapshot: DocumentSnapshot): String? =
+        null
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> {
         val model = parseSpecDocument(snapshot).model

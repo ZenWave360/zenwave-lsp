@@ -52,6 +52,9 @@ class ZenwaveLanguageServer(
     fun hierarchy(uri: String): List<HierarchyNode> =
         withModule(uri) { module, snapshot -> module.hierarchy(snapshot) } ?: emptyList()
 
+    fun format(uri: String): String? =
+        withModule(uri) { module, snapshot -> module.format(snapshot) }
+
     fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
         crossReferenceIndex.forwardReferences(uri, semanticId)
 

@@ -10,6 +10,7 @@ import org.eclipse.lsp4j.DiagnosticSeverity as LspDiagnosticSeverity
 import org.eclipse.lsp4j.Location
 import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
+import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range as LspRange
@@ -31,6 +32,9 @@ internal object DtoMapper {
 
     fun toHoverContent(markdown: String): MarkupContent =
         MarkupContent(MarkupKind.MARKDOWN, markdown)
+
+    fun toFullDocumentEdit(text: String, replacement: String): TextEdit =
+        TextEdit(fullDocumentRange(text), replacement)
 
     fun toLocation(target: NavigationTarget): Location? =
         toLspRange(target.range)?.let { range -> Location(target.uri, range) }
@@ -58,6 +62,16 @@ internal object DtoMapper {
             DiagnosticSeverity.INFO -> LspDiagnosticSeverity.Information
             DiagnosticSeverity.HINT -> LspDiagnosticSeverity.Hint
         }
+
+    private fun fullDocumentRange(text: String): LspRange {
+        val lines = text.split('\n')
+        val lastLineIndex = (lines.size - 1).coerceAtLeast(0)
+        val lastCharacter = lines.lastOrNull()?.length ?: 0
+        return LspRange(
+            LspPosition(0, 0),
+            LspPosition(lastLineIndex, lastCharacter)
+        )
+    }
 }
 
 data class HierarchyRequest(

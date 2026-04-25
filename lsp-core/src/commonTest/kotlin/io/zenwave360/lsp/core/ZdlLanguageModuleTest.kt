@@ -57,9 +57,15 @@ class ZdlLanguageModuleTest {
 
     @Test
     fun definitionResolvesFieldTypeWithinSameFile() {
-        val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", readTestFile("complete.zdl"))
-
-        val definition = module.definition(snapshot, Position(line = 82, character = 14))
+        val text = readTestFile("complete.zdl")
+        val lines = text.lines()
+        val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", text)
+        val targetLine = lines.indexOfFirst { it.contains("status OrderStatus = OrderStatus.RECEIVED required") }
+        val definition = (0..lines[targetLine].length)
+            .asSequence()
+            .map { character -> module.definition(snapshot, Position(line = targetLine, character = character)) }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
 
         assertEquals(1, definition.size)
         assertEquals("OrderStatus", definition.first().label)

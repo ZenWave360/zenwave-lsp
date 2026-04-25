@@ -10,6 +10,7 @@ import org.eclipse.lsp4j.DidChangeWatchedFilesParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DidSaveTextDocumentParams
+import org.eclipse.lsp4j.DocumentFormattingParams
 import org.eclipse.lsp4j.Hover
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
@@ -17,6 +18,7 @@ import org.eclipse.lsp4j.InitializeResult
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ServerCapabilities
 import org.eclipse.lsp4j.ServerInfo
+import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentSyncKind
 import org.eclipse.lsp4j.jsonrpc.messages.Either
@@ -137,6 +139,18 @@ class ZenwaveLspServer(
         return CompletableFuture.completedFuture(Either.forLeft(locations))
     }
 
+    override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> {
+        val uri = params.textDocument.uri
+        val current = documentTexts[uri] ?: return CompletableFuture.completedFuture(emptyList())
+        val formatted = server.format(uri) ?: return CompletableFuture.completedFuture(emptyList())
+        if (formatted == current) {
+            return CompletableFuture.completedFuture(emptyList())
+        }
+        return CompletableFuture.completedFuture(
+            listOf(DtoMapper.toFullDocumentEdit(current, formatted))
+        )
+    }
+
     override fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>> =
         CompletableFuture.completedFuture(
             server.hierarchy(request.uri).map { it.toDto() }
@@ -165,6 +179,7 @@ class ZenwaveLspServer(
             setHoverProvider(moduleCapabilities.any { it.supportsHover })
             setDefinitionProvider(moduleCapabilities.any { it.supportsDefinition })
             setReferencesProvider(moduleCapabilities.any { it.supportsReferences })
+            documentFormattingProvider = Either.forLeft(moduleCapabilities.any { it.supportsFormatting })
             experimental = mapOf(
                 "moduleSelectors" to moduleCapabilities.map {
                     ModuleSelector(

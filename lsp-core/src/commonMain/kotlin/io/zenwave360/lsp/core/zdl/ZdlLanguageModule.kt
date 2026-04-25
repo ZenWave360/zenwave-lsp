@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.zdl
 
+import io.zenwave360.language.zdl.formatter.ZdlFormatter
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
@@ -18,6 +19,7 @@ class ZdlLanguageModule(
 
     private val hierarchyBuilder = ZdlHierarchyBuilder()
     private val crossReferenceContributor = ZdlCrossReferenceContributor()
+    private val formatter = ZdlFormatter()
 
     override val languageId: String = "zdl"
 
@@ -30,7 +32,8 @@ class ZdlLanguageModule(
             supportsCompletion = false,
             supportsDiagnostics = true,
             supportsHierarchy = true,
-            supportsReferences = true
+            supportsReferences = true,
+            supportsFormatting = true
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
@@ -50,7 +53,7 @@ class ZdlLanguageModule(
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val semanticModel = parseModel(snapshot)
-        val path = semanticModel.getLocation(position.line, position.character) ?: return null
+        val path = resolvePathAtPosition(snapshot, semanticModel, position) ?: return null
         val model = semanticModel.asZdlMap()
         return HoverResult(
             semanticId = zdlSemanticId(snapshot.ref.uri, path),
@@ -61,11 +64,13 @@ class ZdlLanguageModule(
 
     override fun definition(snapshot: DocumentSnapshot, position: Position): List<NavigationTarget> {
         val semanticModel = parseModel(snapshot)
-        val path = semanticModel.getLocation(position.line, position.character) ?: return emptyList()
+        val path = resolvePathAtPosition(snapshot, semanticModel, position)
         val model = semanticModel.asZdlMap()
         val locations = model.locationTable()
 
-        val targetPath = resolveDefinitionPath(model, path) ?: return emptyList()
+        val targetPath = path?.let { resolveDefinitionPath(model, it) }
+            ?: resolveNamedType(model, tokenAtPosition(snapshot.text, position))
+            ?: return emptyList()
         val targetLabel = targetPath.substringAfterLast('.')
         return listOf(
             NavigationTarget(
@@ -82,6 +87,9 @@ class ZdlLanguageModule(
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
 
+    override fun format(snapshot: DocumentSnapshot): String =
+        formatter.format(snapshot.text)
+
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         crossReferenceContributor.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
 
@@ -91,8 +99,58 @@ class ZdlLanguageModule(
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
 
+    private fun resolvePathAtPosition(
+        snapshot: DocumentSnapshot,
+        semanticModel: SemanticModel,
+        position: Position
+    ): String? {
+        semanticModel.getLocation(position.line, position.character)?.let { return it }
+
+        val lineText = snapshot.text.lineSequence().elementAtOrNull(position.line) ?: return null
+        val maxCharacter = lineText.length
+        for (delta in 1..maxCharacter) {
+            val left = position.character - delta
+            if (left >= 0) {
+                semanticModel.getLocation(position.line, left)?.let { return it }
+            }
+            val right = position.character + delta
+            if (right <= maxCharacter) {
+                semanticModel.getLocation(position.line, right)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun tokenAtPosition(text: String, position: Position): String? {
+        val line = text.lines().getOrNull(position.line) ?: return null
+        if (line.isEmpty()) return null
+
+        val candidates = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
+            .findAll(line)
+            .map { match ->
+                Triple(match.value, match.range.first, match.range.last + 1)
+            }
+            .toList()
+
+        if (candidates.isEmpty()) return null
+
+        val exact = candidates.firstOrNull { (_, start, end) ->
+            position.character in start until end
+        }
+        if (exact != null) return exact.first
+
+        return candidates
+            .minByOrNull { (_, start, end) ->
+                minOf(
+                    kotlin.math.abs(position.character - start),
+                    kotlin.math.abs(position.character - (end - 1))
+                )
+            }
+            ?.first
+    }
+
     private fun resolveDefinitionPath(model: Map<String, Any?>, path: String): String? {
-        val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)\.type$""").matchEntire(path)
+        val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)(?:\.type)?$""").matchEntire(path)
         if (fieldTypeMatch != null) {
             val fieldPath = "${fieldTypeMatch.groupValues[1]}.${fieldTypeMatch.groupValues[2]}.fields.${fieldTypeMatch.groupValues[3]}"
             val fieldMap = findNodeAtPath(model, fieldPath).asMap()

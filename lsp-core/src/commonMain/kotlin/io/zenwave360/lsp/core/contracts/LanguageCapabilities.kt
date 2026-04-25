@@ -8,5 +8,6 @@ data class LanguageCapabilities(
     val supportsCompletion: Boolean,
     val supportsDiagnostics: Boolean,
     val supportsHierarchy: Boolean,
-    val supportsReferences: Boolean
+    val supportsReferences: Boolean,
+    val supportsFormatting: Boolean
 )

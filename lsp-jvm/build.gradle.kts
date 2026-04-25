@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm")
+    `maven-publish`
     application
 }
 
@@ -18,6 +19,23 @@ kotlin {
     jvmToolchain(21)
 }
 
+java {
+    withSourcesJar()
+}
+
 application {
     mainClass.set("io.zenwave360.lsp.jvm.MainKt")
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("mavenJvm") {
+            from(components["java"])
+            artifactId = "lsp-jvm"
+            pom {
+                name.set("ZenWave LSP JVM")
+                description.set("JVM LSP4J transport for the ZenWave shared language server core")
+            }
+        }
+    }
 }

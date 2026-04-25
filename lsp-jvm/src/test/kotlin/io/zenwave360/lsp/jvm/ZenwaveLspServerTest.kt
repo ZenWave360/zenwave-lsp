@@ -1,6 +1,8 @@
 package io.zenwave360.lsp.jvm
 
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DocumentFormattingParams
+import org.eclipse.lsp4j.FormattingOptions
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.MessageActionItem
@@ -30,6 +32,7 @@ class ZenwaveLspServerTest {
         assertEquals(TextDocumentSyncKind.Incremental, result.capabilities.textDocumentSync.left)
         assertTrue(result.capabilities.hoverProvider.left)
         assertTrue(result.capabilities.definitionProvider.left)
+        assertTrue(result.capabilities.documentFormattingProvider.left)
     }
 
     @Test
@@ -99,6 +102,59 @@ class ZenwaveLspServerTest {
 
         assertTrue(hierarchy.isNotEmpty())
         assertTrue(hierarchy.any { it.id.contains("#entities.CustomerOrder") || it.children.any { child -> child.id.contains("#entities.CustomerOrder") } })
+    }
+
+    @Test
+    fun formattingReturnsWholeDocumentEditForZdl() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/format-me.zdl",
+                    "zdl",
+                    1,
+                    "entity   Customer {\nfirstName   String   required\n}\n"
+                )
+            )
+        )
+
+        val edits = server.formatting(
+            DocumentFormattingParams(
+                TextDocumentIdentifier("file:///workspace/format-me.zdl"),
+                FormattingOptions(4, true)
+            )
+        ).get()
+
+        assertEquals(1, edits.size)
+        assertEquals("entity Customer {\n    firstName String required\n}\n", edits.single().newText)
+        assertEquals(0, edits.single().range.start.line)
+        assertEquals(0, edits.single().range.start.character)
+        assertEquals(3, edits.single().range.end.line)
+        assertEquals(0, edits.single().range.end.character)
+    }
+
+    @Test
+    fun formattingReturnsEmptyEditsWhenLanguageDoesNotSupportFormatting() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/schema.avsc",
+                    "avro",
+                    1,
+                    "{ \"type\": \"record\", \"name\": \"Sample\", \"fields\": [] }\n"
+                )
+            )
+        )
+
+        val edits = server.formatting(
+            DocumentFormattingParams(
+                TextDocumentIdentifier("file:///workspace/schema.avsc"),
+                FormattingOptions(4, true)
+            )
+        ).get()
+
+        assertTrue(edits.isEmpty())
     }
 
     private fun readTestResource(name: String): String =

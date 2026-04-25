@@ -30,7 +30,8 @@ class AvroLanguageModule(
             supportsCompletion = false,
             supportsDiagnostics = true,
             supportsHierarchy = true,
-            supportsReferences = true
+            supportsReferences = true,
+            supportsFormatting = false
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
@@ -134,6 +135,9 @@ class AvroLanguageModule(
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(parseModel(snapshot))
+
+    override fun format(snapshot: DocumentSnapshot): String? =
+        null
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         emptyList()

@@ -105,6 +105,9 @@ class PlatformContractsTest {
         assertEquals(1, hierarchy.size)
         assertEquals("${snapshot.ref.uri}#entities.Order", hierarchy.first().id)
 
+        val formatted = server.format(snapshot.ref.uri)
+        assertEquals("entity Order {\n    status String\n}\n", formatted)
+
         val refs = server.forwardReferences(snapshot.ref.uri, "${snapshot.ref.uri}#entities.Order")
         assertEquals(1, refs.size)
         assertEquals("asyncapi.yml", refs.first().label)
@@ -129,7 +132,8 @@ private class FakeLanguageModule : LanguageModule {
             supportsCompletion = false,
             supportsDiagnostics = true,
             supportsHierarchy = true,
-            supportsReferences = true
+            supportsReferences = true,
+            supportsFormatting = true
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult =
@@ -183,6 +187,9 @@ private class FakeLanguageModule : LanguageModule {
                 children = emptyList()
             )
         )
+
+    override fun format(snapshot: DocumentSnapshot): String =
+        "entity Order {\n    status String\n}\n"
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         listOf(
