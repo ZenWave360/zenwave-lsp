@@ -1,5 +1,5 @@
 plugins {
-    kotlin("js")
+    kotlin("multiplatform")
 }
 
 kotlin {
@@ -26,16 +26,22 @@ kotlin {
             customField("types", "lsp-js.d.ts")
         }
     }
+
+    sourceSets {
+        val jsMain by getting {
+            dependencies {
+                implementation(projects.lspCore)
+                implementation(kotlin("stdlib-js"))
+
+                // VSCode Language Server Protocol for Node.js
+                implementation(npm("vscode-languageserver", "8.1.0"))
+            }
+        }
+
+        val jsTest by getting {
+            dependencies {
+                implementation(kotlin("test-js"))
+            }
+        }
+    }
 }
-
-dependencies {
-    implementation(projects.lspCore)
-
-    implementation(kotlin("stdlib-js"))
-
-    // VSCode Language Server Protocol for Node.js
-    implementation(npm("vscode-languageserver", "8.1.0"))
-
-    testImplementation(kotlin("test-js"))
-}
-

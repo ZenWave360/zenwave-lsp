@@ -56,7 +56,7 @@ internal fun parseSpecDocument(snapshot: DocumentSnapshot): SpecDocument {
 internal fun detectSpecFile(uri: String, text: String?, topLevelKey: String): Boolean {
     if (!uri.endsWith(".yml") && !uri.endsWith(".yaml") && !uri.endsWith(".json")) return false
     val content = text ?: return false
-    val yamlPattern = Regex("(?m)^\\s*$topLevelKey\\s*:")
+    val yamlPattern = Regex("^\\s*$topLevelKey\\s*:", setOf(RegexOption.MULTILINE))
     val jsonPattern = Regex("\"$topLevelKey\"\\s*:")
     return yamlPattern.containsMatchIn(content) || jsonPattern.containsMatchIn(content)
 }
@@ -264,8 +264,15 @@ private fun findUnresolvedRefs(node: Any?, path: String = "$"): Map<String, Stri
 private fun loadExternalModel(uri: String): YamlDocumentModel? =
     runCatching { YamlDocumentModel.fromParsedDocument(uri, SpecParserBridge.parseUri(uri)) }.getOrNull()
 
-private fun loadExternalLocation(uri: String, path: String): SourceLocation? =
-    loadExternalModel(uri)?.locationOf(uri, path) ?: loadExternalModel(uri)?.locationOf(path)
+private fun loadExternalLocation(uri: String, path: String): SourceLocation? {
+    val normalizedPath = when {
+        path.isBlank() -> "$"
+        path.startsWith("$") -> path
+        else -> "$.$path"
+    }
+    return loadExternalModel(uri)?.locationOf(uri, normalizedPath)
+        ?: loadExternalModel(uri)?.locationOf(normalizedPath)
+}
 
 internal fun rootLocation(uri: String) =
     SourceLocation(uri = uri, range = Range(Position(0, 0), Position(0, 0)))

@@ -38,8 +38,7 @@ kotlin {
             dependencies {
                 implementation(kotlin("stdlib-common"))
 
-                // DSL Kotlin parsers for ZDL and ZFL languages
-                implementation("io.zenwave360.dsl:dsl-kotlin:1.7.0-SNAPSHOT")
+                // DSL Kotlin parser sources are compiled directly via srcDir above.
                 implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.1.0-SNAPSHOT")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
@@ -74,6 +73,7 @@ kotlin {
         val jsMain by getting {
             dependencies {
                 implementation(kotlin("stdlib-js"))
+                implementation("org.jetbrains.kotlin-wrappers:kotlin-node:18.16.12-pre.610")
             }
         }
 

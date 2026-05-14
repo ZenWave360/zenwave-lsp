@@ -1,19 +1,23 @@
 package io.zenwave360.lsp.core.zfl
 
 import io.zenwave360.lsp.core.contracts.HierarchyNode
+import io.zenwave360.lsp.core.contracts.NavigationTarget
 
-internal class ZflHierarchyBuilder {
+internal class ZflHierarchyBuilder(
+    private val enricher: ZflModelEnricher = ZflModelEnricher()
+) {
     fun build(uri: String, model: Map<String, Any?>): List<HierarchyNode> {
         val locations = model.locationTable()
+        val enriched = enricher.enrich(uri, model)
         return listOfNotNull(
-            buildSystemsSection(uri, model.mapAt("systems"), locations),
-            buildFlowsSection(uri, model.mapAt("flows"), locations)
+            buildSystemsSection(uri, enriched.systems, locations),
+            buildFlowsSection(uri, enriched.flows, locations)
         )
     }
 
     private fun buildSystemsSection(
         uri: String,
-        systems: Map<String, Any?>,
+        systems: List<EnrichedSystem>,
         locations: Map<String, IntArray>,
     ): HierarchyNode? {
         if (systems.isEmpty()) return null
@@ -23,24 +27,54 @@ internal class ZflHierarchyBuilder {
             kind = "section",
             language = "zfl",
             source = locations.findSource(uri, "systems"),
-            children = systems.entries.map { (name, rawSystem) ->
-                val system = rawSystem.asZflMap()
+            children = systems.map { system ->
                 HierarchyNode(
-                    id = zflSemanticId(uri, "systems.$name"),
-                    label = name,
+                    id = zflSemanticId(uri, system.sourcePath),
+                    label = system.name,
                     kind = "system",
                     language = "zfl",
-                    source = locations.findSource(uri, "systems.$name"),
-                    children = system.mapAt("services").entries.map { (serviceName, rawService) ->
+                    source = locations.findSource(uri, system.sourcePath),
+                    children = system.services.map { service ->
                         HierarchyNode(
-                            id = zflSemanticId(uri, "systems.$name.services.$serviceName"),
-                            label = serviceName,
+                            id = zflSemanticId(uri, service.sourcePath),
+                            label = service.name,
                             kind = "service",
                             language = "zfl",
-                            source = locations.findSource(uri, "systems.$name.services.$serviceName"),
-                            children = emptyList()
+                            source = locations.findSource(uri, service.sourcePath),
+                            uiHints = buildMap {
+                                if (service.aggregates.isNotEmpty()) {
+                                    put("aggregates", service.aggregates.joinToString(","))
+                                }
+                            },
+                            children = service.commands.map { command ->
+                                HierarchyNode(
+                                    id = zflSemanticId(uri, "${service.sourcePath}.commands.${command.name}"),
+                                    label = command.name,
+                                    kind = "command",
+                                    language = "zfl",
+                                    source = locations.findSource(uri, command.sourcePath),
+                                    uiHints = buildMap {
+                                        if (command.events.isNotEmpty()) {
+                                            put("events", command.events.joinToString(","))
+                                        }
+                                    },
+                                    children = emptyList()
+                                )
+                            }
                         )
-                    }
+                    },
+                    relatedResources = system.zdlUri?.let { zdlUri ->
+                        listOf(
+                            NavigationTarget(
+                                targetKind = "related",
+                                label = zdlUri.substringAfterLast('/'),
+                                uri = zdlUri,
+                                range = null,
+                                category = "zdl",
+                                relationType = "declares-domain"
+                            )
+                        )
+                    }.orEmpty()
                 )
             }
         )
@@ -48,7 +82,7 @@ internal class ZflHierarchyBuilder {
 
     private fun buildFlowsSection(
         uri: String,
-        flows: Map<String, Any?>,
+        flows: List<EnrichedFlow>,
         locations: Map<String, IntArray>,
     ): HierarchyNode? {
         if (flows.isEmpty()) return null
@@ -58,42 +92,37 @@ internal class ZflHierarchyBuilder {
             kind = "section",
             language = "zfl",
             source = locations.findSource(uri, "flows"),
-            children = flows.entries.map { (flowName, rawFlow) ->
-                val flow = rawFlow.asZflMap()
-                val startNodes = flow.mapAt("starts").entries.map { (startName, _) ->
+            children = flows.map { flow ->
+                val startNodes = flow.starts.map { startName ->
                     HierarchyNode(
-                        id = zflSemanticId(uri, "flows.$flowName.starts.$startName"),
+                        id = zflSemanticId(uri, "${flow.sourcePath}.starts.$startName"),
                         label = startName,
                         kind = "start",
                         language = "zfl",
-                        source = locations.findSource(uri, "flows.$flowName.starts.$startName"),
+                        source = locations.findSource(uri, "${flow.sourcePath}.starts.$startName"),
                         children = emptyList()
                     )
                 }
-                val whenNodes = flow["whens"].asZflList().mapIndexed { index, rawWhen ->
-                    val whenModel = rawWhen.asZflMap()
-                    val triggers = whenModel["triggers"].asZflList().mapNotNull { it.asZflString() }
-                    val commandName = whenModel["command"].asZflString()
-                    val eventNodes = whenModel["events"].asZflList().mapNotNull { rawEvent ->
-                        val eventName = rawEvent.asZflString() ?: return@mapNotNull null
+                val whenNodes = flow.whens.map { whenBlock ->
+                    val eventNodes = whenBlock.events.map { eventName ->
                         HierarchyNode(
-                            id = zflSemanticId(uri, "flows.$flowName.events.$eventName"),
+                            id = zflSemanticId(uri, "${whenBlock.sourcePath}.events.$eventName"),
                             label = eventName,
                             kind = "event",
                             language = "zfl",
-                            source = locations.findSource(uri, "flows.$flowName.whens[$index].events.$eventName"),
+                            source = locations.findSource(uri, "${whenBlock.sourcePath}.events.$eventName"),
                             children = emptyList()
                         )
                     }
                     val policyChildren = buildList {
-                        if (commandName != null) {
+                        whenBlock.service?.let { serviceRef ->
                             add(
                                 HierarchyNode(
-                                    id = zflSemanticId(uri, "flows.$flowName.commands.$commandName"),
-                                    label = commandName,
-                                    kind = "command",
+                                    id = zflSemanticId(uri, "${whenBlock.sourcePath}.service"),
+                                    label = serviceRef,
+                                    kind = "service",
                                     language = "zfl",
-                                    source = locations.findSource(uri, "flows.$flowName.whens[$index].command"),
+                                    source = locations.findSource(uri, "${whenBlock.sourcePath}.service"),
                                     children = emptyList()
                                 )
                             )
@@ -101,34 +130,52 @@ internal class ZflHierarchyBuilder {
                         addAll(eventNodes)
                     }
                     HierarchyNode(
-                        id = zflSemanticId(uri, "flows.$flowName.whens[$index]"),
-                        label = "when ${triggers.joinToString(" and ")}",
+                        id = zflSemanticId(uri, whenBlock.sourcePath),
+                        label = whenBlock.triggers.joinToString(" and "),
                         kind = "policy",
                         language = "zfl",
-                        source = locations.findSource(uri, "flows.$flowName.whens[$index]"),
+                        source = locations.findSource(uri, whenBlock.sourcePath),
+                        uiHints = buildMap {
+                            whenBlock.command?.takeIf { it.isNotBlank() }?.let { put("command", it) }
+                            if (whenBlock.triggers.isNotEmpty()) {
+                                put("triggers", whenBlock.triggers.joinToString(","))
+                            }
+                        },
                         children = policyChildren
                     )
                 }
-                val endNode = if (flow["end"].asZflMap().isNotEmpty()) {
-                    listOf(
+                val endNode = HierarchyNode(
+                    id = zflSemanticId(uri, flow.end.sourcePath),
+                    label = "end",
+                    kind = "end",
+                    language = "zfl",
+                    source = locations.findSource(uri, flow.end.sourcePath),
+                    children = flow.end.outcomes.entries.map { (outcomeName, events) ->
                         HierarchyNode(
-                            id = zflSemanticId(uri, "flows.$flowName.end"),
-                            label = "end",
-                            kind = "end",
+                            id = zflSemanticId(uri, "${flow.end.sourcePath}.$outcomeName"),
+                            label = outcomeName,
+                            kind = "outcome",
                             language = "zfl",
-                            source = locations.findSource(uri, "flows.$flowName.end"),
-                            children = emptyList()
+                            source = locations.findSource(uri, "${flow.end.sourcePath}.$outcomeName"),
+                            children = events.map { eventName ->
+                                HierarchyNode(
+                                    id = zflSemanticId(uri, "${flow.end.sourcePath}.$outcomeName.$eventName"),
+                                    label = eventName,
+                                    kind = "event",
+                                    language = "zfl",
+                                    source = locations.findSource(uri, "${flow.end.sourcePath}.$outcomeName.$eventName"),
+                                    children = emptyList()
+                                )
+                            }
                         )
-                    )
-                } else {
-                    emptyList()
-                }
+                    }
+                )
                 HierarchyNode(
-                    id = zflSemanticId(uri, "flows.$flowName"),
-                    label = flowName,
+                    id = zflSemanticId(uri, flow.sourcePath),
+                    label = flow.name,
                     kind = "flow",
                     language = "zfl",
-                    source = locations.findSource(uri, "flows.$flowName"),
+                    source = locations.findSource(uri, flow.sourcePath),
                     children = startNodes + whenNodes + endNode
                 )
             }

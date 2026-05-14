@@ -24,9 +24,9 @@ class CrossReferenceIntegrationTest {
             crossReferenceIndex = InMemoryCrossReferenceIndex()
         )
 
-        val zdlUri = "file:///workspace/models/orders.zdl"
-        val asyncApiUri = "file:///workspace/models/orders/src/main/resources/apis/asyncapi.yml"
-        val avroUri = "file:///workspace/models/orders/src/main/resources/apis/order-event.avsc"
+        val avroUri = writeTestFile("models/orders/src/main/resources/apis/order-event.avsc", avroText)
+        val asyncApiUri = writeTestFile("models/orders/src/main/resources/apis/asyncapi.yml", asyncApiText(avroUri))
+        val zdlUri = writeTestFile("models/orders.zdl", readTestFile("complete.zdl"))
         val zdlSnapshot = snapshot(zdlUri, "zdl", readTestFile("complete.zdl"))
         val asyncApiSnapshot = snapshot(asyncApiUri, "asyncapi", asyncApiText(avroUri))
         val avroSnapshot = snapshot(avroUri, "avro", avroText)

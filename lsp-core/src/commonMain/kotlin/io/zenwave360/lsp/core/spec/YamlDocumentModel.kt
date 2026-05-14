@@ -203,7 +203,7 @@ class YamlDocumentModel(
         private fun canonicalTarget(ref: String, baseUri: String, targetUriHint: String? = null): String? {
             val hashIndex = ref.indexOf('#')
             val rawUri = when {
-                targetUriHint != null -> RefParser.normalizeUri(targetUriHint)
+                targetUriHint != null -> RefParser.normalizeUri(targetUriHint.substringBefore('#'))
                 hashIndex == 0 -> RefParser.normalizeUri(baseUri)
                 hashIndex > 0 -> resolveRelativeUri(baseUri, ref.substring(0, hashIndex))
                 ref.isBlank() -> RefParser.normalizeUri(baseUri)

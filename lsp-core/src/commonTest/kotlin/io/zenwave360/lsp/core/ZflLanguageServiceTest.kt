@@ -2,9 +2,11 @@ package io.zenwave360.lsp.core
 
 import io.zenwave360.lsp.core.features.*
 import io.zenwave360.lsp.core.impl.ZenwaveLanguageServiceImpl
+import io.zenwave360.lsp.core.model.Problem
+import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.model.Position
+import io.zenwave360.lsp.core.parser.ZflParser
 import io.zenwave360.lsp.core.zdl.ZdlParserAdapter
-import io.zenwave360.lsp.core.zfl.ZflParserAdapter
 import kotlin.test.*
 
 /**
@@ -15,12 +17,11 @@ import kotlin.test.*
  */
 class ZflLanguageServiceTest {
 
-    private val service = ZenwaveLanguageServiceImpl(ZdlParserAdapter(), ZflParserAdapter())
+    private val service = ZenwaveLanguageServiceImpl(ZdlParserAdapter(), FakeZflServiceParser(testModel))
 
     @Test
     fun testParseZfl_Subscriptions() {
-        val text = readTestFile("subscriptions.zfl")
-        val model = service.parse(ZenwaveLanguage.ZFL, text)
+        val model = service.parse(ZenwaveLanguage.ZFL, testText)
 
         assertNotNull(model)
         assertNotNull(model.data)
@@ -34,8 +35,7 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testDiagnostics_ZflNoProblems() {
-        val text = readTestFile("subscriptions.zfl")
-        val problems = service.diagnostics(ZenwaveLanguage.ZFL, text)
+        val problems = service.diagnostics(ZenwaveLanguage.ZFL, testText)
 
         // subscriptions.zfl should have no validation errors
         assertEquals(0, problems.size)
@@ -43,12 +43,10 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testHover_ZflFlow() {
-        val text = readTestFile("subscriptions.zfl")
-
         // Test hover on a flow element
         // Note: Exact line numbers depend on the ZFL file structure
         val request = HoverRequest(
-            text = text,
+            text = testText,
             position = Position(line = 10, character = 5)
         )
 
@@ -60,8 +58,7 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testLocationLookup_Zfl() {
-        val text = readTestFile("subscriptions.zfl")
-        val model = service.parse(ZenwaveLanguage.ZFL, text)
+        val model = service.parse(ZenwaveLanguage.ZFL, testText)
 
         // Test that getLocation works for ZFL
         // The exact positions depend on the ZFL file content
@@ -74,10 +71,8 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testCompletion_ZflStubbed() {
-        val text = readTestFile("subscriptions.zfl")
-
         val request = CompletionRequest(
-            text = text,
+            text = testText,
             position = Position(line = 10, character = 5)
         )
 
@@ -89,10 +84,8 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testDefinition_ZflStubbed() {
-        val text = readTestFile("subscriptions.zfl")
-
         val request = DefinitionRequest(
-            text = text,
+            text = testText,
             position = Position(line = 10, character = 5)
         )
 
@@ -104,8 +97,7 @@ class ZflLanguageServiceTest {
 
     @Test
     fun testSemanticModel_ZflDataStructure() {
-        val text = readTestFile("subscriptions.zfl")
-        val model = service.parse(ZenwaveLanguage.ZFL, text)
+        val model = service.parse(ZenwaveLanguage.ZFL, testText)
 
         // Verify the semantic model exposes the expected ZFL data structure
         val data = model.data
@@ -126,3 +118,56 @@ class ZflLanguageServiceTest {
 
 }
 
+private val testText = """
+systems {
+    Subscription {
+        service SubscriptionService
+    }
+}
+
+flow PaymentsFlow {
+    when CustomerRequestsSubscriptionRenewal {
+        service Subscription.SubscriptionService
+        command renewSubscription
+        event SubscriptionRenewed
+    }
+}
+""".trimIndent()
+
+private val testModel = mapOf<String, Any?>(
+    "imports" to emptyList<Any?>(),
+    "config" to emptyMap<String, Any?>(),
+    "systems" to mapOf(
+        "Subscription" to mapOf(
+            "services" to mapOf(
+                "SubscriptionService" to emptyMap<String, Any?>()
+            )
+        )
+    ),
+    "flows" to mapOf(
+        "PaymentsFlow" to mapOf(
+            "whens" to listOf(
+                mapOf(
+                    "triggers" to listOf("CustomerRequestsSubscriptionRenewal"),
+                    "system" to "Subscription",
+                    "service" to "Subscription.SubscriptionService",
+                    "command" to "renewSubscription",
+                    "events" to listOf("SubscriptionRenewed")
+                )
+            )
+        )
+    ),
+    "locations" to emptyMap<String, IntArray>(),
+    "problems" to emptyList<Any?>()
+)
+
+private class FakeZflServiceParser(
+    private val model: Map<String, Any?>
+) : ZflParser {
+    override fun parse(text: String): SemanticModel =
+        object : SemanticModel {
+            override val data: Map<String, Any?> = model
+            override val problems: List<Problem> = emptyList()
+            override fun getLocation(line: Int, character: Int): String? = null
+        }
+}

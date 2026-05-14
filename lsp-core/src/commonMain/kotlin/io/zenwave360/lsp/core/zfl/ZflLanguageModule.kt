@@ -13,10 +13,11 @@ import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.SemanticModel
+import io.zenwave360.lsp.core.parser.ZflParser
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 class ZflLanguageModule(
-    private val parserAdapter: ZflParserAdapter = ZflParserAdapter()
+    private val parserAdapter: ZflParser = ZflParserAdapter()
 ) : LanguageModule {
 
     private val hierarchyBuilder = ZflHierarchyBuilder()

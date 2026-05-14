@@ -37,7 +37,7 @@ internal fun Map<String, IntArray>.findSource(uri: String, semanticPath: String)
     val fallbackKeys = buildList {
         add(semanticPath)
         add(semanticPath.substringAfter("flows.", semanticPath).substringAfter('.', semanticPath))
-        val whenIndex = Regex("""^flows\.[^.]+\.whens\[(\d+)]""").find(semanticPath)?.groupValues?.get(1)
+        val whenIndex = Regex("""^flows\.[^.]+\.whens\[(\d+)\]""").find(semanticPath)?.groupValues?.get(1)
         if (whenIndex != null) {
             add("whens[$whenIndex]")
         }
