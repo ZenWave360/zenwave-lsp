@@ -55,6 +55,11 @@ class ZenwaveLanguageServer(
     fun format(uri: String): String? =
         withModule(uri) { module, snapshot -> module.format(snapshot) }
 
+    fun organizeZflServices(uri: String): String? =
+        withModule(uri) { module, snapshot ->
+            (module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot)
+        }
+
     fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
         crossReferenceIndex.forwardReferences(uri, semanticId)
 

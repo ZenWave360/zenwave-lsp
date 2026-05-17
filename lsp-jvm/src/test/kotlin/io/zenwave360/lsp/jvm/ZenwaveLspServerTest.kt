@@ -19,6 +19,7 @@ import java.util.concurrent.CompletableFuture
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ZenwaveLspServerTest {
@@ -155,6 +156,80 @@ class ZenwaveLspServerTest {
         ).get()
 
         assertTrue(edits.isEmpty())
+    }
+
+    @Test
+    fun organizeZflServicesReturnsWholeDocumentRewrite() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/organize-me.zfl",
+                    "zfl",
+                    1,
+                    """
+                    flow CheckoutFlow {
+                        when CheckoutStarted do createOrder {
+                            service Orders / OrdersService / Order
+                            emits OrderCreated
+                        }
+                    }
+                    """.trimIndent()
+                )
+            )
+        )
+
+        val organized = server.organizeZflServices(
+            OrganizeZflServicesRequest("file:///workspace/organize-me.zfl")
+        ).get()
+
+        assertEquals(
+            """
+            systems {
+                Orders {
+                    service OrdersService for(Order) {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                when CheckoutStarted do createOrder {
+                    service Orders / OrdersService / Order
+                    emits OrderCreated
+                }
+            }
+            """.trimIndent() + "\n",
+            organized
+        )
+    }
+
+    @Test
+    fun organizeZflServicesReturnsNullWhenDiagnosticsContainErrors() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/bad-organize.zfl",
+                    "zfl",
+                    1,
+                    """
+                    flow CheckoutFlow {
+                        when CheckoutStarted do createOrder {
+                            service Orders..Order
+                            emits OrderCreated
+                        }
+                    }
+                    """.trimIndent()
+                )
+            )
+        )
+
+        val organized = server.organizeZflServices(
+            OrganizeZflServicesRequest("file:///workspace/bad-organize.zfl")
+        ).get()
+
+        assertNull(organized)
     }
 
     private fun readTestResource(name: String): String =

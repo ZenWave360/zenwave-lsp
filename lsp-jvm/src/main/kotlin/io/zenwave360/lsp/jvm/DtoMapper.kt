@@ -83,6 +83,10 @@ data class SemanticReferenceRequest(
     val semanticId: String
 )
 
+data class OrganizeZflServicesRequest(
+    val uri: String
+)
+
 data class ModuleSelector(
     val languageId: String,
     val extensions: List<String>

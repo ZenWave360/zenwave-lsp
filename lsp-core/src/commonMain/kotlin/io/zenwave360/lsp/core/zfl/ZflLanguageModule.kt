@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.language.zfl.ZflParser as DslZflParser
 import io.zenwave360.language.zfl.formatter.ZflFormatter
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
@@ -111,6 +112,14 @@ class ZflLanguageModule(
 
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
+
+    fun organizeServices(snapshot: DocumentSnapshot): String? {
+        val diagnostics = diagnostics(snapshot)
+        if (diagnostics.any { it.severity == DiagnosticSeverity.ERROR }) {
+            return null
+        }
+        return DslZflParser().organizeSystems(snapshot.text)
+    }
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         crossReferenceContributor.build(snapshot.ref.uri, parseModel(snapshot).asZflMap())

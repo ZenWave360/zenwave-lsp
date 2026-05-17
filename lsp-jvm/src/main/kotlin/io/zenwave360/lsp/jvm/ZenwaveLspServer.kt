@@ -39,6 +39,9 @@ interface ZenwaveCustomRequests {
 
     @JsonRequest("zenwave/reverseReferences")
     fun reverseReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>>
+
+    @JsonRequest("zenwave/organizeZflServices")
+    fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?>
 }
 
 class ZenwaveLspServer(
@@ -166,6 +169,11 @@ class ZenwaveLspServer(
             server.reverseReferences(request.uri, request.semanticId)
         )
 
+    override fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?> =
+        CompletableFuture.completedFuture(
+            server.organizeZflServices(request.uri)
+        )
+
     override fun didChangeConfiguration(params: DidChangeConfigurationParams) {
     }
 
@@ -190,7 +198,8 @@ class ZenwaveLspServer(
                 "customRequests" to listOf(
                     "zenwave/hierarchy",
                     "zenwave/forwardReferences",
-                    "zenwave/reverseReferences"
+                    "zenwave/reverseReferences",
+                    "zenwave/organizeZflServices"
                 )
             )
         }
