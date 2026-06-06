@@ -1,7 +1,18 @@
 package io.zenwave360.lsp.jvm
 
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DocumentRef
+import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.HierarchyNode
+import io.zenwave360.lsp.core.contracts.HoverResult
+import io.zenwave360.lsp.core.contracts.LanguageCapabilities
+import io.zenwave360.lsp.core.contracts.LanguageModule
+import io.zenwave360.lsp.core.contracts.NavigationTarget
+import io.zenwave360.lsp.core.contracts.ParseResult
+import io.zenwave360.lsp.core.contracts.SourceLocation
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DocumentFormattingParams
+import org.eclipse.lsp4j.DocumentSymbolParams
 import org.eclipse.lsp4j.FormattingOptions
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
@@ -9,11 +20,17 @@ import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.TextDocumentSyncKind
 import org.eclipse.lsp4j.services.LanguageClient
+import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
+import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import io.zenwave360.lsp.core.xref.CrossReferenceContribution
+import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import java.io.File
 import java.util.concurrent.CompletableFuture
 import kotlin.test.Test
@@ -33,7 +50,31 @@ class ZenwaveLspServerTest {
         assertEquals(TextDocumentSyncKind.Incremental, result.capabilities.textDocumentSync.left)
         assertTrue(result.capabilities.hoverProvider.left)
         assertTrue(result.capabilities.definitionProvider.left)
+        assertTrue(result.capabilities.documentSymbolProvider.left)
         assertTrue(result.capabilities.documentFormattingProvider.left)
+        val moduleSelectors = result.capabilities.experimental.let { it as Map<*, *> }["moduleSelectors"] as List<*>
+        assertTrue(moduleSelectors.any { selector -> selector.toString().contains("manifest") })
+    }
+
+    @Test
+    fun initializeStoresZenwaveInitializationOptions() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        val params = InitializeParams().apply {
+            initializationOptions = mapOf(
+                "zenwave" to mapOf(
+                    "configUri" to "file:///workspace/.zenwave/config.yml",
+                    "projectManifestUri" to "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml"
+                )
+            )
+        }
+
+        server.initialize(params).get()
+
+        assertEquals("file:///workspace/.zenwave/config.yml", server.initializationOptions?.configUri)
+        assertEquals(
+            "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml",
+            server.initializationOptions?.projectManifestUri
+        )
     }
 
     @Test
@@ -103,6 +144,65 @@ class ZenwaveLspServerTest {
 
         assertTrue(hierarchy.isNotEmpty())
         assertTrue(hierarchy.any { it.id.contains("#entities.CustomerOrder") || it.children.any { child -> child.id.contains("#entities.CustomerOrder") } })
+    }
+
+    @Test
+    fun documentSymbolReturnsHierarchyAsStandardLspSymbols() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/complete.zdl",
+                    "zdl",
+                    1,
+                    readTestResource("complete.zdl")
+                )
+            )
+        )
+
+        val symbols = server.documentSymbol(
+            DocumentSymbolParams(TextDocumentIdentifier("file:///workspace/complete.zdl"))
+        ).get()
+
+        assertTrue(symbols.isNotEmpty())
+        val roots = symbols.mapNotNull { it.right }
+        assertTrue(roots.any { root ->
+            root.name == "CustomerOrder" || root.children.orEmpty().any { child -> child.name == "CustomerOrder" }
+        })
+    }
+
+    @Test
+    fun referencesReturnsReverseReferencesForIndexedTargets() {
+        val targetUri = "file:///workspace/target.zdl"
+        val sourceUri = "file:///workspace/source.zdl"
+        val core = ZenwaveLanguageServer(
+            modules = listOf(FakeReferenceModule(targetUri, sourceUri)),
+            sessionStore = InMemoryDocumentSessionStore(),
+            crossReferenceIndex = InMemoryCrossReferenceIndex()
+        )
+        val server = ZenwaveLspServer(core)
+
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(targetUri, "fake", 1, "target")
+            )
+        )
+        server.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(sourceUri, "fake", 1, "source")
+            )
+        )
+
+        val refs = server.references(
+            ReferenceParams(
+                TextDocumentIdentifier(targetUri),
+                Position(0, 0),
+                ReferenceContext(false)
+            )
+        ).get()
+
+        assertEquals(1, refs.size)
+        assertEquals(sourceUri, refs.single().uri)
     }
 
     @Test
@@ -254,4 +354,96 @@ private class RecordingLanguageClient : LanguageClient {
 
     override fun logMessage(message: MessageParams) {
     }
+}
+
+private class FakeReferenceModule(
+    private val targetUri: String,
+    private val sourceUri: String
+) : LanguageModule {
+    override val languageId: String = "fake"
+
+    override val capabilities: LanguageCapabilities =
+        LanguageCapabilities(
+            languageId = languageId,
+            extensions = listOf(".zdl"),
+            supportsHover = true,
+            supportsDefinition = false,
+            supportsCompletion = false,
+            supportsDiagnostics = false,
+            supportsHierarchy = true,
+            supportsReferences = true,
+            supportsFormatting = false
+        )
+
+    override fun parse(snapshot: DocumentSnapshot): ParseResult =
+        ParseResult(
+            semanticId = "${snapshot.ref.uri}#document",
+            model = snapshot.text,
+            diagnostics = emptyList()
+        )
+
+    override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
+        emptyList()
+
+    override fun hover(snapshot: DocumentSnapshot, position: io.zenwave360.lsp.core.contracts.Position): HoverResult? =
+        HoverResult(
+            semanticId = "$targetUri#entity.Target",
+            markdown = "Target",
+            range = io.zenwave360.lsp.core.contracts.Range(
+                start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+            )
+        )
+
+    override fun definition(snapshot: DocumentSnapshot, position: io.zenwave360.lsp.core.contracts.Position): List<NavigationTarget> =
+        emptyList()
+
+    override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
+        listOf(
+            HierarchyNode(
+                id = "${snapshot.ref.uri}#entity",
+                label = snapshot.ref.uri.substringAfterLast('/'),
+                kind = "entity",
+                language = languageId,
+                source = SourceLocation(
+                    uri = snapshot.ref.uri,
+                    range = io.zenwave360.lsp.core.contracts.Range(
+                        start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                        end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+                    )
+                ),
+                children = emptyList()
+            )
+        )
+
+    override fun format(snapshot: DocumentSnapshot): String? =
+        null
+
+    override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
+        if (snapshot.ref.uri == sourceUri) {
+            listOf(
+                CrossReferenceContribution(
+                    sourceUri = sourceUri,
+                    sourceSemanticId = "$sourceUri#entity.Source",
+                    sourceRange = io.zenwave360.lsp.core.contracts.Range(
+                        start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                        end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+                    ),
+                    sourceLabel = "Source",
+                    targetUri = targetUri,
+                    targetSemanticId = "$targetUri#entity.Target",
+                    targetRange = io.zenwave360.lsp.core.contracts.Range(
+                        start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                        end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+                    ),
+                    targetLabel = "Target",
+                    relationType = "references"
+                )
+            )
+        } else {
+            emptyList()
+        }
+
+    override fun canHandle(uri: String, text: String?): Boolean =
+        uri.endsWith(".zdl")
 }

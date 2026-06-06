@@ -41,6 +41,44 @@ class CrossReferenceIntegrationTest {
         assertTrue(asyncApiReverse.any { it.label == zdlPublishRef.sourceLabel }, "AsyncAPI reverse refs: $asyncApiReverse")
     }
 
+    @Test
+    fun zdlRestOperationsReverseLinkFromOpenApiOperationKeys() {
+        val server = ZenwaveLanguageServer(
+            modules = listOf(ZdlLanguageModule(), AsyncApiLanguageModule(), AvroLanguageModule()),
+            sessionStore = InMemoryDocumentSessionStore(),
+            crossReferenceIndex = InMemoryCrossReferenceIndex()
+        )
+        val zdlText = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                getCustomer(id) Order?
+            }
+            """.trimIndent()
+        val zdlUri = writeTestFile(
+            "models/orders.zdl",
+            zdlText
+        )
+        val snapshot = snapshot(zdlUri, "zdl", zdlText)
+        server.open(snapshot)
+
+        val reverse = server.reverseReferences(
+            zdlUri.substringBeforeLast('/') + "/apis/openapi.yml",
+            zdlUri.substringBeforeLast('/') + "/apis/openapi.yml#$.paths['/customer/{id}'].get"
+        )
+        assertTrue(reverse.any { it.label == "getCustomer" }, "OpenAPI reverse refs: $reverse")
+    }
+
     private fun snapshot(uri: String, languageId: String, text: String) =
         DocumentSnapshot(
             ref = DocumentRef(uri = uri, languageId = languageId, version = 1),

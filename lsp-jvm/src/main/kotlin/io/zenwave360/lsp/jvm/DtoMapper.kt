@@ -6,10 +6,12 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
 import org.eclipse.lsp4j.Diagnostic
+import org.eclipse.lsp4j.DocumentSymbol
 import org.eclipse.lsp4j.DiagnosticSeverity as LspDiagnosticSeverity
 import org.eclipse.lsp4j.Location
 import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
+import org.eclipse.lsp4j.SymbolKind
 import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
@@ -39,6 +41,16 @@ internal object DtoMapper {
     fun toLocation(target: NavigationTarget): Location? =
         toLspRange(target.range)?.let { range -> Location(target.uri, range) }
 
+    fun toDocumentSymbol(node: HierarchyNode): DocumentSymbol =
+        DocumentSymbol(
+            node.label,
+            toSymbolKind(node.kind),
+            requireNotNull(toLspRange(node.source.range)),
+            requireNotNull(toLspRange(node.source.range)),
+            null,
+            node.children.map(::toDocumentSymbol)
+        )
+
     fun toPublishDiagnostics(uri: String, diagnostics: List<io.zenwave360.lsp.core.contracts.Diagnostic>): PublishDiagnosticsParams =
         PublishDiagnosticsParams(
             uri,
@@ -61,6 +73,19 @@ internal object DtoMapper {
             DiagnosticSeverity.WARNING -> LspDiagnosticSeverity.Warning
             DiagnosticSeverity.INFO -> LspDiagnosticSeverity.Information
             DiagnosticSeverity.HINT -> LspDiagnosticSeverity.Hint
+        }
+
+    private fun toSymbolKind(kind: String): SymbolKind =
+        when (kind) {
+            "entity", "enum", "input", "output" -> SymbolKind.Class
+            "service" -> SymbolKind.Interface
+            "method", "command" -> SymbolKind.Method
+            "event" -> SymbolKind.Event
+            "field" -> SymbolKind.Field
+            "flow" -> SymbolKind.Function
+            "domain", "subdomain" -> SymbolKind.Package
+            "manifest" -> SymbolKind.File
+            else -> SymbolKind.Object
         }
 
     private fun fullDocumentRange(text: String): LspRange {

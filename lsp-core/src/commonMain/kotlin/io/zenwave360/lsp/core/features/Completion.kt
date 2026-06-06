@@ -1,6 +1,6 @@
 package io.zenwave360.lsp.core.features
 
-import io.zenwave360.lsp.core.model.Position
+import io.zenwave360.lsp.core.contracts.Position
 
 data class CompletionRequest(
     val text: String,
@@ -11,4 +11,3 @@ data class CompletionItem(
     val label: String,
     val kind: String? = null
 )
-

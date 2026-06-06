@@ -11,11 +11,13 @@ import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DidSaveTextDocumentParams
 import org.eclipse.lsp4j.DocumentFormattingParams
+import org.eclipse.lsp4j.DocumentSymbolParams
 import org.eclipse.lsp4j.Hover
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializeResult
 import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.ReferenceParams
 import org.eclipse.lsp4j.ServerCapabilities
 import org.eclipse.lsp4j.ServerInfo
 import org.eclipse.lsp4j.TextEdit
@@ -29,6 +31,7 @@ import org.eclipse.lsp4j.services.LanguageServer
 import org.eclipse.lsp4j.services.TextDocumentService
 import org.eclipse.lsp4j.services.WorkspaceService
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 
 interface ZenwaveCustomRequests {
     @JsonRequest("zenwave/hierarchy")
@@ -48,9 +51,11 @@ class ZenwaveLspServer(
     private val server: ZenwaveLanguageServer
 ) : LanguageServer, TextDocumentService, WorkspaceService, LanguageClientAware, ZenwaveCustomRequests {
 
-    private val documentTexts = linkedMapOf<String, String>()
+    private val documentTexts = ConcurrentHashMap<String, String>()
     private var client: LanguageClient? = null
     private var shutdownRequested = false
+    internal var initializationOptions: ZenwaveInitializationOptions? = null
+        private set
 
     override fun connect(client: LanguageClient) {
         this.client = client
@@ -59,6 +64,7 @@ class ZenwaveLspServer(
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =
         CompletableFuture.completedFuture(
             InitializeResult(buildCapabilities()).apply {
+                initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
                 serverInfo = ServerInfo("zenwave-lsp", "0.1.0-SNAPSHOT")
             }
         )
@@ -142,6 +148,21 @@ class ZenwaveLspServer(
         return CompletableFuture.completedFuture(Either.forLeft(locations))
     }
 
+    override fun references(params: ReferenceParams): CompletableFuture<List<org.eclipse.lsp4j.Location>> {
+        val uri = params.textDocument.uri
+        val position = DtoMapper.toPosition(params.position)
+        val semanticId = server.hover(uri, position)?.semanticId
+            ?: return CompletableFuture.completedFuture(emptyList())
+        val refs = server.reverseReferences(uri, semanticId)
+        return CompletableFuture.completedFuture(refs.mapNotNull(DtoMapper::toLocation))
+    }
+
+    override fun documentSymbol(params: DocumentSymbolParams): CompletableFuture<List<Either<org.eclipse.lsp4j.SymbolInformation, org.eclipse.lsp4j.DocumentSymbol>>> =
+        CompletableFuture.completedFuture(
+            server.hierarchy(params.textDocument.uri)
+                .map { Either.forRight(DtoMapper.toDocumentSymbol(it)) }
+        )
+
     override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> {
         val uri = params.textDocument.uri
         val current = documentTexts[uri] ?: return CompletableFuture.completedFuture(emptyList())
@@ -180,6 +201,9 @@ class ZenwaveLspServer(
     override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
     }
 
+    fun diagnostics(uri: String): List<org.eclipse.lsp4j.Diagnostic> =
+        DtoMapper.toPublishDiagnostics(uri, server.diagnostics(uri)).diagnostics
+
     private fun buildCapabilities(): ServerCapabilities {
         val moduleCapabilities = server.capabilities()
         return ServerCapabilities().apply {
@@ -187,6 +211,7 @@ class ZenwaveLspServer(
             setHoverProvider(moduleCapabilities.any { it.supportsHover })
             setDefinitionProvider(moduleCapabilities.any { it.supportsDefinition })
             setReferencesProvider(moduleCapabilities.any { it.supportsReferences })
+            setDocumentSymbolProvider(moduleCapabilities.any { it.supportsHierarchy })
             documentFormattingProvider = Either.forLeft(moduleCapabilities.any { it.supportsFormatting })
             experimental = mapOf(
                 "moduleSelectors" to moduleCapabilities.map {
@@ -206,13 +231,13 @@ class ZenwaveLspServer(
     }
 
     private fun publishDiagnosticsIfHandled(snapshot: DocumentSnapshot) {
-        val diagnostics = server.diagnostics(snapshot.ref.uri)
+        val diagnostics = diagnostics(snapshot.ref.uri)
         if (!server.canHandle(snapshot)) {
             if (snapshot.ref.uri.endsWith(".json") || snapshot.ref.uri.endsWith(".yml") || snapshot.ref.uri.endsWith(".yaml")) {
                 return
             }
         }
-        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(snapshot.ref.uri, diagnostics))
+        client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(snapshot.ref.uri, diagnostics))
     }
 
     private fun applyContentChanges(current: String, changes: List<TextDocumentContentChangeEvent>): String =

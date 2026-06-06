@@ -1,8 +1,8 @@
 package io.zenwave360.lsp.core.external
 
 import io.zenwave360.lsp.core.ZenwaveLanguage
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.Problem
-import io.zenwave360.lsp.core.model.Range
 
 interface ApiSpecResolver {
 

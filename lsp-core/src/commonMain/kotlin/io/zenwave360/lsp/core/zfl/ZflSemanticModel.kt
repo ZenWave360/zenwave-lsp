@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.*
 import io.zenwave360.language.zfl.ZflModel  // from dsl-kotlin
 
@@ -53,4 +55,3 @@ private fun defaultRange(): Range =
         start = Position(0, 0),
         end = Position(0, 0)
     )
-

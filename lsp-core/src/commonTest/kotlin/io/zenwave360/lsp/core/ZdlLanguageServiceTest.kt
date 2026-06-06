@@ -2,7 +2,7 @@ package io.zenwave360.lsp.core
 
 import io.zenwave360.lsp.core.features.*
 import io.zenwave360.lsp.core.impl.ZenwaveLanguageServiceImpl
-import io.zenwave360.lsp.core.model.Position
+import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.model.Severity
 import io.zenwave360.lsp.core.zdl.ZdlParserAdapter
 import io.zenwave360.lsp.core.zfl.ZflParserAdapter
@@ -213,4 +213,3 @@ class ZdlLanguageServiceTest {
         assertTrue(data.containsKey("problems"))
     }
 }
-

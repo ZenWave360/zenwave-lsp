@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.jvm
 
 import io.zenwave360.lsp.core.avro.AvroLanguageModule
+import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
 import io.zenwave360.lsp.core.spec.asyncapi.AsyncApiLanguageModule
@@ -13,6 +14,7 @@ import org.eclipse.lsp4j.launch.LSPLauncher
 fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
     ZenwaveLanguageServer(
         modules = listOf(
+            ArchitectureManifestLanguageModule(),
             ZdlLanguageModule(),
             AsyncApiLanguageModule(),
             OpenApiLanguageModule(),

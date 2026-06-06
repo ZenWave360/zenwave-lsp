@@ -85,6 +85,85 @@ class ZdlLanguageModuleTest {
         assertEquals("file:///workspace/models/orders/src/main/resources/apis/asyncapi.yml", apiRef.targetUri)
     }
 
+    @Test
+    fun crossReferencesEmitRestOperationTargetsForOpenApiMethods() {
+        val snapshot = zdlSnapshot(
+            "file:///workspace/models/orders.zdl",
+            """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                getCustomer(id) Order?
+
+                @post({path: "/search"})
+                searchCustomers() Order[]
+            }
+            """.trimIndent()
+        )
+
+        val refs = module.crossReferenceContributions(snapshot)
+        val getRef = refs.firstOrNull { it.sourceSemanticId.endsWith("#services.CustomerService.methods.getCustomer") }
+        val postRef = refs.firstOrNull { it.sourceSemanticId.endsWith("#services.CustomerService.methods.searchCustomers") }
+
+        assertNotNull(getRef)
+        assertEquals("rest-operation", getRef.relationType)
+        assertEquals("file:///workspace/models/apis/openapi.yml", getRef.targetUri)
+        assertEquals("file:///workspace/models/apis/openapi.yml#$.paths['/customer/{id}'].get", getRef.targetSemanticId)
+        assertEquals("getCustomer", getRef.targetLabel)
+
+        assertNotNull(postRef)
+        assertEquals("file:///workspace/models/apis/openapi.yml#$.paths['/customer/search'].post", postRef.targetSemanticId)
+        assertEquals("searchCustomers", postRef.targetLabel)
+    }
+
+    @Test
+    fun definitionResolvesRestAnnotationToOpenApiOperationTarget() {
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                getCustomer(id) Order?
+            }
+            """.trimIndent()
+        val lines = text.lines()
+        val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", text)
+        val definition = lines.asSequence()
+            .withIndex()
+            .filter { (_, line) -> line.contains("@get(\"/{id}\")") || line.contains("getCustomer(id) Order?") }
+            .flatMap { (lineIndex, lineText) ->
+                (0..lineText.length).asSequence().map { character ->
+                    module.definition(snapshot, Position(line = lineIndex, character = character))
+                }
+            }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
+
+        assertEquals(1, definition.size)
+        assertEquals("file:///workspace/models/apis/openapi.yml", definition.first().uri)
+        assertEquals("openapi", definition.first().category)
+        assertEquals("rest-operation", definition.first().relationType)
+    }
+
     private fun zdlSnapshot(uri: String, text: String) =
         DocumentSnapshot(
             ref = DocumentRef(uri = uri, languageId = "zdl", version = 1),

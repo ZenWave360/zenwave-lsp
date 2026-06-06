@@ -40,6 +40,7 @@ kotlin {
 
                 // DSL Kotlin parser sources are compiled directly via srcDir above.
                 implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.1.0-SNAPSHOT")
+                implementation("io.zenwave360.manifest:manifest-core:0.1.0-SNAPSHOT")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

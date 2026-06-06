@@ -6,9 +6,8 @@ import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 internal class ZdlCrossReferenceContributor {
     fun build(uri: String, model: Map<String, Any?>): List<CrossReferenceContribution> {
         val locations = model.locationTable()
-        val apiUris = model.mapAt("apis").entries.associate { (name, value) ->
-            name to resolveRelativeUri(uri, value.asMap()["uri"].asString().orEmpty())
-        }
+        val apis = zdlApiDescriptors(uri, model)
+        val apiUris = apis.associate { it.name to it.uri }
         val defaultAsyncApi = apiUris.entries.firstOrNull()?.value
 
         val apiReferences = model.mapAt("apis").entries.mapNotNull { (name, value) ->
@@ -54,7 +53,24 @@ internal class ZdlCrossReferenceContributor {
             }
         }
 
-        return apiReferences + eventReferences + serviceReferences
+        val restReferences = model.mapAt("services").entries.flatMap { (serviceName, serviceValue) ->
+            serviceValue.asMap().mapAt("methods").keys.mapNotNull { methodName ->
+                val target = resolveRestOperationTarget(uri, model, serviceName, methodName) ?: return@mapNotNull null
+                CrossReferenceContribution(
+                    sourceUri = uri,
+                    sourceSemanticId = zdlSemanticId(uri, "services.$serviceName.methods.$methodName"),
+                    sourceRange = locations.findSource(uri, "services.$serviceName.methods.$methodName").range,
+                    sourceLabel = methodName,
+                    targetUri = target.api.uri,
+                    targetSemanticId = "${target.api.uri}#${target.semanticPath}",
+                    targetRange = null,
+                    targetLabel = target.operationId,
+                    relationType = "rest-operation"
+                )
+            }
+        }
+
+        return apiReferences + eventReferences + serviceReferences + restReferences
     }
 
     private fun toAsyncApiContribution(

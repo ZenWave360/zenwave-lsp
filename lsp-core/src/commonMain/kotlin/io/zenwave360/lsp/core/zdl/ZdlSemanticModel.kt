@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.zdl
 
+import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.*
 import io.zenwave360.language.zdl.ZdlModel  // from dsl-kotlin
 

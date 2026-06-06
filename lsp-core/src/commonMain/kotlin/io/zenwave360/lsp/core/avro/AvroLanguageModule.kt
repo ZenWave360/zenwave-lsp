@@ -39,47 +39,24 @@ class AvroLanguageModule(
         return ParseResult(
             semanticId = "${snapshot.ref.uri}#document",
             model = model,
-            diagnostics = diagnostics(snapshot)
+            diagnostics = diagnosticsFromModel(model)
         )
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
-        val model = parseModel(snapshot)
-        val entries = avroEntries(model)
-        val knownTypes = entries.associate { (_, entry) ->
-            (entry["name"] as? String).orEmpty() to entry
-        }.filterKeys { it.isNotBlank() }.keys
-        val diagnostics = mutableListOf<Diagnostic>()
-
-        entries.forEach { (path, entry) ->
-            val type = entry["type"] as? String
-            if (type == "record" && (entry["name"] as? String).isNullOrBlank()) {
-                diagnostics += diagnostic(model, path, "Record is missing required field: name", "missing-name")
-            }
-            if (type == "record") {
-                val fields = (entry["fields"] as? List<*>).orEmpty().mapNotNull { it as? Map<String, Any?> }
-                val duplicates = fields.mapNotNull { it["name"] as? String }.groupBy { it }.filterValues { it.size > 1 }.keys
-                duplicates.forEach { name ->
-                    diagnostics += diagnostic(model, "$path.fields.$name", "Duplicate field name: $name", "duplicate-field")
-                }
-                fields.forEach { field ->
-                    val fieldName = field["name"] as? String ?: "field"
-                    if (field["type"] == null) {
-                        diagnostics += diagnostic(model, "$path.fields.$fieldName", "Field is missing required field: type", "missing-type")
-                    } else {
-                        val fieldType = stringifyType(field["type"])
-                        if (!isKnownType(fieldType, knownTypes)) {
-                            diagnostics += diagnostic(model, "$path.fields.$fieldName.type", "Unknown Avro type: $fieldType", "unknown-type")
-                        }
-                    }
-                }
-            }
-        }
-        return diagnostics
+        return diagnosticsFromModel(parseModel(snapshot))
     }
+
+    override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> =
+        diagnosticsFromModel(parsedArtifact as YamlDocumentModel)
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val model = parseModel(snapshot)
+        return hover(snapshot, position, model)
+    }
+
+    override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? {
+        val model = parsedArtifact as YamlDocumentModel
         val path = model.pathAtPosition(position) ?: return null
         val node = model.nodeAt(path)
         val markdown = when {
@@ -113,6 +90,11 @@ class AvroLanguageModule(
 
     override fun definition(snapshot: DocumentSnapshot, position: Position): List<NavigationTarget> {
         val model = parseModel(snapshot)
+        return definition(snapshot, position, model)
+    }
+
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
+        val model = parsedArtifact as YamlDocumentModel
         val path = model.pathAtPosition(position) ?: return emptyList()
         if (!path.endsWith(".type")) return emptyList()
         val typeName = model.nodeAt(path) as? String ?: return emptyList()
@@ -135,6 +117,43 @@ class AvroLanguageModule(
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(parseModel(snapshot))
+
+    override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
+        hierarchyBuilder.build(parsedArtifact as YamlDocumentModel)
+
+    private fun diagnosticsFromModel(model: YamlDocumentModel): List<Diagnostic> {
+        val entries = avroEntries(model)
+        val knownTypes = entries.associate { (_, entry) ->
+            (entry["name"] as? String).orEmpty() to entry
+        }.filterKeys { it.isNotBlank() }.keys
+        val diagnostics = mutableListOf<Diagnostic>()
+
+        entries.forEach { (path, entry) ->
+            val type = entry["type"] as? String
+            if (type == "record" && (entry["name"] as? String).isNullOrBlank()) {
+                diagnostics += diagnostic(model, path, "Record is missing required field: name", "missing-name")
+            }
+            if (type == "record") {
+                val fields = (entry["fields"] as? List<*>).orEmpty().mapNotNull { it as? Map<String, Any?> }
+                val duplicates = fields.mapNotNull { it["name"] as? String }.groupBy { it }.filterValues { it.size > 1 }.keys
+                duplicates.forEach { name ->
+                    diagnostics += diagnostic(model, "$path.fields.$name", "Duplicate field name: $name", "duplicate-field")
+                }
+                fields.forEach { field ->
+                    val fieldName = field["name"] as? String ?: "field"
+                    if (field["type"] == null) {
+                        diagnostics += diagnostic(model, "$path.fields.$fieldName", "Field is missing required field: type", "missing-type")
+                    } else {
+                        val fieldType = stringifyType(field["type"])
+                        if (!isKnownType(fieldType, knownTypes)) {
+                            diagnostics += diagnostic(model, "$path.fields.$fieldName.type", "Unknown Avro type: $fieldType", "unknown-type")
+                        }
+                    }
+                }
+            }
+        }
+        return diagnostics
+    }
 
     override fun format(snapshot: DocumentSnapshot): String? =
         null

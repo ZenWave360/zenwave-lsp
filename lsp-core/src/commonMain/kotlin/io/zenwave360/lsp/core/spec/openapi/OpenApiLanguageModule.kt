@@ -39,8 +39,8 @@ class OpenApiLanguageModule(
         val document = parseSpecDocument(snapshot)
         return ParseResult(
             semanticId = "${snapshot.ref.uri}#document",
-            model = document.model,
-            diagnostics = diagnostics(snapshot)
+            model = document,
+            diagnostics = document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
         )
     }
 
@@ -49,20 +49,41 @@ class OpenApiLanguageModule(
         return document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
     }
 
+    override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> {
+        val document = parsedArtifact as io.zenwave360.lsp.core.spec.SpecDocument
+        return document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
+    }
+
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? =
         defaultSpecHover(parseSpecDocument(snapshot), position, languageId)
+
+    override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? =
+        defaultSpecHover(parsedArtifact as io.zenwave360.lsp.core.spec.SpecDocument, position, languageId)
 
     override fun definition(snapshot: DocumentSnapshot, position: Position): List<NavigationTarget> =
         defaultSpecDefinition(parseSpecDocument(snapshot), position, languageId)
 
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> =
+        defaultSpecDefinition(parsedArtifact as io.zenwave360.lsp.core.spec.SpecDocument, position, languageId)
+
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(parseSpecDocument(snapshot).model)
+
+    override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
+        hierarchyBuilder.build((parsedArtifact as io.zenwave360.lsp.core.spec.SpecDocument).model)
 
     override fun format(snapshot: DocumentSnapshot): String? =
         null
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> {
         val model = parseSpecDocument(snapshot).model
+        return model.referenceTable.keys
+            .mapNotNull { path -> refContribution(model, path, path.substringAfterLast('.'), "references") }
+            .filter { it.targetUri != model.uri }
+    }
+
+    override fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<CrossReferenceContribution> {
+        val model = (parsedArtifact as io.zenwave360.lsp.core.spec.SpecDocument).model
         return model.referenceTable.keys
             .mapNotNull { path -> refContribution(model, path, path.substringAfterLast('.'), "references") }
             .filter { it.targetUri != model.uri }

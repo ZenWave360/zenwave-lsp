@@ -9,6 +9,7 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.SemanticId
 import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
 
 class ZenwaveLanguageServer(
@@ -16,48 +17,62 @@ class ZenwaveLanguageServer(
     private val sessionStore: DocumentSessionStore,
     private val crossReferenceIndex: CrossReferenceIndex
 ) {
+    private val lock = PlatformReadWriteLock()
+    private val parsedCache = linkedMapOf<String, DocumentCacheEntry>()
+
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
 
     fun open(snapshot: DocumentSnapshot) {
         sessionStore.open(snapshot)
-        reindex(snapshot)
+        rebuildCache(snapshot.ref.uri)
     }
 
     fun change(uri: String, text: String, version: Int) {
         sessionStore.change(uri, text, version)
-        sessionStore.get(uri)?.let { reindex(it) }
+        sessionStore.get(uri)
+            ?.takeIf { it.ref.version == version }
+            ?.let { rebuildCache(it.ref.uri) }
     }
 
     fun close(uri: String) {
         sessionStore.close(uri)
+        lock.write {
+            parsedCache.remove(uri)
+        }
         crossReferenceIndex.remove(uri)
     }
 
     fun canHandle(snapshot: DocumentSnapshot): Boolean =
-        resolveModule(snapshot) != null
+        getOrBuildCacheEntry(snapshot).module != null
 
     fun canHandle(uri: String): Boolean =
-        sessionStore.get(uri)?.let(::resolveModule) != null
+        sessionStore.get(uri)?.let(::getOrBuildCacheEntry)?.module != null
 
     fun diagnostics(uri: String): List<Diagnostic> =
-        withModule(uri) { module, snapshot -> module.diagnostics(snapshot) } ?: emptyList()
+        withEntry(uri) { entry, _ -> entry.diagnostics } ?: emptyList()
 
     fun hover(uri: String, position: Position): HoverResult? =
-        withModule(uri) { module, snapshot -> module.hover(snapshot, position) }
+        withEntry(uri) { entry, snapshot ->
+            entry.module?.hover(snapshot, position, entry.parsedArtifact)
+        }
 
     fun definition(uri: String, position: Position): List<NavigationTarget> =
-        withModule(uri) { module, snapshot -> module.definition(snapshot, position) } ?: emptyList()
+        withEntry(uri) { entry, snapshot ->
+            entry.module?.definition(snapshot, position, entry.parsedArtifact)
+        } ?: emptyList()
 
     fun hierarchy(uri: String): List<HierarchyNode> =
-        withModule(uri) { module, snapshot -> module.hierarchy(snapshot) } ?: emptyList()
+        withEntry(uri) { entry, snapshot ->
+            getOrComputeHierarchy(entry, snapshot)
+        } ?: emptyList()
 
     fun format(uri: String): String? =
-        withModule(uri) { module, snapshot -> module.format(snapshot) }
+        withEntry(uri) { entry, snapshot -> entry.module?.format(snapshot) }
 
     fun organizeZflServices(uri: String): String? =
-        withModule(uri) { module, snapshot ->
-            (module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot)
+        withEntry(uri) { entry, snapshot ->
+            (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot, entry.parsedArtifact)
         }
 
     fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
@@ -66,20 +81,20 @@ class ZenwaveLanguageServer(
     fun reverseReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
         crossReferenceIndex.reverseReferences(uri, semanticId)
 
-    private fun reindex(snapshot: DocumentSnapshot) {
-        crossReferenceIndex.remove(snapshot.ref.uri)
-        resolveModule(snapshot)?.let { module ->
-            val contributions = module.crossReferenceContributions(snapshot)
-            if (contributions.isNotEmpty()) {
-                crossReferenceIndex.index(contributions)
-            }
+    private fun rebuildCache(uri: String) {
+        val snapshot = sessionStore.get(uri) ?: return
+        val entry = getOrBuildCacheEntry(snapshot, forceRefresh = true)
+        crossReferenceIndex.remove(uri)
+        val contributions = getOrComputeCrossReferenceContributions(entry, snapshot)
+        if (contributions.isNotEmpty()) {
+            crossReferenceIndex.index(contributions)
         }
     }
 
-    private fun <T> withModule(uri: String, block: (LanguageModule, DocumentSnapshot) -> T): T? {
+    private fun <T> withEntry(uri: String, block: (DocumentCacheEntry, DocumentSnapshot) -> T): T? {
         val snapshot = sessionStore.get(uri) ?: return null
-        val module = resolveModule(snapshot) ?: return null
-        return block(module, snapshot)
+        val entry = getOrBuildCacheEntry(snapshot)
+        return block(entry, snapshot)
     }
 
     private fun resolveModule(snapshot: DocumentSnapshot): LanguageModule? {
@@ -99,4 +114,63 @@ class ZenwaveLanguageServer(
             .firstOrNull()
             ?.third
     }
+
+    private fun getOrBuildCacheEntry(snapshot: DocumentSnapshot, forceRefresh: Boolean = false): DocumentCacheEntry =
+        run {
+            if (!forceRefresh) {
+                lock.read {
+                    parsedCache[snapshot.ref.uri]
+                        ?.takeIf { it.version == snapshot.ref.version }
+                }?.let { return it }
+            }
+            lock.write {
+                if (!forceRefresh) {
+                    parsedCache[snapshot.ref.uri]
+                        ?.takeIf { it.version == snapshot.ref.version }
+                        ?.let { return@write it }
+                }
+                val module = resolveModule(snapshot)
+                val parsed = module?.parse(snapshot)
+                DocumentCacheEntry(
+                    uri = snapshot.ref.uri,
+                    version = snapshot.ref.version,
+                    module = module,
+                    diagnostics = parsed?.diagnostics.orEmpty(),
+                    parsedArtifact = parsed?.model
+                ).also { parsedCache[snapshot.ref.uri] = it }
+            }
+        }
+
+    private fun getOrComputeHierarchy(entry: DocumentCacheEntry, snapshot: DocumentSnapshot): List<HierarchyNode> =
+        run {
+            lock.read { entry.hierarchy }?.let { return it }
+            lock.write {
+                entry.hierarchy ?: entry.module?.hierarchy(snapshot, entry.parsedArtifact).orEmpty().also {
+                    entry.hierarchy = it
+                }
+            }
+        }
+
+    private fun getOrComputeCrossReferenceContributions(
+        entry: DocumentCacheEntry,
+        snapshot: DocumentSnapshot
+    ): List<CrossReferenceContribution> =
+        run {
+            lock.read { entry.xrefContributions }?.let { return it }
+            lock.write {
+                entry.xrefContributions ?: entry.module?.crossReferenceContributions(snapshot, entry.parsedArtifact).orEmpty().also {
+                    entry.xrefContributions = it
+                }
+            }
+        }
 }
+
+private class DocumentCacheEntry(
+    val uri: String,
+    val version: Int,
+    val module: LanguageModule?,
+    val diagnostics: List<Diagnostic>,
+    val parsedArtifact: Any?,
+    @Volatile var hierarchy: List<HierarchyNode>? = null,
+    @Volatile var xrefContributions: List<CrossReferenceContribution>? = null,
+)

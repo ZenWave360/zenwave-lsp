@@ -38,21 +38,29 @@ class ZdlLanguageModule(
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val semanticModel = parseModel(snapshot)
+        val model = semanticModel.asZdlMap()
         return ParseResult(
             semanticId = "${snapshot.ref.uri}#document",
-            model = semanticModel.asZdlMap(),
-            diagnostics = diagnostics(snapshot)
+            model = semanticModel,
+            diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
         )
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
         val model = parseModel(snapshot).asZdlMap()
-        val problems = model["problems"].asList()
-        return problems.map { toDiagnostic(snapshot.ref.uri, it.asMap()) }
+        return diagnosticsFromModel(snapshot.ref.uri, model)
     }
+
+    override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> =
+        diagnosticsFromModel(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val semanticModel = parseModel(snapshot)
+        return hover(snapshot, position, semanticModel)
+    }
+
+    override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? {
+        val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position) ?: return null
         val model = semanticModel.asZdlMap()
         return HoverResult(
@@ -64,9 +72,34 @@ class ZdlLanguageModule(
 
     override fun definition(snapshot: DocumentSnapshot, position: Position): List<NavigationTarget> {
         val semanticModel = parseModel(snapshot)
+        return definition(snapshot, position, semanticModel)
+    }
+
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
+        val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position)
         val model = semanticModel.asZdlMap()
         val locations = model.locationTable()
+
+        val restMatch = Regex("""^services\.([^.]+)\.methods\.([^.]+)(?:\..+)?$""")
+            .matchEntire(path ?: "")
+        if (restMatch != null) {
+            val serviceName = restMatch.groupValues[1]
+            val methodName = restMatch.groupValues[2]
+            val target = resolveRestOperationTarget(snapshot.ref.uri, model, serviceName, methodName)
+            if (target != null) {
+                return listOf(
+                    NavigationTarget(
+                        targetKind = "definition",
+                        label = target.operationId,
+                        uri = target.api.uri,
+                        range = null,
+                        category = "openapi",
+                        relationType = "rest-operation"
+                    )
+                )
+            }
+        }
 
         val targetPath = path?.let { resolveDefinitionPath(model, it) }
             ?: resolveNamedType(model, tokenAtPosition(snapshot.text, position))
@@ -87,17 +120,26 @@ class ZdlLanguageModule(
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
 
+    override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
+        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
         crossReferenceContributor.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
 
+    override fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<CrossReferenceContribution> =
+        crossReferenceContributor.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+
     override fun canHandle(uri: String, text: String?): Boolean =
         uri.endsWith(".zdl")
 
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
+
+    private fun diagnosticsFromModel(uri: String, model: Map<String, Any?>): List<Diagnostic> =
+        model["problems"].asList().map { toDiagnostic(uri, it.asMap()) }
 
     private fun resolvePathAtPosition(
         snapshot: DocumentSnapshot,
@@ -183,6 +225,15 @@ class ZdlLanguageModule(
             model.mapAt("inputs").containsKey(name) -> "inputs.$name"
             model.mapAt("outputs").containsKey(name) -> "outputs.$name"
             model.mapAt("events").containsKey(name) -> "events.$name"
+            model.mapAt("allEntitiesAndEnums").containsKey(name) -> {
+                when (model.mapAt("allEntitiesAndEnums")[name].asMap()["type"].asString()) {
+                    "entity" -> "entities.$name"
+                    "enum" -> "enums.$name"
+                    "input" -> "inputs.$name"
+                    "output" -> "outputs.$name"
+                    else -> null
+                }
+            }
             else -> null
         }
     }

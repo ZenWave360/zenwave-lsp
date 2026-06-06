@@ -12,6 +12,15 @@ includeBuild("../json-schema-ref-parser-kmp") {
     }
 }
 
+val localZenWaveManifest = file("../zenwave-manifest")
+if (localZenWaveManifest.exists()) {
+    includeBuild(localZenWaveManifest) {
+        dependencySubstitution {
+            substitute(module("io.zenwave360.manifest:manifest-core")).using(project(":manifest-core"))
+        }
+    }
+}
+
 include(
     "lsp-core",
     "lsp-jvm",

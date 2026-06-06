@@ -1,6 +1,6 @@
 package io.zenwave360.lsp.core.features
 
-import io.zenwave360.lsp.core.model.Position
+import io.zenwave360.lsp.core.contracts.Position
 
 data class HoverRequest(
     val text: String,
@@ -10,4 +10,3 @@ data class HoverRequest(
 data class Hover(
     val contents: String
 )
-

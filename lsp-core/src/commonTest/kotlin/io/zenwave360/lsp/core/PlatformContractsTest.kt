@@ -79,6 +79,49 @@ class PlatformContractsTest {
     }
 
     @Test
+    fun crossReferenceIndexReplacesReverseEntriesWhenSourceIsReindexed() {
+        val index = InMemoryCrossReferenceIndex()
+        val sourceUri = "file:///workspace/orders.zdl"
+        val sourceSemanticId = "$sourceUri#entities.Order"
+        val oldTargetUri = "file:///workspace/old.yml"
+        val newTargetUri = "file:///workspace/new.yml"
+
+        index.index(
+            listOf(
+                CrossReferenceContribution(
+                    sourceUri = sourceUri,
+                    sourceSemanticId = sourceSemanticId,
+                    sourceRange = sampleRange(),
+                    sourceLabel = "Order",
+                    targetUri = oldTargetUri,
+                    targetSemanticId = "$oldTargetUri#old",
+                    targetRange = sampleRange(),
+                    targetLabel = "old",
+                    relationType = "references"
+                )
+            )
+        )
+        index.index(
+            listOf(
+                CrossReferenceContribution(
+                    sourceUri = sourceUri,
+                    sourceSemanticId = sourceSemanticId,
+                    sourceRange = sampleRange(),
+                    sourceLabel = "Order",
+                    targetUri = newTargetUri,
+                    targetSemanticId = "$newTargetUri#new",
+                    targetRange = sampleRange(),
+                    targetLabel = "new",
+                    relationType = "references"
+                )
+            )
+        )
+
+        assertTrue(index.reverseReferences(oldTargetUri, "$oldTargetUri#old").isEmpty())
+        assertEquals(1, index.reverseReferences(newTargetUri, "$newTargetUri#new").size)
+    }
+
+    @Test
     fun languageServerDelegatesToResolvedModuleAndIndexesContributions() {
         val module = FakeLanguageModule()
         val server = ZenwaveLanguageServer(
@@ -113,6 +156,33 @@ class PlatformContractsTest {
         assertEquals("asyncapi.yml", refs.first().label)
     }
 
+    @Test
+    fun languageServerParsesOncePerDocumentVersionAcrossFeatureCalls() {
+        val module = FakeLanguageModule()
+        val server = ZenwaveLanguageServer(
+            modules = listOf(module),
+            sessionStore = InMemoryDocumentSessionStore(),
+            crossReferenceIndex = InMemoryCrossReferenceIndex()
+        )
+        val snapshot = DocumentSnapshot(
+            ref = DocumentRef("file:///workspace/orders.zdl", "zdl", 1),
+            text = "entity Order {}"
+        )
+
+        server.open(snapshot)
+        server.diagnostics(snapshot.ref.uri)
+        server.hover(snapshot.ref.uri, Position(0, 0))
+        server.definition(snapshot.ref.uri, Position(0, 0))
+        server.hierarchy(snapshot.ref.uri)
+        server.forwardReferences(snapshot.ref.uri, "${snapshot.ref.uri}#entities.Order")
+
+        assertEquals(1, module.parseCalls)
+
+        server.change(snapshot.ref.uri, "entity Order { status String }", 2)
+        server.diagnostics(snapshot.ref.uri)
+        assertEquals(2, module.parseCalls)
+    }
+
     private fun sampleRange() =
         Range(
             start = Position(0, 0),
@@ -121,6 +191,8 @@ class PlatformContractsTest {
 }
 
 private class FakeLanguageModule : LanguageModule {
+    var parseCalls: Int = 0
+
     override val languageId: String = "zdl"
 
     override val capabilities: LanguageCapabilities =
@@ -141,7 +213,9 @@ private class FakeLanguageModule : LanguageModule {
             semanticId = "${snapshot.ref.uri}#entities.Order",
             model = mapOf("name" to "Order"),
             diagnostics = diagnostics(snapshot)
-        )
+        ).also {
+            parseCalls += 1
+        }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
         listOf(

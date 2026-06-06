@@ -4,7 +4,7 @@ import io.zenwave360.lsp.core.features.*
 import io.zenwave360.lsp.core.impl.ZenwaveLanguageServiceImpl
 import io.zenwave360.lsp.core.model.Problem
 import io.zenwave360.lsp.core.model.SemanticModel
-import io.zenwave360.lsp.core.model.Position
+import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.parser.ZflParser
 import io.zenwave360.lsp.core.zdl.ZdlParserAdapter
 import kotlin.test.*
