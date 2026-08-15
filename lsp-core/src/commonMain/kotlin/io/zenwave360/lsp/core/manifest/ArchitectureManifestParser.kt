@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.manifest
 
 import io.zenwave360.manifest.ManifestDiagnosticSeverity
 import io.zenwave360.manifest.ManifestService
+import io.zenwave360.manifest.ZenWaveManifest
 import io.zenwave360.manifest.ZenWaveManifestLoader
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
@@ -23,7 +24,7 @@ object ArchitectureManifestParser {
         return ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,
-            services = manifest.services.map { toArchitectureService(manifest.uri, it) },
+            services = manifest.services.map { toArchitectureService(manifest, it) },
             diagnostics = manifest.diagnostics.map { diagnostic ->
                 val semanticPath = diagnostic.location?.let(::manifestLocationToSemanticPath)
                 val range = semanticPath
@@ -46,41 +47,44 @@ object ArchitectureManifestParser {
         )
     }
 
-    private fun toArchitectureService(manifestUri: String, service: ManifestService): ArchitectureService {
-        val repositoryUri = resolveServicePath(manifestUri, service.path)
+    private fun toArchitectureService(manifest: ZenWaveManifest, service: ManifestService): ArchitectureService {
+        val repositoryUri = resolveRepositoryUri(manifest, service)
         return ArchitectureService(
             domainKey = service.domainKey,
             subdomainKey = service.subdomainKey,
             serviceKey = service.serviceKey,
             serviceRef = service.serviceRef,
-            repositoryExpression = service.path,
+            repositoryExpression = service.repository,
             repositoryUri = repositoryUri,
-            docs = service.docs.mapValues { (_, path) -> resolveOwnedPath(repositoryUri, path) },
+            docs = service.docs.mapValues { (key, path) ->
+                runCatching { loader.buildDocumentCandidates(manifest, service, key).firstOrNull()?.uri }
+                    .getOrNull()
+                    ?: path
+            },
             specs = service.artifacts.map {
                 ArchitectureSpec(
                     type = it.type,
-                    pathExpression = it.pathExpression,
-                    resolvedUri = resolveOwnedPath(repositoryUri, it.pathExpression)
+                    pathExpression = it.path,
+                    resolvedUri = runCatching {
+                        loader.buildArtifactCandidates(manifest, service, it).firstOrNull()?.uri
+                    }.getOrNull() ?: it.path
                 )
             },
             consumers = service.consumers
         )
     }
 
-    private fun resolveServicePath(manifestUri: String, servicePath: String): String =
-        if (ResourceReferenceResolver.hasScheme(servicePath)) {
-            servicePath
-        } else {
-            val manifestRoot = ResourceReferenceResolver.resolveReference(manifestUri, "../..")
-            ResourceReferenceResolver.appendPath(manifestRoot, servicePath)
-        }
-
-    private fun resolveOwnedPath(repositoryUri: String, path: String): String =
-        if (ResourceReferenceResolver.hasScheme(path)) {
-            path
-        } else {
-            ResourceReferenceResolver.appendPath(repositoryUri, path)
-        }
+    private fun resolveRepositoryUri(manifest: ZenWaveManifest, service: ManifestService): String? {
+        val probeKey = "__zenwave_repository_root__"
+        val probePath = ".zenwave-repository-root"
+        val probeService = service.copy(docs = service.docs + (probeKey to probePath))
+        return runCatching {
+            loader.buildDocumentCandidates(manifest, probeService, probeKey)
+                .firstOrNull()
+                ?.uri
+                ?.let { ResourceReferenceResolver.resolveReference(it, ".") }
+        }.getOrNull()
+    }
 
     private fun manifestLocationToSemanticPath(location: String): String? {
         val suffixIndex = location.lastIndexOf('.')
@@ -118,7 +122,6 @@ object ArchitectureManifestParser {
     fun normalizeSourceText(text: String): String =
         text
             .replace(Regex("""(^[ \t]*-[ \t]*)\${'$'}ref:""", RegexOption.MULTILINE), "$1service:")
-            .replace(Regex("""(^[ \t]*)repository:""", RegexOption.MULTILINE), "$1path:")
             .replace(Regex("""(^[ \t]*)specs:""", RegexOption.MULTILINE), "$1artifacts:")
             .replace(Regex("""\{\{([A-Za-z_][A-Za-z0-9_.-]*)}}""")) { match ->
                 "\${${match.groupValues[1]}}"
