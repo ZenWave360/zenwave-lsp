@@ -11,6 +11,7 @@ import io.zenwave360.lsp.core.contracts.SemanticId
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
+import kotlin.concurrent.Volatile
 
 class ZenwaveLanguageServer(
     private val modules: List<LanguageModule>,

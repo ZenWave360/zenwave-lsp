@@ -36,6 +36,17 @@ kotlin {
 
     js(IR) {
         nodejs()
+        // The browser target makes browser use checkable: jsBrowserTest (part of check) loads lsp-core and
+        // its dependencies in headless Chromium, so a Node-only import fails the build here, not in a consumer.
+        browser {
+            testTask {
+                // The common test suite reads fixtures from the filesystem, so it runs on Node only.
+                filter.includeTestsMatching("io.zenwave360.lsp.core.LspCoreBrowserSmokeTest")
+                useKarma {
+                    useChromeHeadless()
+                }
+            }
+        }
         binaries.executable()
     }
 
@@ -82,7 +93,7 @@ kotlin {
         val jsMain by getting {
             dependencies {
                 implementation(kotlin("stdlib-js"))
-                implementation("org.jetbrains.kotlin-wrappers:kotlin-node:18.16.12-pre.610")
+                // No Node API here: lsp-core's JS artifact must load in a browser and a Web Worker.
             }
         }
 

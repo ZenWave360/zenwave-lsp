@@ -123,7 +123,7 @@ object ArchitectureManifestParser {
         text
             .replace(Regex("""(^[ \t]*-[ \t]*)\${'$'}ref:""", RegexOption.MULTILINE), "$1service:")
             .replace(Regex("""(^[ \t]*)specs:""", RegexOption.MULTILINE), "$1artifacts:")
-            .replace(Regex("""\{\{([A-Za-z_][A-Za-z0-9_.-]*)}}""")) { match ->
+            .replace(Regex("""\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}""")) { match ->
                 "\${${match.groupValues[1]}}"
             }
 
