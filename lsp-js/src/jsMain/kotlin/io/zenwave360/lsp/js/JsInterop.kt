@@ -70,6 +70,7 @@ internal fun hierarchyNodeToJson(node: HierarchyNode): dynamic =
         "children" to node.children.map(::hierarchyNodeToJson).toTypedArray(),
         "relatedResources" to node.relatedResources.map(::navigationTargetToJson).toTypedArray(),
         "uiHints" to stringMapToJson(node.uiHints),
+        "viewNodeIds" to node.viewNodeIds.toTypedArray(),
     )
 
 internal fun diagnosticToJson(diagnostic: Diagnostic): dynamic =

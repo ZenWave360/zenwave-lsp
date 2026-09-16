@@ -6,3 +6,10 @@ config.files.push({
     served: true,
     watched: false,
 });
+// Documents the worker wire test asks about without opening them: the worker reads them with fetch.
+config.files.push({
+    pattern: 'kotlin/wire-fixtures/**/*',
+    included: false,
+    served: true,
+    watched: false,
+});

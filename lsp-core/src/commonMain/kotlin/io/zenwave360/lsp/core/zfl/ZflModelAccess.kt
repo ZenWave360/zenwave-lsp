@@ -25,6 +25,37 @@ internal fun Any?.asZflString(): String? =
 internal fun Map<String, Any?>.mapAt(key: String): Map<String, Any?> =
     this[key] as? Map<String, Any?> ?: emptyMap()
 
+/** A `when` block as lsp-core reads it, whichever shape the dsl-kotlin parser produced. */
+internal data class ZflWhen(
+    val triggers: List<String>,
+    /** The system name, e.g. `Orders`. */
+    val system: String?,
+    /** The full service reference, `System.Service`. */
+    val service: String?,
+    val command: String?,
+    val events: List<String>,
+)
+
+/**
+ * Reads a `when` block. Earlier dsl-kotlin models carry `system`, `service` (`System.Service`), `command` and
+ * `events` on the block; current ones name the command `action` and keep system, service and emitted events on
+ * its `occurrence`.
+ */
+internal fun Any?.normalizedWhen(): ZflWhen {
+    val whenModel = asZflMap()
+    val occurrence = whenModel["occurrence"].asZflMap()
+    val system = whenModel["system"].asZflString() ?: occurrence["system"].asZflString()
+    val service = whenModel["service"].asZflString()
+        ?: occurrence["service"].asZflString()?.let { serviceName -> if (system != null) "$system.$serviceName" else serviceName }
+    return ZflWhen(
+        triggers = whenModel["triggers"].asZflList().mapNotNull { it.asZflString() },
+        system = system,
+        service = service,
+        command = whenModel["command"].asZflString() ?: whenModel["action"].asZflString(),
+        events = (whenModel["events"] ?: occurrence["emits"]).asZflList().mapNotNull { it.asZflString() },
+    )
+}
+
 internal fun zflSemanticId(uri: String, path: String): String =
     "$uri#$path"
 
@@ -48,8 +79,19 @@ internal fun Map<String, IntArray>.findSource(uri: String, semanticPath: String)
     }
     val location = fallbackKeys.firstNotNullOfOrNull { this[it] }
         ?: firstDescendantLocation(semanticPath)
+        ?: enclosingLocation(semanticPath)
         ?: intArrayOf(0, 0, 1, 0, 1, 0)
     return SourceLocation(uri = uri, range = location.toRange())
+}
+
+/** The nearest enclosing element with a location: current parsers record no location for a block's parts. */
+private fun Map<String, IntArray>.enclosingLocation(semanticPath: String): IntArray? {
+    var path = semanticPath
+    while ('.' in path) {
+        path = path.substringBeforeLast('.')
+        this[path]?.let { return it }
+    }
+    return null
 }
 
 private fun Map<String, IntArray>.firstDescendantLocation(semanticPath: String): IntArray? =
@@ -219,8 +261,16 @@ internal fun declaredZdlUris(uri: String, model: Map<String, Any?>): Map<String,
     model.mapAt("systems").mapNotNull { (systemName, rawSystem) ->
         val options = rawSystem.asZflMap().mapAt("options")
         val zdl = options["zdl"].asZflString() ?: rawSystem.asZflMap()["zdl"].asZflString()
-        zdl?.let { systemName to resolveRelativeUri(uri, it) }
+        zdl?.let { systemName to resolveZdlUri(uri, it) }
     }.toMap()
+
+/** `file:` documents keep their established resolution; other schemes (`http:`, `vscode-vfs:`) resolve generically. */
+private fun resolveZdlUri(uri: String, reference: String): String =
+    if (uri.startsWith("file:") || !io.zenwave360.lsp.core.config.ResourceReferenceResolver.hasScheme(uri)) {
+        resolveRelativeUri(uri, reference)
+    } else {
+        io.zenwave360.lsp.core.config.ResourceReferenceResolver.resolveReference(uri, reference)
+    }
 
 private fun currentFlowName(lines: List<String>, lineIndex: Int): String? {
     for (index in lineIndex downTo 0) {

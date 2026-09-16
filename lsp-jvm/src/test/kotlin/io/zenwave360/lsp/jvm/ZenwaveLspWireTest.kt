@@ -299,8 +299,83 @@ class ZenwaveLspWireTest {
         assertEquals(-32601, requestError("zenwave/doesNotExist", """{"uri":"$ORDERS_URI"}""").first)
     }
 
+    @Test
+    fun hierarchyIsAnsweredForUnopenedDocumentsAndPointsAtDeclaringDocuments() {
+        initialize()
+        val workspace = java.nio.file.Files.createTempDirectory("zenwave-wire")
+        java.nio.file.Files.createDirectories(workspace.resolve("orders"))
+        val zdlPath = workspace.resolve("orders/model.zdl")
+        java.nio.file.Files.writeString(zdlPath, MODEL_ZDL)
+        val zflPath = workspace.resolve("checkout.zfl")
+        java.nio.file.Files.writeString(zflPath, CHECKOUT_ZFL)
+        val zdlUri = zdlPath.toUri().toString()
+        val zflUri = zflPath.toUri().toString()
+
+        // Neither document is open: the server reads both.
+        val hierarchy = request("zenwave/hierarchy", """{"uri":"$zflUri"}""").asJsonArray
+        hierarchy.forEach { hierarchyDepth(it.asJsonObject) }
+        val nodes = hierarchy.flatMap { flatten(it.asJsonObject) }
+        val system = nodes.single { it["kind"].asString == "system" }
+        assertEquals(zdlUri, system["sourceUri"].asString)
+        val service = nodes.single { it["kind"].asString == "service" && it["label"].asString == "OrderService" }
+        assertEquals(zdlUri, service["sourceUri"].asString)
+        assertEquals(zflUri, service["relatedResources"].asJsonArray.single().asJsonObject["uri"].asString)
+        val command = nodes.single { it["kind"].asString == "command" }
+        assertEquals(zdlUri, command["sourceUri"].asString)
+        assertEquals("""["command:createOrder"]""", command["viewNodeIds"].toString())
+
+        open(zflUri, "zfl", CHECKOUT_ZFL)
+        val views = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$zflUri"}}""").asJsonObject
+        val viewIds = listOf("flowGraph" to "nodes", "serviceGraph" to "nodes", "serviceGraph" to "groups").flatMap { (graph, list) ->
+            views[graph].asJsonObject[list].asJsonArray.map { it.asJsonObject["id"].asString }
+        }.toSet()
+        nodes.flatMap { node -> node["viewNodeIds"].asJsonArray.map { it.asString } }.forEach { assertTrue(it in viewIds, "$it in $viewIds") }
+
+        val zdlHierarchy = request("zenwave/hierarchy", """{"uri":"$zdlUri"}""").asJsonArray
+        assertTrue(zdlHierarchy.toString().contains("\"label\":\"createOrder\""), zdlHierarchy.toString())
+        val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$zflUri"}}""").asJsonArray
+        assertTrue(symbols.size() > 0)
+
+        val (code, data) = requestError("zenwave/hierarchy", """{"uri":"${workspace.resolve("missing.zdl").toUri()}"}""")
+        assertEquals(-32803, code)
+        assertEquals(JsonParser.parseString("""{"kind":"documentNotFound"}"""), data)
+        assertEquals(0, request("zenwave/hierarchy", """{"uri":"${workspace.resolve("notes.txt").toUri()}"}""").asJsonArray.size())
+        assertEquals(-32602, requestError("zenwave/hierarchy", "{}").first)
+    }
+
+    @Test
+    fun symbolAtResolvesAPositionForTheReferenceRequests() {
+        initialize()
+        open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)
+        val lines = CHECKOUT_ZFL.lines()
+
+        val system = request("zenwave/symbolAt", position(CHECKOUT_URI, lines.indexOfFirst { it.trim() == "Orders {" }, 6)).asJsonObject
+        assertEquals(setOf("uri", "semanticId", "range"), system.keySet())
+        assertEquals("$CHECKOUT_URI#systems.Orders", system["semanticId"].asString)
+        val forward = request("zenwave/forwardReferences", """{"uri":"${system["uri"].asString}","semanticId":"${system["semanticId"].asString}"}""").asJsonArray
+        assertEquals("declares-domain", forward.single().asJsonObject["relationType"].asString)
+
+        val whenLine = lines.indexOfFirst { it.contains("when CheckoutStarted do createOrder") }
+        val command = request("zenwave/symbolAt", position(CHECKOUT_URI, whenLine, lines[whenLine].indexOf("createOrder") + 2)).asJsonObject
+        assertEquals("$CHECKOUT_URI#flows.CheckoutFlow.commands.createOrder", command["semanticId"].asString)
+        val uses = request("zenwave/forwardReferences", """{"uri":"$CHECKOUT_URI","semanticId":"${command["semanticId"].asString}"}""").asJsonArray
+        assertEquals("uses", uses.first().asJsonObject["relationType"].asString)
+
+        assertTrue(request("zenwave/symbolAt", position(CHECKOUT_URI, lines.indexOfFirst { it.isBlank() }, 0)).isJsonNull)
+        val (code, data) = requestError("zenwave/symbolAt", position("file:///workspace/never-opened.zfl", 0, 0))
+        assertEquals(-32803, code)
+        assertEquals(JsonParser.parseString("""{"kind":"documentNotFound"}"""), data)
+        assertEquals(-32602, requestError("zenwave/symbolAt", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").first)
+    }
+
+    private fun position(uri: String, line: Int, character: Int) =
+        """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":$character}}"""
+
+    private fun flatten(node: JsonObject): List<JsonObject> =
+        listOf(node) + node["children"].asJsonArray.flatMap { flatten(it.asJsonObject) }
+
     private fun hierarchyDepth(node: JsonObject): Int {
-        listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints").forEach { key ->
+        listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints", "viewNodeIds").forEach { key ->
             assertTrue(node.has(key), "hierarchy node has $key: $node")
         }
         val children: JsonArray = node["children"].asJsonArray
@@ -346,6 +421,16 @@ class ZenwaveLspWireTest {
                     completed: OrderCreated
                     rejected: OrderRejected
                 }
+            }
+        """.trimIndent()
+
+        val MODEL_ZDL = """
+            entity Order {
+                total Integer
+            }
+
+            service OrderService for (Order) {
+                createOrder(Order) Order
             }
         """.trimIndent()
 

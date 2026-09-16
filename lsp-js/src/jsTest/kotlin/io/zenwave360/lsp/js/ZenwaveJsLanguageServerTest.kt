@@ -76,7 +76,7 @@ class ZenwaveJsLanguageServerTest {
         assertEquals(
             listOf(
                 "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
-                "zenwave/eventFlowViews", "zenwave/preview",
+                "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt",
             ),
             advertised,
         )
@@ -111,7 +111,7 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
-    fun servesAnOpenedZdlDocument() {
+    fun servesAnOpenedZdlDocument(): Promise<Unit> {
         val (_, recording) = listening()
 
         recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
@@ -127,13 +127,60 @@ class ZenwaveJsLanguageServerTest {
         assertNotNull(hover)
         assertEquals("markdown", hover.contents.kind)
 
-        val hierarchy = recording.call("zenwave/hierarchy", jsonObject("uri" to ORDERS_URI)) as Array<dynamic>
-        assertTrue(hierarchy.isNotEmpty())
-        assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
-        assertEquals(ORDERS_URI, hierarchy.first().sourceUri)
-
         val symbols = recording.call("onDocumentSymbol", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
         assertTrue(JSON.stringify(symbols).contains("\"name\":\"CustomerOrder\""))
+
+        return (recording.call("zenwave/hierarchy", jsonObject("uri" to ORDERS_URI)) as Promise<dynamic>).then { result: dynamic ->
+            val hierarchy = result as Array<dynamic>
+            assertTrue(hierarchy.isNotEmpty())
+            assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
+            assertEquals(ORDERS_URI, hierarchy.first().sourceUri)
+            assertTrue(isPresent(hierarchy.first().viewNodeIds))
+        }
+    }
+
+    @Test
+    fun answersSymbolAtWithWhatTheReferenceRequestsTake(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = """systems {
+    @zdl("orders/model.zdl")
+    Orders {
+        service OrderService {
+            commands: createOrder
+        }
+    }
+}
+
+flow CheckoutFlow {
+    start CheckoutStarted {
+    }
+    when CheckoutStarted do createOrder {
+        service Orders.OrderService
+        emits OrderCreated
+    }
+    end {
+        completed: OrderCreated
+    }
+}
+"""
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        fun symbolAt(line: Int, character: Int): Promise<dynamic> =
+            recording.call(
+                "zenwave/symbolAt",
+                jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to character)),
+            ) as Promise<dynamic>
+
+        return symbolAt(2, 6).then { symbol: dynamic ->
+            assertEquals("$uri#systems.Orders", symbol.semanticId)
+            assertEquals(uri, symbol.uri)
+            val references = recording.call("zenwave/forwardReferences", jsonObject("uri" to symbol.uri, "semanticId" to symbol.semanticId)) as Array<dynamic>
+            assertEquals("declares-domain", references.single().relationType)
+            symbolAt(8, 0)
+        }.then { blank: dynamic ->
+            assertEquals(null, blank)
+        }
     }
 
     @Test
@@ -246,6 +293,6 @@ class ZenwaveJsLanguageServerTest {
         recording.call("onDidCloseTextDocument", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
 
         assertEquals(0, (recording.diagnostics.last().diagnostics as Array<dynamic>).size)
-        assertEquals(0, (recording.call("zenwave/hierarchy", jsonObject("uri" to ORDERS_URI)) as Array<dynamic>).size)
+        assertEquals(0, (recording.call("onDocumentSymbol", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI))) as Array<dynamic>).size)
     }
 }

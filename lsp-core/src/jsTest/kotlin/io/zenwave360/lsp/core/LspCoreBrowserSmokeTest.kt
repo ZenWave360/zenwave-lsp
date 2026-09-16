@@ -136,6 +136,33 @@ class LspCoreBrowserSmokeTest {
     }
 
     @Test
+    fun aDocumentTheBrowserCannotReadIsNotFoundAndAnUnreachableZdlLeavesNodesInTheFlow() = runTest {
+        val server = server()
+        // Without a file system, file: documents cannot be read, and nothing reads vscode-vfs: documents.
+        listOf("file:///workspace/never-opened.zdl", "vscode-vfs://github/acme/models/orders.zdl").forEach { uri ->
+            val failure = runCatching { server.conceptualHierarchy(uri) }.exceptionOrNull()
+            assertEquals(
+                io.zenwave360.lsp.core.visualization.DocumentFailureKind.DOCUMENT_NOT_FOUND,
+                (failure as? io.zenwave360.lsp.core.visualization.DocumentRequestException)?.kind,
+                "$uri: $failure",
+            )
+        }
+
+        val zflUri = "vscode-vfs://github/acme/models/checkout.zfl"
+        val zdlUri = "vscode-vfs://github/acme/models/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(zflUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        val unreached = server.conceptualHierarchy(zflUri).flatMap { listOf(it) + it.children + it.children.flatMap { c -> c.children } }
+        assertTrue(unreached.all { it.source.uri == zflUri }, "unreachable ZDL: $unreached")
+
+        // An open ZDL is reachable in a browser too.
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL))
+        val service = server.conceptualHierarchy(zflUri).single { it.kind == "section" && it.label == "systems" }
+            .children.single().children.single()
+        assertEquals(zdlUri, service.source.uri)
+        assertEquals(listOf("group:Orders>OrderService"), service.viewNodeIds)
+    }
+
+    @Test
     fun advertisesEveryLanguageModule() {
         val languageIds = server().capabilities().map { it.languageId }.toSet()
 

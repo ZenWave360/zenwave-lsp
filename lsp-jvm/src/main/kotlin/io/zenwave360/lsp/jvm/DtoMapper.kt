@@ -123,6 +123,19 @@ data class PreviewRequest(
     val sequenceRenderMode: String? = null
 )
 
+/** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */
+data class SymbolAtRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val position: org.eclipse.lsp4j.Position?
+)
+
+/** Result of `zenwave/symbolAt`: what `forwardReferences` and `reverseReferences` take, and where the symbol is. */
+data class SymbolAtResult(
+    val uri: String,
+    val semanticId: String,
+    val range: Range?
+)
+
 data class ModuleSelector(
     val languageId: String,
     val extensions: List<String>
@@ -137,7 +150,9 @@ data class HierarchyNodeDto(
     val sourceRange: Range,
     val children: List<HierarchyNodeDto>,
     val relatedResources: List<NavigationTarget>,
-    val uiHints: Map<String, String>
+    val uiHints: Map<String, String>,
+    /** Ids of the nodes and service groups in the same document's `zenwave/eventFlowViews` that stand for this concept. */
+    val viewNodeIds: List<String> = emptyList()
 )
 
 internal fun HierarchyNode.toDto(): HierarchyNodeDto =
@@ -150,5 +165,6 @@ internal fun HierarchyNode.toDto(): HierarchyNodeDto =
         sourceRange = source.range,
         children = children.map { it.toDto() },
         relatedResources = relatedResources,
-        uiHints = uiHints
+        uiHints = uiHints,
+        viewNodeIds = viewNodeIds
     )

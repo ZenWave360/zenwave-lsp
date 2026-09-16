@@ -274,6 +274,7 @@ class ModelVisualizationsTest {
                 "zenwave/organizeZflServices",
                 "zenwave/eventFlowViews",
                 "zenwave/preview",
+                "zenwave/symbolAt",
             ),
             ZenwaveCustomRequests.ALL,
         )

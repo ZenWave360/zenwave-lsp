@@ -2,8 +2,10 @@
 // and speaks LSP to it over child-process IPC, as vscode-languageclient's TransportKind.ipc does.
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, before, describe, test } from 'node:test';
 import { createMessageConnection, IPCMessageReader, IPCMessageWriter } from 'vscode-jsonrpc/node.js';
 
@@ -19,6 +21,7 @@ const EXPECTED_CUSTOM_REQUESTS = [
   'zenwave/organizeZflServices',
   'zenwave/eventFlowViews',
   'zenwave/preview',
+  'zenwave/symbolAt',
 ];
 
 const checkoutUri = 'file:///workspace/checkout.zfl';
@@ -55,7 +58,11 @@ const brokenZflText = 'flow Broken {\n    when {{ do\n';
 const REQUEST_FAILED = -32803;
 const INVALID_PARAMS = -32602;
 
-const HIERARCHY_NODE_KEYS = ['id', 'label', 'kind', 'language', 'sourceUri', 'sourceRange', 'children', 'relatedResources', 'uiHints'];
+const HIERARCHY_NODE_KEYS = ['id', 'label', 'kind', 'language', 'sourceUri', 'sourceRange', 'children', 'relatedResources', 'uiHints', 'viewNodeIds'];
+
+function flatten(node) {
+  return [node, ...node.children.flatMap(flatten)];
+}
 
 function assertHierarchyNode(node, path = node.label) {
   for (const key of HIERARCHY_NODE_KEYS) assert.ok(key in node, `${path} has ${key}: ${JSON.stringify(node)}`);
@@ -300,6 +307,53 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(badMode.code, INVALID_PARAMS);
     const noDocument = await requestFailure(server, 'zenwave/preview', {});
     assert.equal(noDocument.code, INVALID_PARAMS);
+  });
+
+  test('zenwave/hierarchy reads documents that are not open, and nodes point at the declaring ZDL', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'zenwave-ipc-'));
+    mkdirSync(join(workspace, 'orders'));
+    const zdlPath = join(workspace, 'orders', 'model.zdl');
+    writeFileSync(zdlPath, ['entity Order {', '    total Integer', '}', '', 'service OrderService for (Order) {', '    createOrder(Order) Order', '}', ''].join('\n'));
+    const zflPath = join(workspace, 'checkout.zfl');
+    writeFileSync(zflPath, checkoutText);
+    const zdlUri = pathToFileURL(zdlPath).href;
+    const zflUri = pathToFileURL(zflPath).href;
+
+    const hierarchy = await server.connection.sendRequest('zenwave/hierarchy', { uri: zflUri });
+    hierarchy.forEach((node) => assertHierarchyNode(node));
+    const nodes = hierarchy.flatMap(flatten);
+    assert.equal(nodes.find((node) => node.kind === 'system').sourceUri, zdlUri);
+    const command = nodes.find((node) => node.kind === 'command');
+    assert.equal(command.sourceUri, zdlUri, JSON.stringify(command));
+    assert.deepEqual(command.viewNodeIds, ['command:createOrder']);
+    assert.ok(command.relatedResources.some((target) => target.relationType === 'referenced-by' && target.uri === zflUri));
+
+    const missing = await requestFailure(server, 'zenwave/hierarchy', { uri: pathToFileURL(join(workspace, 'missing.zdl')).href });
+    assert.equal(missing.code, REQUEST_FAILED);
+    assert.deepEqual(missing.data, { kind: 'documentNotFound' });
+    assert.deepEqual(await server.connection.sendRequest('zenwave/hierarchy', { uri: pathToFileURL(join(workspace, 'notes.txt')).href }), []);
+    assert.equal((await requestFailure(server, 'zenwave/hierarchy', {})).code, INVALID_PARAMS);
+  });
+
+  test('zenwave/symbolAt resolves a position into what the reference requests take', async () => {
+    const lines = checkoutText.split('\n');
+    const at = (line, character, uri = checkoutUri) => ({ textDocument: { uri }, position: { line, character } });
+    const system = await server.connection.sendRequest('zenwave/symbolAt', at(lines.indexOf('    Orders {'), 6));
+    assert.deepEqual(Object.keys(system).sort(), ['range', 'semanticId', 'uri']);
+    assert.equal(system.semanticId, `${checkoutUri}#systems.Orders`);
+    const forward = await server.connection.sendRequest('zenwave/forwardReferences', { uri: system.uri, semanticId: system.semanticId });
+    assert.equal(forward[0].relationType, 'declares-domain');
+
+    const whenLine = lines.findIndex((line) => line.includes('do createOrder'));
+    const command = await server.connection.sendRequest('zenwave/symbolAt', at(whenLine, lines[whenLine].indexOf('createOrder') + 2));
+    assert.equal(command.semanticId, `${checkoutUri}#flows.CheckoutFlow.commands.createOrder`);
+    const uses = await server.connection.sendRequest('zenwave/forwardReferences', { uri: checkoutUri, semanticId: command.semanticId });
+    assert.equal(uses[0].relationType, 'uses');
+
+    assert.equal(await server.connection.sendRequest('zenwave/symbolAt', at(lines.indexOf(''), 0)), null);
+    const notOpen = await requestFailure(server, 'zenwave/symbolAt', at(0, 0, 'file:///workspace/never-opened.zfl'));
+    assert.deepEqual(notOpen.data, { kind: 'documentNotFound' });
+    assert.equal((await requestFailure(server, 'zenwave/symbolAt', { textDocument: { uri: checkoutUri } })).code, INVALID_PARAMS);
   });
 
   test('an unregistered request is answered with MethodNotFound', async () => {

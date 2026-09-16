@@ -67,7 +67,12 @@ class ZenwaveJsLanguageServer(
 
     init {
         registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
-            server.hierarchy(params.uri as String).map(::hierarchyNodeToJson).toTypedArray()
+            answer {
+                val uri = stringOrNull(if (isPresent(params)) params.uri else null)
+                    ?: throw InvalidRequestParamsException("uri is required")
+                // A document that is not open is read by the server, asynchronously (fetch, or Node's fs).
+                server.conceptualHierarchy(uri).map(::hierarchyNodeToJson).toTypedArray()
+            }
         }
         registerCustomRequest(ZenwaveCustomRequests.FORWARD_REFERENCES) { params ->
             server.forwardReferences(params.uri as String, params.semanticId as String)
@@ -94,6 +99,18 @@ class ZenwaveJsLanguageServer(
                     throw InvalidRequestParamsException("sequenceRenderMode must be a string")
                 }
                 JSON.parse<dynamic>(VisualizationJson.preview(server.preview(uri, stringOrNull(mode))))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.SYMBOL_AT) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                val position = params.position
+                if (!isPresent(position) || jsTypeOf(position.line) != "number" || jsTypeOf(position.character) != "number") {
+                    throw InvalidRequestParamsException("position is required")
+                }
+                server.symbolAt(uri, positionFromJson(position))?.let { symbol ->
+                    jsonObject("uri" to symbol.uri, "semanticId" to symbol.semanticId, "range" to symbol.range?.let(::rangeToJson))
+                }
             }
         }
     }

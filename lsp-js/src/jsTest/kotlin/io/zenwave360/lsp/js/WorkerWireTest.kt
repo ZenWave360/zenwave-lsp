@@ -86,6 +86,7 @@ class WorkerWireTest {
             "        emits OrderCreated\n        emits OrderRejected\n    }\n\n    end {\n        completed: OrderCreated\n" +
             "        rejected: OrderRejected\n    }\n}\n"
         val brokenZflUri = "file:///workspace/broken.zfl"
+        val fixtures = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures"
 
         return client.request(
             "initialize",
@@ -103,7 +104,7 @@ class WorkerWireTest {
             assertEquals(
                 listOf(
                     "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
-                    "zenwave/eventFlowViews", "zenwave/preview",
+                    "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt",
                 ),
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
@@ -170,6 +171,28 @@ class WorkerWireTest {
             client.requestError("zenwave/doesNotExist", jsonObject("uri" to ordersUri))
         }.then { error: dynamic ->
             assertEquals(-32601, error.code)
+            client.request(
+                "zenwave/symbolAt",
+                jsonObject("textDocument" to jsonObject("uri" to checkoutUri), "position" to jsonObject("line" to 2, "character" to 6)),
+            )
+        }.then { symbol: dynamic ->
+            assertEquals("$checkoutUri#systems.Orders", symbol.semanticId)
+            // Neither fixture is open: the worker reads both over fetch, and the flow's nodes point at the ZDL.
+            client.request("zenwave/hierarchy", jsonObject("uri" to "$fixtures/checkout.zfl"))
+        }.then { hierarchy: dynamic ->
+            val system = (hierarchy as Array<dynamic>).first { it.kind == "section" }.children[0]
+            assertEquals("$fixtures/orders/model.zdl", system.sourceUri, JSON.stringify(hierarchy))
+            val commands = system.children[0].children as Array<dynamic>
+            assertEquals(1, commands.size, JSON.stringify(hierarchy))
+            val command = commands[0]
+            assertEquals("createOrder", command.label)
+            assertEquals("$fixtures/orders/model.zdl", command.sourceUri)
+            assertEquals("command:createOrder", (command.viewNodeIds as Array<String>).single())
+            // A file: document cannot be read in a browser.
+            client.requestError("zenwave/hierarchy", jsonObject("uri" to "file:///workspace/never-opened.zdl"))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentNotFound", error.data.kind)
             client.request("shutdown", null)
         }.then {
             client.notify("exit", null)
@@ -180,7 +203,7 @@ class WorkerWireTest {
 }
 
 private fun hierarchyDepth(node: dynamic): Int {
-    listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints").forEach { key ->
+    listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints", "viewNodeIds").forEach { key ->
         assertTrue(isPresent(node[key]), "hierarchy node has $key: ${JSON.stringify(node)}")
     }
     val children = node.children as Array<dynamic>

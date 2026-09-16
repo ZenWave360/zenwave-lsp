@@ -56,11 +56,23 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints }[]` |
+| `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints, viewNodeIds }[]` |
 | `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
 | `zenwave/organizeZflServices` | `{ uri }` | the reorganised ZFL text, or `null` |
 | `zenwave/eventFlowViews` | `{ textDocument: { uri } }` | `{ flowGraph, serviceGraph }`: dsl-kotlin's laid-out flow and service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`) |
 | `zenwave/preview` | `{ textDocument: { uri }, sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content }[], defaultRepresentationId }` |
+| `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
+
+`zenwave/hierarchy` answers whether or not the document is open. An open document is answered from the
+editor's content; any other document is read by the server: files through Node's `fs` (the Node entry point),
+`http(s):` through `fetch` (both entry points). A document it cannot read fails with `-32803`
+`documentNotFound`; the worker cannot read `file:` documents, nor schemes such as `vscode-vfs:`. A document no
+module builds hierarchies for answers `[]`. In a ZFL hierarchy the systems, services and commands that the
+annotated ZDL declares point at that ZDL (`sourceUri`/`sourceRange`), open or read, and list where the flow
+refers to them as a `referenced-by` related resource. `viewNodeIds` names the ids of the nodes and service
+groups of the same document's `zenwave/eventFlowViews` that stand for the node's concept (`command:createOrder`,
+`event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:…`); it
+is empty when the diagram has no counterpart.
 
 `zenwave/preview` answers for ZDL (one Mermaid `class-diagram`) and ZFL (a `flowchart`, then one
 `sequence:<outcome>:<index>` per end outcome; the first sequence is the default). `sequenceRenderMode`

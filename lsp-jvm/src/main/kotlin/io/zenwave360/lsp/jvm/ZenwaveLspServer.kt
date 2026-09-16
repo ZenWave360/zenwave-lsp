@@ -50,6 +50,10 @@ import java.util.concurrent.ConcurrentHashMap
  * annotations below and that list name the same methods.
  */
 interface ZenwaveCustomRequests {
+    /**
+     * The conceptual hierarchy of a document, open or not; a document that is not open is read by the server.
+     * A -32803 error with `data.kind` `documentNotFound` when it is neither open nor readable.
+     */
     @JsonRequest("zenwave/hierarchy")
     fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>>
 
@@ -69,6 +73,13 @@ interface ZenwaveCustomRequests {
     /** `{representations: [{id, title, format, content}], defaultRepresentationId}`, or a -32803 error. */
     @JsonRequest("zenwave/preview")
     fun preview(request: PreviewRequest): CompletableFuture<JsonElement>
+
+    /**
+     * The symbol at a position, `{uri, semanticId, range?}` or null, in the form `forwardReferences` and
+     * `reverseReferences` take. A -32803 `documentNotFound` error when the document is not open.
+     */
+    @JsonRequest("zenwave/symbolAt")
+    fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?>
 }
 
 class ZenwaveLspServer(
@@ -200,9 +211,18 @@ class ZenwaveLspServer(
     }
 
     override fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>> =
-        CompletableFuture.completedFuture(
-            server.hierarchy(request.uri).map { it.toDto() }
-        )
+        answer {
+            @Suppress("SENSELESS_COMPARISON") // Gson leaves an absent uri null
+            val uri = request.uri.takeIf { it != null } ?: throw InvalidRequestParamsException("uri is required")
+            runBlocking { server.conceptualHierarchy(uri) }.map { it.toDto() }
+        }
+
+    override fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            val position = request.position ?: throw InvalidRequestParamsException("position is required")
+            server.symbolAt(uri, DtoMapper.toPosition(position))?.let { SymbolAtResult(it.uri, it.semanticId, it.range) }
+        }
 
     override fun forwardReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>> =
         CompletableFuture.completedFuture(

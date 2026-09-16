@@ -13,6 +13,7 @@ import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.parser.ZflParser
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
@@ -100,10 +101,16 @@ class ZflLanguageModule(
     }
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZflMap())
+        hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZflMap(), snapshot.text)
 
     override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap())
+        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), snapshot.text)
+
+    override fun hierarchyDependencies(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<String> =
+        declaredZdlUris(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.distinct()
+
+    override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<HierarchyNode> =
+        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), snapshot.text, related)
 
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
