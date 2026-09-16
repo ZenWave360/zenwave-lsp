@@ -83,3 +83,6 @@ gradle-*.log
 /build/
 /.mcp_data/embeddings-cache.json
 /.mcp_data/identifier-embeddings-cache.json
+
+### npm ###
+node_modules/
