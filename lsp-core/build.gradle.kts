@@ -4,19 +4,27 @@ plugins {
     id("com.goncalossilva.resources") version "0.14.0"
 }
 
-val dslKotlinGeneratedSrc = rootProject.projectDir.resolve("../dsl-kotlin/build/generated/antlr/commonMain/kotlin")
+// dsl-kotlin parser sources are compiled directly from the sibling checkout. Its directory defaults to
+// ../dsl-kotlin and follows the same override as settings.gradle.kts
+// (-Pzenwave.local.dslKotlinDir or ZENWAVE_LOCAL_DSL_KOTLIN_DIR, relative to the root project).
+val dslKotlinDir = rootProject.projectDir.resolve(
+    providers.gradleProperty("zenwave.local.dslKotlinDir").orNull
+        ?: providers.environmentVariable("ZENWAVE_LOCAL_DSL_KOTLIN_DIR").orNull
+        ?: "../dsl-kotlin"
+)
+val dslKotlinGeneratedSrc = dslKotlinDir.resolve("build/generated/antlr/commonMain/kotlin")
 val dslKotlinSharedSrcRoots = listOf(
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/source"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/utils"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/source"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/utils"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
 )
 
 kotlin {
