@@ -44,6 +44,8 @@ kotlin {
             dependencies {
                 implementation(projects.lspCore)
                 implementation(kotlin("stdlib-js"))
+                // zenwave/eventFlowViews lays out through elkjs, asynchronously: its handler answers with a Promise.
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
             }
         }
 

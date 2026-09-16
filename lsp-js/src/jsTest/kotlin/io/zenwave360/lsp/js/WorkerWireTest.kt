@@ -79,6 +79,13 @@ class WorkerWireTest {
         val brokenText = "entity Customer {\n    name String required\n}\n\naggregate CustomerAggregate(MissingEntity) {\n}\n"
         val ordersUri = "file:///workspace/orders.zdl"
         val ordersText = "entity Customer {\n    name String required\n}\n\nentity CustomerOrder {\n    customer Customer\n    total Integer\n}\n"
+        val checkoutUri = "file:///workspace/checkout.zfl"
+        val checkoutText = "systems {\n    @zdl(\"orders/model.zdl\")\n    Orders {\n        service OrderService {\n" +
+            "            commands: createOrder\n        }\n    }\n}\n\nflow CheckoutFlow {\n    @actor(Customer)\n" +
+            "    start CheckoutStarted {\n    }\n\n    when CheckoutStarted do createOrder {\n        service Orders.OrderService\n" +
+            "        emits OrderCreated\n        emits OrderRejected\n    }\n\n    end {\n        completed: OrderCreated\n" +
+            "        rejected: OrderRejected\n    }\n}\n"
+        val brokenZflUri = "file:///workspace/broken.zfl"
 
         return client.request(
             "initialize",
@@ -94,7 +101,10 @@ class WorkerWireTest {
             assertEquals(2, result.capabilities.textDocumentSync)
             assertEquals(true, result.capabilities.hoverProvider)
             assertEquals(
-                listOf("zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices"),
+                listOf(
+                    "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
+                    "zenwave/eventFlowViews", "zenwave/preview",
+                ),
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
             client.notify("initialized", jsonObject())
@@ -117,6 +127,46 @@ class WorkerWireTest {
             client.request("zenwave/hierarchy", jsonObject("uri" to ordersUri))
         }.then { hierarchy: dynamic ->
             assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
+            client.notify("textDocument/didOpen", textDocumentItem(checkoutUri, "zfl", 1, checkoutText))
+            client.request("zenwave/hierarchy", jsonObject("uri" to checkoutUri))
+        }.then { hierarchy: dynamic ->
+            // systems > system > service > command, every level with the full node shape
+            val depth = (hierarchy as Array<dynamic>).maxOf { hierarchyDepth(it) }
+            assertTrue(depth >= 4, "hierarchy depth $depth: ${JSON.stringify(hierarchy)}")
+            client.request("zenwave/forwardReferences", jsonObject("uri" to checkoutUri, "semanticId" to "$checkoutUri#systems.Orders"))
+        }.then { references: dynamic ->
+            assertEquals("declares-domain", (references as Array<dynamic>).first().relationType)
+            // elkjs lays the flow out inside the worker, next to the LSP connection.
+            client.request("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to checkoutUri)))
+        }.then { views: dynamic ->
+            assertEquals("zfl.eventflow.view@1", views.flowGraph.schema)
+            assertEquals("zfl.services.view@1", views.serviceGraph.schema)
+            val nodes = views.flowGraph.nodes as Array<dynamic>
+            assertTrue(nodes.isNotEmpty())
+            assertTrue(nodes.all { jsTypeOf(it.position.x) == "number" && jsTypeOf(it.dimensions.width) == "number" })
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to checkoutUri)))
+        }.then { preview: dynamic ->
+            val ids = (preview.representations as Array<dynamic>).map { it.id as String }
+            assertEquals(listOf("flowchart", "sequence:completed:0", "sequence:rejected:1"), ids)
+            assertEquals("sequence:completed:0", preview.defaultRepresentationId)
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
+        }.then { preview: dynamic ->
+            assertEquals("class-diagram", preview.defaultRepresentationId)
+            assertEquals("MERMAID", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(brokenZflUri, "zfl", 1, "flow Broken {\n    when {{ do\n"))
+            client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to brokenZflUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentUnreadable", error.data.kind)
+            assertTrue((error.data.diagnostics as Array<dynamic>).isNotEmpty())
+            client.requestError("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/never-opened.zdl")))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentNotFound", error.data.kind)
+            client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("unsupportedDocument", error.data.kind)
             client.requestError("zenwave/doesNotExist", jsonObject("uri" to ordersUri))
         }.then { error: dynamic ->
             assertEquals(-32601, error.code)
@@ -127,6 +177,14 @@ class WorkerWireTest {
             assertEquals(null, client.workerError)
         }
     }
+}
+
+private fun hierarchyDepth(node: dynamic): Int {
+    listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints").forEach { key ->
+        assertTrue(isPresent(node[key]), "hierarchy node has $key: ${JSON.stringify(node)}")
+    }
+    val children = node.children as Array<dynamic>
+    return 1 + (children.maxOfOrNull { hierarchyDepth(it) } ?: 0)
 }
 
 private fun createWorker(scriptUrl: String): dynamic {

@@ -50,7 +50,30 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 - `moduleSelectors`: `{ languageId, extensions }[]`, one entry per language module;
 - `customRequests`: `string[]`, the `zenwave/*` requests this server answers. The list is built from the
   server's handler registration, so a client can rely on it. A request that is not listed is answered
-  with JSON-RPC `-32601`.
+  with JSON-RPC `-32601`. lsp-jvm advertises the same list.
+
+## Custom requests
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints }[]` |
+| `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
+| `zenwave/organizeZflServices` | `{ uri }` | the reorganised ZFL text, or `null` |
+| `zenwave/eventFlowViews` | `{ textDocument: { uri } }` | `{ flowGraph, serviceGraph }`: dsl-kotlin's laid-out flow and service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`) |
+| `zenwave/preview` | `{ textDocument: { uri }, sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content }[], defaultRepresentationId }` |
+
+`zenwave/preview` answers for ZDL (one Mermaid `class-diagram`) and ZFL (a `flowchart`, then one
+`sequence:<outcome>:<index>` per end outcome; the first sequence is the default). `sequenceRenderMode`
+defaults to `ALT_BLOCKS`. Null properties are omitted from every result.
+
+Both visualisation requests read open documents. When a document cannot answer they fail with JSON-RPC
+`-32803` and `data.kind`: `documentUnreadable` (a syntax error; `data.diagnostics` holds LSP diagnostics),
+`documentNotFound` (not open) or `unsupportedDocument` (a kind of document the request does not cover).
+Malformed params fail with `-32602`. An empty model is a successful, empty result.
+
+The worker bundle carries elkjs for the flow layout. elkjs' in-process layout worker script would take over
+the Web Worker's `onmessage` when it detects a worker global; `build.mjs` disables that detection when bundling,
+and the build fails if an elkjs upgrade changes it.
 
 Initialization options take the form `{ zenwave: { configUri?, projectManifestUri? } }`.
 

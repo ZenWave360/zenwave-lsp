@@ -12,6 +12,9 @@ import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
+import io.zenwave360.lsp.core.visualization.PreviewFormat
+import io.zenwave360.lsp.core.visualization.VisualizationJson
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -105,6 +108,31 @@ class LspCoreBrowserSmokeTest {
 
         assertTrue(server.canHandle(uri))
         assertTrue(server.hierarchy(uri).isNotEmpty(), "ZFL hierarchy")
+    }
+
+    @Test
+    fun servesPreviewsAndLaidOutEventFlowViews() = runTest {
+        val server = server()
+        val zdlUri = "file:///workspace/orders.zdl"
+        val zflUri = "file:///workspace/checkout.zfl"
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), "entity Customer {\n    name String required\n}\n"))
+        server.open(
+            DocumentSnapshot(
+                DocumentRef(zflUri, "zfl", 1),
+                "flow CheckoutFlow {\n    start CheckoutStarted {\n    }\n    when CheckoutStarted do createOrder {\n" +
+                    "        service Orders.OrderService\n        emits OrderCreated\n    }\n    end {\n        completed: OrderCreated\n    }\n}\n",
+            )
+        )
+
+        val zdlPreview = server.preview(zdlUri)
+        assertEquals("class-diagram", zdlPreview.defaultRepresentationId)
+        assertEquals(PreviewFormat.MERMAID, zdlPreview.representations.single().format)
+        assertTrue(server.preview(zflUri).representations.first().content.startsWith("flowchart"))
+
+        // ELK layout through elkjs, in the browser.
+        val views = server.eventFlowViews(zflUri)
+        assertTrue(views.flowGraph.hasLayout(), "flow nodes are positioned")
+        assertTrue(VisualizationJson.eventFlowViews(views).contains("\"schema\":\"zfl.eventflow.view@1\""))
     }
 
     @Test

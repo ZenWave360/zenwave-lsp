@@ -1,6 +1,9 @@
 package io.zenwave360.lsp.js
 
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
+import kotlin.js.Promise
 import kotlin.test.Test
+import kotlin.test.fail
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -71,9 +74,14 @@ class ZenwaveJsLanguageServerTest {
 
         assertEquals(server.customRequestMethods, advertised)
         assertEquals(
-            listOf("zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices"),
+            listOf(
+                "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
+                "zenwave/eventFlowViews", "zenwave/preview",
+            ),
             advertised,
         )
+        // The same list lsp-jvm advertises.
+        assertEquals(ZenwaveCustomRequests.ALL, advertised)
         assertEquals("zenwave-lsp", result.serverInfo.name)
         assertEquals("1.2.3-test", result.serverInfo.version)
         assertEquals(2, result.capabilities.textDocumentSync)
@@ -156,6 +164,77 @@ class ZenwaveJsLanguageServerTest {
         val edits = formatted as Array<dynamic>
         if (edits.isNotEmpty()) {
             assertTrue((edits.first().newText as String).contains("customer Client"))
+        }
+    }
+
+    @Test
+    fun answersPreviewWithPlainObjects(): Promise<Unit> {
+        val (_, recording) = listening()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val answer = recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+
+        return (answer as Promise<dynamic>).then { result: dynamic ->
+            assertEquals("class-diagram", result.defaultRepresentationId)
+            val representation = (result.representations as Array<dynamic>).single()
+            assertEquals("MERMAID", representation.format)
+            assertEquals("Class diagram", representation.title)
+            assertTrue((representation.content as String).startsWith("classDiagram"))
+        }
+    }
+
+    @Test
+    fun answersEventFlowViewsWithTheViewModels(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = "flow CheckoutFlow {\n    start CheckoutStarted {\n    }\n    when CheckoutStarted do createOrder {\n" +
+            "        service Orders.OrderService\n        emits OrderCreated\n    }\n    end {\n        completed: OrderCreated\n    }\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        val answer = recording.call("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to uri)))
+
+        return (answer as Promise<dynamic>).then { result: dynamic ->
+            assertEquals("zfl.eventflow.view@1", result.flowGraph.schema)
+            assertEquals("zfl.services.view@1", result.serviceGraph.schema)
+            val nodes = result.flowGraph.nodes as Array<dynamic>
+            assertTrue(nodes.isNotEmpty())
+            assertTrue(nodes.all { isPresent(it.position) && isPresent(it.dimensions) })
+        }
+    }
+
+    @Test
+    fun rejectsWithTheResponseErrorBuiltByTheEntryPoint(): Promise<Unit> {
+        val recording = RecordingConnection()
+        val created = mutableListOf<Triple<Int, String, dynamic>>()
+        ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test") { code, message, data ->
+            created += Triple(code, message, data)
+            jsonObject("responseError" to code)
+        }.listen()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val notFound = recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///missing.zdl")))
+        val unsupported = recording.call("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+        val badMode = recording.call(
+            "zenwave/preview",
+            jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI), "sequenceRenderMode" to "SIDEWAYS"),
+        )
+
+        fun rejection(promise: dynamic): Promise<dynamic> =
+            (promise as Promise<dynamic>).then<dynamic>(
+                { _: dynamic -> fail("expected a rejection") },
+                { error: Throwable -> error.asDynamic() },
+            )
+
+        return rejection(notFound).then { error: dynamic ->
+            assertEquals(-32803, error.responseError)
+            rejection(unsupported)
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.responseError)
+            rejection(badMode)
+        }.then { error: dynamic ->
+            assertEquals(-32602, error.responseError)
+            assertEquals(listOf("documentNotFound", "unsupportedDocument"), created.take(2).map { it.third.kind as String })
+            assertEquals(null, created[2].third)
         }
     }
 

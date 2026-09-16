@@ -8,6 +8,14 @@ import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
 import io.zenwave360.lsp.core.spec.asyncapi.AsyncApiLanguageModule
 import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
+import io.zenwave360.lsp.core.visualization.VisualizationJson
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
+import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.promise
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
@@ -47,6 +55,8 @@ class ZenwaveJsLanguageServer(
     private val server: ZenwaveLanguageServer,
     private val connection: dynamic,
     private val serverVersion: String = LSP_JS_VERSION,
+    /** Builds a `vscode-languageserver` `ResponseError(code, message, data)`; supplied by the entry points. */
+    private val createResponseError: ((Int, String, dynamic) -> dynamic)? = null,
 ) {
     private val documentTexts = mutableMapOf<String, String>()
     private val customRequests = linkedMapOf<String, (dynamic) -> Any?>()
@@ -56,20 +66,70 @@ class ZenwaveJsLanguageServer(
         private set
 
     init {
-        registerCustomRequest("zenwave/hierarchy") { params ->
+        registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
             server.hierarchy(params.uri as String).map(::hierarchyNodeToJson).toTypedArray()
         }
-        registerCustomRequest("zenwave/forwardReferences") { params ->
+        registerCustomRequest(ZenwaveCustomRequests.FORWARD_REFERENCES) { params ->
             server.forwardReferences(params.uri as String, params.semanticId as String)
                 .map(::navigationTargetToJson).toTypedArray()
         }
-        registerCustomRequest("zenwave/reverseReferences") { params ->
+        registerCustomRequest(ZenwaveCustomRequests.REVERSE_REFERENCES) { params ->
             server.reverseReferences(params.uri as String, params.semanticId as String)
                 .map(::navigationTargetToJson).toTypedArray()
         }
-        registerCustomRequest("zenwave/organizeZflServices") { params ->
+        registerCustomRequest(ZenwaveCustomRequests.ORGANIZE_ZFL_SERVICES) { params ->
             server.organizeZflServices(params.uri as String)
         }
+        registerCustomRequest(ZenwaveCustomRequests.EVENT_FLOW_VIEWS) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri)))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.PREVIEW) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                val mode = params.sequenceRenderMode
+                if (isPresent(mode) && jsTypeOf(mode) != "string") {
+                    throw InvalidRequestParamsException("sequenceRenderMode must be a string")
+                }
+                JSON.parse<dynamic>(VisualizationJson.preview(server.preview(uri, stringOrNull(mode))))
+            }
+        }
+    }
+
+    /**
+     * Runs a request handler as a Promise. A [DocumentRequestException] or [InvalidRequestParamsException] is
+     * rejected as a JSON-RPC `ResponseError` built by [createResponseError], so the client receives its code
+     * and `data` rather than a generic internal error.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun answer(block: suspend () -> Any?): dynamic {
+        val promise: dynamic = GlobalScope.promise { block() }
+        return promise.catch { error: dynamic -> rejected(responseErrorFor(error)) }
+    }
+
+    private fun responseErrorFor(error: dynamic): dynamic {
+        val (code, message, data) = when (val throwable = error as? Throwable) {
+            is DocumentRequestException -> Triple(
+                ZenwaveErrorCodes.REQUEST_FAILED,
+                throwable.message ?: throwable.kind.wireName,
+                JSON.parse<dynamic>(VisualizationJson.failureData(throwable)),
+            )
+            is InvalidRequestParamsException -> Triple(ZenwaveErrorCodes.INVALID_PARAMS, throwable.message ?: "invalid params", null)
+            else -> return error
+        }
+        return if (createResponseError != null) {
+            // undefined, not null: ResponseError then omits `data`, as LSP4J does.
+            createResponseError.invoke(code, message, data ?: undefined)
+        } else {
+            jsonObject("code" to code, "message" to message, "data" to data)
+        }
+    }
+
+    private fun textDocumentUri(params: dynamic): String {
+        val uri = if (isPresent(params) && isPresent(params.textDocument)) params.textDocument.uri else null
+        return stringOrNull(uri) ?: throw InvalidRequestParamsException("textDocument.uri is required")
     }
 
     /** The custom request methods this server answers, in registration order. */
@@ -250,8 +310,15 @@ internal fun parseInitializationOptions(initializationOptions: dynamic): Zenwave
  */
 @OptIn(ExperimentalJsExport::class)
 @JsExport
-fun startZenwaveLanguageServer(connection: dynamic) {
-    ZenwaveJsLanguageServer(defaultCoreLanguageServer(), connection).listen()
+fun startZenwaveLanguageServer(connection: dynamic, createResponseError: dynamic) {
+    val factory: ((Int, String, dynamic) -> dynamic)? =
+        if (isPresent(createResponseError)) { code, message, data -> createResponseError(code, message, data) } else null
+    ZenwaveJsLanguageServer(defaultCoreLanguageServer(), connection, LSP_JS_VERSION, factory).listen()
+}
+
+private fun rejected(reason: dynamic): dynamic {
+    val promiseConstructor: dynamic = js("Promise")
+    return promiseConstructor.reject(reason)
 }
 
 /** The version of this server, from the Gradle build. */

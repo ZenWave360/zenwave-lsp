@@ -9,6 +9,12 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.SemanticId
 import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.visualization.DocumentFailureKind
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.lsp.core.visualization.EventFlowViews
+import io.zenwave360.lsp.core.visualization.ModelVisualizations
+import io.zenwave360.lsp.core.visualization.PreviewResult
+import io.zenwave360.lsp.core.visualization.VisualizedDocument
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
 import kotlin.concurrent.Volatile
@@ -20,6 +26,7 @@ class ZenwaveLanguageServer(
 ) {
     private val lock = PlatformReadWriteLock()
     private val parsedCache = linkedMapOf<String, DocumentCacheEntry>()
+    private val visualizations = ModelVisualizations()
 
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
@@ -75,6 +82,32 @@ class ZenwaveLanguageServer(
         withEntry(uri) { entry, snapshot ->
             (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot, entry.parsedArtifact)
         }
+
+    /**
+     * The ordered preview representations of an open ZDL or ZFL document (`zenwave/preview`).
+     *
+     * @throws DocumentRequestException when the document is not open, not ZDL or ZFL, or cannot be read
+     * @throws io.zenwave360.lsp.core.visualization.InvalidRequestParamsException for an unknown sequence render mode
+     */
+    fun preview(uri: String, sequenceRenderMode: String? = null): PreviewResult {
+        ModelVisualizations.parseSequenceRenderMode(sequenceRenderMode)
+        return visualizations.preview(visualizedDocument(uri), sequenceRenderMode)
+    }
+
+    /**
+     * The laid-out flow and service view models of an open ZFL document (`zenwave/eventFlowViews`).
+     *
+     * @throws DocumentRequestException when the document is not open, not ZFL, or cannot be read
+     */
+    suspend fun eventFlowViews(uri: String): EventFlowViews =
+        visualizations.eventFlowViews(visualizedDocument(uri))
+
+    private fun visualizedDocument(uri: String): VisualizedDocument {
+        val snapshot = sessionStore.get(uri)
+            ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open")
+        val entry = getOrBuildCacheEntry(snapshot)
+        return VisualizedDocument(snapshot, entry.module?.languageId, entry.diagnostics)
+    }
 
     fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
         crossReferenceIndex.forwardReferences(uri, semanticId)

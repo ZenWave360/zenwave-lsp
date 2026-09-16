@@ -5,6 +5,7 @@
   "license": "MIT",
   "type": "module",
   "devDependencies": {
+    "elkjs": "0.9.3",
     "esbuild": "0.25.10",
     "vscode-jsonrpc": "8.2.0",
     "vscode-languageserver": "9.0.1"

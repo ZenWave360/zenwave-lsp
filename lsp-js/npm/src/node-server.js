@@ -7,6 +7,7 @@ import {
   IPCMessageReader,
   IPCMessageWriter,
   ProposedFeatures,
+  ResponseError,
 } from 'vscode-languageserver/node';
 import { startZenwaveLanguageServer } from 'zenwave-lsp-kotlin';
 
@@ -24,4 +25,4 @@ if (hasTransportArgument) {
   connection = createConnection(ProposedFeatures.all, process.stdin, process.stdout);
 }
 
-startZenwaveLanguageServer(connection);
+startZenwaveLanguageServer(connection, (code, message, data) => new ResponseError(code, message, data));

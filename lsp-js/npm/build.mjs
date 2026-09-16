@@ -2,7 +2,7 @@
 // Invoked by the Gradle task :lsp-js:lspJsBundle:
 //   node build.mjs --kotlin-dir <Kotlin/JS production ESM dir> --out <package dir> --version <version> --readme <README.md>
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -31,11 +31,35 @@ const kotlinModulePlugin = {
   },
 };
 
+// elkjs (EventFlow layout) runs its layout in a "fake worker" loaded from elk-worker.min.js. That script
+// assumes that a global `self` without `document` means it *is* ELK's dedicated worker, and takes over
+// `self.onmessage` — inside our Web Worker that would steal the LSP connection's message handler and leave
+// ELK without its in-process worker. The worker bundle therefore disables that branch, so the script takes its
+// module branch, as it does on Node. The build fails if the expected code is not found (an elkjs upgrade).
+const elkWorkerSelfDetection = 'typeof document===Yxe&&typeof self!==Yxe';
+const elkjsInProcessWorkerPlugin = {
+  name: 'elkjs-in-process-worker',
+  setup(pluginBuild) {
+    pluginBuild.onLoad({ filter: /elkjs[\\/]lib[\\/]elk-worker\.min\.js$/ }, (args) => {
+      const source = readFileSync(args.path, 'utf8');
+      const occurrences = source.split(elkWorkerSelfDetection).length - 1;
+      if (occurrences !== 1) {
+        throw new Error(`${args.path}: expected the worker self-detection exactly once, found ${occurrences}`);
+      }
+      return { contents: source.replace(elkWorkerSelfDetection, 'false'), loader: 'js' };
+    });
+  },
+};
+
 const common = {
   bundle: true,
   logLevel: 'warning',
   legalComments: 'none',
   plugins: [kotlinModulePlugin],
+  // The Kotlin output imports elkjs; it resolves from this npm project, which pins the version lsp-core declares.
+  nodePaths: [join(here, 'node_modules')],
+  // elkjs probes for the optional 'web-worker' package inside a try/catch and only uses it when given a workerUrl.
+  external: ['web-worker'],
   banner: { js: `/* @zenwave360/lsp-js ${values.version} */` },
 };
 
@@ -55,6 +79,7 @@ await build({
   ...common,
   entryPoints: [join(here, 'src/worker.js')],
   outfile: join(outDir, 'dist/browser/zenwave-lsp-worker.js'),
+  plugins: [kotlinModulePlugin, elkjsInProcessWorkerPlugin],
   platform: 'browser',
   format: 'iife',
   target: 'es2020',

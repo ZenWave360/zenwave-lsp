@@ -112,6 +112,17 @@ data class OrganizeZflServicesRequest(
     val uri: String
 )
 
+/** Params of `zenwave/eventFlowViews`. Nullable: Gson leaves absent properties null, reported as InvalidParams. */
+data class TextDocumentRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?
+)
+
+/** Params of `zenwave/preview`; `sequenceRenderMode` is SEPARATE_VARIANTS, ALT_BLOCKS (default) or AUTO. */
+data class PreviewRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val sequenceRenderMode: String? = null
+)
+
 data class ModuleSelector(
     val languageId: String,
     val extensions: List<String>
