@@ -1,45 +1,12 @@
 plugins {
     kotlin("multiplatform")
-    // dsl-kotlin's EventFlow view models, compiled here from source, are @Serializable.
     kotlin("plugin.serialization")
     `maven-publish`
     id("com.goncalossilva.resources") version "0.14.0"
 }
 
-// dsl-kotlin parser sources are compiled directly from the sibling checkout. Its directory defaults to
-// ../dsl-kotlin and follows the same override as settings.gradle.kts
-// (-Pzenwave.local.dslKotlinDir or ZENWAVE_LOCAL_DSL_KOTLIN_DIR, relative to the root project).
-val dslKotlinDir = rootProject.projectDir.resolve(
-    providers.gradleProperty("zenwave.local.dslKotlinDir").orNull
-        ?: providers.environmentVariable("ZENWAVE_LOCAL_DSL_KOTLIN_DIR").orNull
-        ?: "../dsl-kotlin"
-)
-val dslKotlinGeneratedSrc = dslKotlinDir.resolve("build/generated/antlr/commonMain/kotlin")
-val dslKotlinSharedSrcRoots = listOf(
-    // EventFlow view models and their generators (zenwave/eventFlowViews, zenwave/preview).
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/eventflow"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/source"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/utils"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl"),
-    // GenerateMermaidFromZdl (zenwave/preview for ZDL) and its class diagram transformer.
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/application"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/view"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
-    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
-)
-// The platform actuals of the EventFlow layout engine: ELK on the JVM, elkjs on JavaScript.
-val dslKotlinJvmSrcRoots = listOf(
-    dslKotlinDir.resolve("src/jvmMain/kotlin/io/zenwave360/language/eventflow"),
-)
-val dslKotlinJsSrcRoots = listOf(
-    dslKotlinDir.resolve("src/jsMain/kotlin/io/zenwave360/language/eventflow"),
-)
+// Use the included DSL library once. Embedding its sources duplicates the classes
+// pulled in transitively by workspace-runtime and breaks Kotlin/JS linking.
 
 kotlin {
     jvmToolchain(21)
@@ -69,15 +36,13 @@ kotlin {
 
     sourceSets {
         val commonMain by getting {
-            dslKotlinSharedSrcRoots.forEach(kotlin::srcDir)
-            kotlin.srcDir(dslKotlinGeneratedSrc)
             dependencies {
                 implementation(kotlin("stdlib-common"))
 
-                // DSL Kotlin parser sources are compiled directly via srcDir above.
-                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.1.0-SNAPSHOT")
-                implementation("io.zenwave360.manifest:manifest-core:0.1.0-SNAPSHOT")
-                implementation("io.zenwave360.manifest:workspace-runtime:0.1.0-SNAPSHOT")
+                implementation("io.zenwave360.dsl:dsl-kotlin:1.10.0-SNAPSHOT")
+                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.manifest:manifest-core:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.manifest:workspace-runtime:1.0.0-SNAPSHOT")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
@@ -97,7 +62,6 @@ kotlin {
         }
 
         val jvmMain by getting {
-            dslKotlinJvmSrcRoots.forEach(kotlin::srcDir)
             dependencies {
                 // Same version as dsl-kotlin's jvmMain.
                 implementation("org.eclipse.elk:org.eclipse.elk.alg.layered:0.10.0")
@@ -112,7 +76,6 @@ kotlin {
         }
 
         val jsMain by getting {
-            dslKotlinJsSrcRoots.forEach(kotlin::srcDir)
             dependencies {
                 // Same version as dsl-kotlin's jsMain. Bundlers targeting a Web Worker must keep elkjs'
                 // worker script from taking over the worker's message handler (see lsp-js/npm/build.mjs).

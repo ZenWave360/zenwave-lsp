@@ -57,7 +57,7 @@ kotlin {
     }
 }
 
-val lspJsVersion = project.version.toString()
+val lspJsVersion = rootProject.extra["npmVersion"].toString()
 
 val generateLspJsVersion by tasks.registering {
     val outputDir = layout.buildDirectory.dir("generated/lspJsVersion/kotlin")
@@ -86,7 +86,7 @@ val npmCommand = if (isWindows) "npm.cmd" else "npm"
 val npmProjectDir = layout.projectDirectory.dir("npm")
 val kotlinProductionDir = layout.buildDirectory.dir("compileSync/js/main/productionExecutable/kotlin")
 val npmPackageDir = layout.buildDirectory.dir("npm-package")
-val npmPackDir = layout.buildDirectory.dir("npm-pack")
+val npmPackDir = rootProject.layout.buildDirectory.dir("npm")
 
 val lspJsNpmInstall by tasks.registering(Exec::class) {
     group = "npm"
@@ -104,7 +104,7 @@ val lspJsBundle by tasks.registering(Exec::class) {
     workingDir = npmProjectDir.asFile
     inputs.dir(kotlinProductionDir)
     inputs.dir(npmProjectDir.dir("src"))
-    inputs.files(npmProjectDir.file("build.mjs"), layout.projectDirectory.file("README.md"))
+    inputs.files(npmProjectDir.file("build.mjs"), layout.projectDirectory.file("README.md"), rootProject.layout.projectDirectory.file("LICENSE"))
     inputs.property("version", lspJsVersion)
     outputs.dir(npmPackageDir)
     commandLine(
@@ -113,6 +113,7 @@ val lspJsBundle by tasks.registering(Exec::class) {
         "--out", npmPackageDir.get().asFile.absolutePath,
         "--version", lspJsVersion,
         "--readme", layout.projectDirectory.file("README.md").asFile.absolutePath,
+        "--license", rootProject.layout.projectDirectory.file("LICENSE").asFile.absolutePath,
     )
 }
 
@@ -130,13 +131,13 @@ val nodeIpcTest by tasks.registering(Exec::class) {
 
 val lspJsNpmPack by tasks.registering(Exec::class) {
     group = "npm"
-    description = "Packs @zenwave360/lsp-js into build/npm-pack (local use only; nothing is published)."
+    description = "Packs @zenwave360/lsp-js into root build/npm (nothing is published)."
     dependsOn(lspJsBundle)
     workingDir = npmPackageDir.get().asFile
     inputs.dir(npmPackageDir)
-    outputs.dir(npmPackDir)
+    outputs.file(npmPackDir.map { it.file("zenwave360-lsp-js-$lspJsVersion.tgz") })
     doFirst { npmPackDir.get().asFile.mkdirs() }
-    commandLine(npmCommand, "pack", "--pack-destination", npmPackDir.get().asFile.absolutePath)
+    commandLine(npmCommand, "pack", "--ignore-scripts", "--pack-destination", npmPackDir.get().asFile.absolutePath)
 }
 
 // The worker wire test loads the packaged worker entry point, served by Karma at /base/kotlin/lsp-js-package/.
@@ -149,4 +150,4 @@ tasks.named<ProcessResources>("jsTestProcessResources") {
 }
 
 tasks.named("check") { dependsOn(nodeIpcTest) }
-tasks.named("assemble") { dependsOn(lspJsBundle) }
+tasks.named("assemble") { dependsOn(lspJsNpmPack) }

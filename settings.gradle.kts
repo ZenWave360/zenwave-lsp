@@ -22,16 +22,19 @@ includeBuild(localBuildDir("zenwave.local.dslKotlinDir", "ZENWAVE_LOCAL_DSL_KOTL
     }
 }
 
-includeBuild(
-    localBuildDir("zenwave.local.jsonRefParserDir", "ZENWAVE_LOCAL_JSON_REF_PARSER_DIR", "../json-schema-ref-parser-kmp"),
-) {
-    dependencySubstitution {
-        substitute(module("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp")).using(project(":"))
+val useLocalDependencies = providers.gradleProperty("useLocalDependencies")
+    .map { it.toBooleanStrict() }.getOrElse(true)
+val localJsonRefParser = localBuildDir("zenwave.local.jsonRefParserDir", "ZENWAVE_LOCAL_JSON_REF_PARSER_DIR", "../json-schema-ref-parser-kmp")
+if (useLocalDependencies && localJsonRefParser.exists()) {
+    includeBuild(localJsonRefParser) {
+        dependencySubstitution {
+            substitute(module("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp")).using(project(":"))
+        }
     }
 }
 
 val localZenWaveManifest = localBuildDir("zenwave.local.manifestDir", "ZENWAVE_LOCAL_MANIFEST_DIR", "../zenwave-manifest")
-if (localZenWaveManifest.exists()) {
+if (useLocalDependencies && localZenWaveManifest.exists()) {
     includeBuild(localZenWaveManifest) {
         dependencySubstitution {
             substitute(module("io.zenwave360.manifest:manifest-core")).using(project(":manifest-core"))

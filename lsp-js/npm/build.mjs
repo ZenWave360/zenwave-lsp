@@ -14,9 +14,10 @@ const { values } = parseArgs({
     out: { type: 'string' },
     version: { type: 'string' },
     readme: { type: 'string' },
+    license: { type: 'string' },
   },
 });
-for (const required of ['kotlin-dir', 'out', 'version', 'readme']) {
+for (const required of ['kotlin-dir', 'out', 'version', 'readme', 'license']) {
   if (!values[required]) throw new Error(`--${required} is required`);
 }
 
@@ -102,7 +103,12 @@ const packageJson = {
     './worker': './dist/browser/zenwave-lsp-worker.js',
     './package.json': './package.json',
   },
-  files: ['dist', 'README.md'],
+  files: ['dist', 'README.md', 'LICENSE'],
+  publishConfig: {
+    access: 'public',
+    registry: 'https://registry.npmjs.org/',
+    tag: values.version.includes('-') ? 'next' : 'latest',
+  },
   engines: { node: '>=18' },
   zenwave: {
     lsp: {
@@ -116,4 +122,5 @@ const packageJson = {
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`);
 copyFileSync(resolve(values.readme), join(outDir, 'README.md'));
+copyFileSync(resolve(values.license), join(outDir, 'LICENSE'));
 console.log(`Assembled @zenwave360/lsp-js ${values.version} in ${outDir}`);
