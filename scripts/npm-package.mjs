@@ -27,6 +27,12 @@ export function npmVersion(source, { version = '', snapshotBuild = '' } = {}) {
   return result;
 }
 
+export function releaseVersion(source, version) {
+  assert(/^\d+\.\d+\.\d+(?:-rc\.\d+)?$/.test(version), `Invalid release version: ${version}`);
+  assert.equal(npmVersion(source), version, 'Release tags require the same non-SNAPSHOT Gradle version');
+  return version;
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options });
   if (result.error) throw result.error;
@@ -85,7 +91,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(verifyTarball(version));
   } else if (command === 'publish') {
     await publish(version);
+  } else if (command === 'release-version') {
+    console.log(releaseVersion(readFileSync('build.gradle.kts', 'utf8'), version));
   } else {
-    throw new Error('Usage: node scripts/npm-package.mjs version|verify VERSION|publish VERSION');
+    throw new Error('Usage: node scripts/npm-package.mjs version|verify VERSION|publish VERSION|release-version VERSION');
   }
 }

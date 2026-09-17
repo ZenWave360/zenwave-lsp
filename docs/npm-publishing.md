@@ -42,7 +42,7 @@ in an interactive Git Bash terminal with npm 11.15 or newer:
 bash scripts/npm-trust.sh
 ```
 
-This creates a publisher with repository `ZenWave360/zenwave-lsp`, caller workflow
+By default this creates a publisher with repository `ZenWave360/zenwave-lsp`, caller workflow
 `publish-npm-snapshots.yml`, environment `npm-snapshots`, and permission to run
 `npm publish`. The script leaves output attached to the terminal so npm can
 complete browser 2FA. If an obsolete publisher exists, inspect it with
@@ -52,6 +52,52 @@ the replacement. The script does not delete other publisher entries.
 Create the `npm-snapshots` GitHub environment and allow deployment from `develop`
 and `next`. No npm token is needed: the publish job has `id-token: write` and uses
 OIDC with provenance.
+
+For releases, add the separate publisher without recreating the snapshot entry:
+
+```bash
+bash scripts/npm-trust.sh release
+```
+
+It trusts `ZenWave360/zenwave-lsp`, workflow `release.yml`, environment `npm-publish`.
+`bash scripts/npm-trust.sh all` creates both entries when neither has been configured.
+Create the `npm-publish` GitHub environment, allowing tags matching `v*` and the
+`main` branch for manual dispatch. Add required reviewers if releases need approval.
+
+## Release versions
+
+`release.yml` runs when a `v*` tag is pushed. It validates that the tagged commit
+is integrated into `main` and that the root Gradle version exactly matches the
+tag without its `v` prefix. A SNAPSHOT build cannot be published as a release.
+The same `npm-package.yml` builds, tests, verifies, and publishes the tarball:
+
+| Root Gradle version | Git tag | npm version | npm tag |
+| --- | --- | --- | --- |
+| `0.1.0` | `v0.1.0` | `0.1.0` | `latest` |
+| `0.1.0-rc.1` | `v0.1.0-rc.1` | `0.1.0-rc.1` | `next` |
+
+To release `0.1.0`, first integrate the LSP work into `main`. In a release PR,
+set the root `build.gradle.kts` line to `version = "0.1.0"` and commit it as
+`chore(release): release 0.1.0`. All LSP modules inherit that version. After the
+PR is merged, tag the exact release commit from your interactive terminal:
+
+```bash
+git fetch origin main
+# Confirm origin/main is the commit whose Gradle version is 0.1.0.
+git tag -a v0.1.0 origin/main -m "Release 0.1.0"
+git push origin v0.1.0
+```
+
+There is no manual build or packing step. For a release candidate, use
+`0.1.0-rc.1` in both the Gradle version and tag. To retry an existing release tag
+or build without publishing, dispatch `release.yml` from `main`, entering the
+version without `v`. Disable `publishNpm` for an artifact-only build.
+
+Once the tag exists, prepare the next development version (for example,
+`0.1.1-SNAPSHOT`) in a follow-up PR and sync it into `develop`. The release caller
+does not create version-bump PRs, Git tags, GitHub releases, or Maven publications.
+Both callers currently use the pinned DSL library and the same parser/manifest
+snapshot dependencies; the npm artifact bundles their code into its entry points.
 
 ## GitHub Actions and reuse
 
@@ -83,6 +129,10 @@ repository-specific bundling and version generation in Gradle. The caller then
 changes its `uses:` reference; npm continues trusting the caller workflow in
 `zenwave-lsp`, so extraction does not require changing the trusted publisher.
 
-This workflow publishes npm snapshots only. Maven Central publication and stable
-release dispatch are not configured by it; a future `release.yml` caller should
-use the shared release lifecycle and a separate `npm-publish` publisher entry.
+The shared `release-gradle.yml` currently also requires Maven Central publication
+(`publishToMavenCentral`) and does not accept LSP's pinned DSL checkout/build
+arguments. LSP does not configure that Central task yet. Once the shared workflow
+supports this build and the desired publication targets, let it prepare versions
+and tags and call the same reusable npm build/publish jobs. Keep `release.yml`
+as the repository's trusted-publisher caller instead of copying the complete
+release preparation implementation into this repository.
