@@ -5,7 +5,7 @@ plugins {
     id("com.goncalossilva.resources") version "0.14.0"
 }
 
-// Use the included DSL library once. Embedding its sources duplicates the classes
+// Use the DSL Kotlin library once. Embedding its sources duplicates the classes
 // pulled in transitively by workspace-runtime and breaks Kotlin/JS linking.
 
 kotlin {

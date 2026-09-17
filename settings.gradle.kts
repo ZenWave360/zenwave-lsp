@@ -2,8 +2,8 @@ rootProject.name = "zenwave-lsp"
 
 // Sibling checkouts are included as composite builds. The directory defaults to ../<repository>;
 // override it (for example to build against a git worktree) with a Gradle property or an
-// environment variable. lsp-core/build.gradle.kts reads the same dsl-kotlin setting for the
-// parser sources it compiles directly.
+// environment variable. CI resolves the published Kotlin libraries with
+// -PuseLocalDependencies=false.
 //   -Pzenwave.local.dslKotlinDir=../dsl-kotlin-feature                         (ZENWAVE_LOCAL_DSL_KOTLIN_DIR)
 //   -Pzenwave.local.jsonRefParserDir=../json-schema-ref-parser-kmp-feature   (ZENWAVE_LOCAL_JSON_REF_PARSER_DIR)
 //   -Pzenwave.local.manifestDir=../zenwave-manifest-feature                  (ZENWAVE_LOCAL_MANIFEST_DIR)
@@ -16,14 +16,17 @@ fun localBuildDir(property: String, environmentVariable: String, default: String
             ?: default,
     )
 
-includeBuild(localBuildDir("zenwave.local.dslKotlinDir", "ZENWAVE_LOCAL_DSL_KOTLIN_DIR", "../dsl-kotlin")) {
-    dependencySubstitution {
-        substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":"))
+val useLocalDependencies = providers.gradleProperty("useLocalDependencies")
+    .map { it.toBooleanStrict() }.getOrElse(true)
+val localDslKotlin = localBuildDir("zenwave.local.dslKotlinDir", "ZENWAVE_LOCAL_DSL_KOTLIN_DIR", "../dsl-kotlin")
+if (useLocalDependencies && localDslKotlin.exists()) {
+    includeBuild(localDslKotlin) {
+        dependencySubstitution {
+            substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":"))
+        }
     }
 }
 
-val useLocalDependencies = providers.gradleProperty("useLocalDependencies")
-    .map { it.toBooleanStrict() }.getOrElse(true)
 val localJsonRefParser = localBuildDir("zenwave.local.jsonRefParserDir", "ZENWAVE_LOCAL_JSON_REF_PARSER_DIR", "../json-schema-ref-parser-kmp")
 if (useLocalDependencies && localJsonRefParser.exists()) {
     includeBuild(localJsonRefParser) {

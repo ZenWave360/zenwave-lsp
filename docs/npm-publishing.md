@@ -7,13 +7,11 @@ and written into the package metadata before either transport is tested.
 
 ## Build locally
 
-The DSL checkout must contain commit `835a75fdb7b798fa382f90fb3c109de74d1e1115`
-(the `vscode-platform/dsl` worktree), including `GenerateMermaidFromZdl`.
-Until that work is integrated into the usual DSL checkout, build against its worktree:
+The VS Code platform features are integrated into the sibling `develop` branches.
+Local builds can use those checkouts through Gradle composite builds:
 
 ```bash
-./gradlew --no-daemon build npmPack -PnpmVersion=0.1.0-next.0 \
-  -PuseLocalDependencies=false -Pzenwave.local.dslKotlinDir=../dsl-kotlin-vscode-platform
+./gradlew --no-daemon build npmPack -PnpmVersion=0.1.0-next.0
 node scripts/npm-package.mjs verify 0.1.0-next.0
 ```
 
@@ -96,31 +94,36 @@ version without `v`. Disable `publishNpm` for an artifact-only build.
 Once the tag exists, prepare the next development version (for example,
 `0.1.1-SNAPSHOT`) in a follow-up PR and sync it into `develop`. The release caller
 does not create version-bump PRs, Git tags, GitHub releases, or Maven publications.
-Both callers currently use the pinned DSL library and the same parser/manifest
-snapshot dependencies; the npm artifact bundles their code into its entry points.
+Both callers resolve the published DSL, parser, and manifest Kotlin snapshot
+libraries; the npm artifact bundles their code into its entry points. npm packages
+provide JavaScript exports, while the common Kotlin LSP requires Maven-published
+Kotlin libraries.
 
 ## GitHub Actions and reuse
 
 Push `develop` or `next` to run `publish-npm-snapshots.yml`. Manual dispatch has a
 `publishNpm` switch; turn it off to build and download the tarball without publishing.
 
-The caller contains triggers, branch policy, publisher environment, and a pinned
-DSL source revision. `npm-package.yml` is a local reusable prototype containing
+The caller contains triggers, branch policy, and publisher environment.
+`npm-package.yml` is a local reusable prototype containing
 the build, verification, artifact handoff, and OIDC publish jobs. It resolves
-JSON parser and manifest dependencies from Maven Central snapshots, while checking
-out and building the pinned DSL library needed by lsp-core. It does not depend on sibling
+DSL, JSON parser, and manifest Kotlin dependencies from Maven Central snapshots
+with `-PuseLocalDependencies=false`. It does not depend on sibling
 directories existing on the runner.
 
-The pinned DSL worktree commit was not yet on GitHub when this was configured.
-Publish that existing branch before running the LSP workflow:
+Publish the integrated upstream snapshots before triggering LSP CI:
 
 ```bash
-git -C ../dsl-kotlin push origin vscode-platform/dsl
+git -C ../dsl-kotlin push origin develop
+# Wait for the DSL snapshot workflow to finish.
+git -C ../zenwave-manifest push origin develop
+# Wait for the manifest snapshot workflow to finish.
 git push -u origin develop
 ```
 
-Pushing the DSL branch makes the pinned source accessible; it does not merge or
-release that branch. Its later integration remains work in dsl-kotlin.
+In particular, the DSL artifact must contain `GenerateMermaidFromZdl`. The earlier
+`@zenwave360/dsl@1.10.0-next.6.2` predates that integration. CI no longer checks out
+a private DSL commit or requires a sibling directory.
 
 After this prototype passes in GitHub, extract the common jobs into
 `ZenWave360/release-workflows`, making package name, dependency source checkouts,
@@ -130,9 +133,8 @@ changes its `uses:` reference; npm continues trusting the caller workflow in
 `zenwave-lsp`, so extraction does not require changing the trusted publisher.
 
 The shared `release-gradle.yml` currently also requires Maven Central publication
-(`publishToMavenCentral`) and does not accept LSP's pinned DSL checkout/build
-arguments. LSP does not configure that Central task yet. Once the shared workflow
-supports this build and the desired publication targets, let it prepare versions
+(`publishToMavenCentral`). LSP does not configure that Central task yet. Once the
+shared workflow supports this build and the desired publication targets, let it prepare versions
 and tags and call the same reusable npm build/publish jobs. Keep `release.yml`
 as the repository's trusted-publisher caller instead of copying the complete
 release preparation implementation into this repository.

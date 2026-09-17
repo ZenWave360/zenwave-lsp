@@ -70,5 +70,3 @@ jobs:
       snapshot: false
       publish: ${{ github.event_name == 'push' || inputs.publishNpm }}
       environment: npm-publish
-      # Keep the source dependency aligned with the snapshot caller.
-      dsl-ref: 835a75fdb7b798fa382f90fb3c109de74d1e1115
