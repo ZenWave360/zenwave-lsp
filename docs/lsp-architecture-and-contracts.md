@@ -94,7 +94,7 @@ The language server should expose semantic structure, not rendering instructions
 - Core module: Kotlin Multiplatform
 - Targets configured today: JVM and JS IR
 - JVM toolchain: Java 21
-- Parser dependency: `io.zenwave360.dsl:dsl-kotlin:1.5.0-SNAPSHOT`
+- Parser dependency: `io.zenwave360.dsl:dsl-kotlin:1.10.0-SNAPSHOT`
 
 ### Real LSP server or planned LSP-compatible service
 

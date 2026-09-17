@@ -21,7 +21,7 @@ Current known follow-ups:
 - workspace identification is still deferred; activation remains extension plus lightweight content detection
 - ZDL cross-file definition remains deferred
 - ZFL diagnostics are intentionally thinner than ZDL/spec diagnostics
-- the build currently source-links selected `dsl-kotlin` common sources into `lsp-core` to work around composite-build visibility issues
+- the build consumes the included `dsl-kotlin` library; CI pins its source revision for reproducible builds
 
 ## Goals
 

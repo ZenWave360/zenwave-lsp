@@ -50,7 +50,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 - `moduleSelectors`: `{ languageId, extensions }[]`, one entry per language module;
 - `customRequests`: `string[]`, the `zenwave/*` requests this server answers. The list is built from the
   server's handler registration, so a client can rely on it. A request that is not listed is answered
-  with JSON-RPC `-32601`. lsp-jvm advertises the same list.
+  with JSON-RPC `-32601`. lsp-jvm additionally exposes workspace concept and status requests.
 
 ## Custom requests
 
@@ -71,7 +71,7 @@ module builds hierarchies for answers `[]`. In a ZFL hierarchy the systems, serv
 annotated ZDL declares point at that ZDL (`sourceUri`/`sourceRange`), open or read, and list where the flow
 refers to them as a `referenced-by` related resource. `viewNodeIds` names the ids of the nodes and service
 groups of the same document's `zenwave/eventFlowViews` that stand for the node's concept (`command:createOrder`,
-`event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:…`); it
+`event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:â€¦`); it
 is empty when the diagram has no counterpart.
 
 `zenwave/preview` answers for ZDL (one Mermaid `class-diagram`) and ZFL (a `flowchart`, then one
@@ -92,5 +92,7 @@ Initialization options take the form `{ zenwave: { configUri?, projectManifestUr
 ## Building
 
 This package is built by the zenwave-lsp Gradle build (`./gradlew :lsp-js:lspJsBundle`, or
-`:lsp-js:lspJsNpmPack` for a tarball in `lsp-js/build/npm-pack`). `:lsp-js:check` runs both wire tests:
+`:lsp-js:lspJsNpmPack` for a tarball in `build/npm`). `:lsp-js:check` runs both wire tests:
 `nodeIpcTest` forks the Node entry point, and `jsBrowserTest` loads the worker in headless Chromium.
+
+See [npm publishing](../docs/npm-publishing.md) for snapshots and trusted publisher setup.
