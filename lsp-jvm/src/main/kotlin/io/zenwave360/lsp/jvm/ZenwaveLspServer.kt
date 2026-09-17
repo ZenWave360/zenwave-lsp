@@ -4,7 +4,14 @@ import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
+import com.google.gson.JsonElement
+import com.google.gson.JsonParser
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
+import io.zenwave360.lsp.core.visualization.VisualizationJson
+import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests as CustomRequestMethods
 import kotlinx.coroutines.runBlocking
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
@@ -25,8 +32,11 @@ import org.eclipse.lsp4j.ServerCapabilities
 import org.eclipse.lsp4j.ServerInfo
 import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
+import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentSyncKind
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
@@ -36,7 +46,16 @@ import org.eclipse.lsp4j.services.WorkspaceService
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * The ZenWave custom requests. Their methods are advertised in `capabilities.experimental.customRequests` from
+ * lsp-core's `ZenwaveCustomRequests.ALL`, the list lsp-js registers its handlers from; a test checks that the
+ * annotations below and that list name the same methods.
+ */
 interface ZenwaveCustomRequests {
+    /**
+     * The conceptual hierarchy of a document, open or not; a document that is not open is read by the server.
+     * A -32803 error with `data.kind` `documentNotFound` when it is neither open nor readable.
+     */
     @JsonRequest("zenwave/hierarchy")
     fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>>
 
@@ -54,6 +73,20 @@ interface ZenwaveCustomRequests {
 
     @JsonRequest("zenwave/workspaceStatus")
     fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto>
+    /** `{flowGraph, serviceGraph}`, or a -32803 error whose `data.kind` says why the document cannot answer. */
+    @JsonRequest("zenwave/eventFlowViews")
+    fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement>
+
+    /** `{representations: [{id, title, format, content}], defaultRepresentationId}`, or a -32803 error. */
+    @JsonRequest("zenwave/preview")
+    fun preview(request: PreviewRequest): CompletableFuture<JsonElement>
+
+    /**
+     * The symbol at a position, `{uri, semanticId, range?}` or null, in the form `forwardReferences` and
+     * `reverseReferences` take. A -32803 `documentNotFound` error when the document is not open.
+     */
+    @JsonRequest("zenwave/symbolAt")
+    fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?>
 }
 
 class ZenwaveLspServer(
@@ -191,9 +224,18 @@ class ZenwaveLspServer(
     }
 
     override fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>> =
-        CompletableFuture.completedFuture(
-            server.hierarchy(request.uri).map { it.toDto() }
-        )
+        answer {
+            @Suppress("SENSELESS_COMPARISON") // Gson leaves an absent uri null
+            val uri = request.uri.takeIf { it != null } ?: throw InvalidRequestParamsException("uri is required")
+            runBlocking { server.conceptualHierarchy(uri) }.map { it.toDto() }
+        }
+
+    override fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            val position = request.position ?: throw InvalidRequestParamsException("position is required")
+            server.symbolAt(uri, DtoMapper.toPosition(position))?.let { SymbolAtResult(it.uri, it.semanticId, it.range) }
+        }
 
     override fun forwardReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>> =
         CompletableFuture.completedFuture(
@@ -231,6 +273,44 @@ class ZenwaveLspServer(
 
     override fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto> =
         CompletableFuture.completedFuture(server.workspaceStatus().toDto())
+    override fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            val views = runBlocking { server.eventFlowViews(uri) }
+            JsonParser.parseString(VisualizationJson.eventFlowViews(views))
+        }
+
+    override fun preview(request: PreviewRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode)))
+        }
+
+    /**
+     * Runs a visualisation request off the message-reading thread (layout can take a while) and turns the
+     * lsp-core failures into JSON-RPC errors carrying their code and `data`.
+     */
+    private fun <T> answer(block: () -> T): CompletableFuture<T> =
+        CompletableFuture.supplyAsync {
+            try {
+                block()
+            } catch (failure: DocumentRequestException) {
+                throw ResponseErrorException(
+                    ResponseError(
+                        ZenwaveErrorCodes.REQUEST_FAILED,
+                        failure.message ?: failure.kind.wireName,
+                        JsonParser.parseString(VisualizationJson.failureData(failure))
+                    )
+                )
+            } catch (invalid: InvalidRequestParamsException) {
+                throw ResponseErrorException(
+                    ResponseError(ZenwaveErrorCodes.INVALID_PARAMS, invalid.message ?: "invalid params", null)
+                )
+            }
+        }
+
+    private fun requireTextDocumentUri(textDocument: TextDocumentIdentifier?): String =
+        textDocument?.uri ?: throw InvalidRequestParamsException("textDocument.uri is required")
 
     override fun didChangeConfiguration(params: DidChangeConfigurationParams) {
     }
@@ -257,14 +337,7 @@ class ZenwaveLspServer(
                         extensions = it.extensions
                     )
                 },
-                "customRequests" to listOf(
-                    "zenwave/hierarchy",
-                    "zenwave/forwardReferences",
-                    "zenwave/reverseReferences",
-                    "zenwave/organizeZflServices",
-                    "zenwave/conceptAt",
-                    "zenwave/workspaceStatus"
-                )
+                "customRequests" to (CustomRequestMethods.ALL + listOf("zenwave/conceptAt", "zenwave/workspaceStatus"))
             )
         }
     }

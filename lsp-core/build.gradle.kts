@@ -1,22 +1,44 @@
 plugins {
     kotlin("multiplatform")
+    // dsl-kotlin's EventFlow view models, compiled here from source, are @Serializable.
+    kotlin("plugin.serialization")
     `maven-publish`
     id("com.goncalossilva.resources") version "0.14.0"
 }
 
-val dslKotlinGeneratedSrc = rootProject.projectDir.resolve("../dsl-kotlin/build/generated/antlr/commonMain/kotlin")
+// dsl-kotlin parser sources are compiled directly from the sibling checkout. Its directory defaults to
+// ../dsl-kotlin and follows the same override as settings.gradle.kts
+// (-Pzenwave.local.dslKotlinDir or ZENWAVE_LOCAL_DSL_KOTLIN_DIR, relative to the root project).
+val dslKotlinDir = rootProject.projectDir.resolve(
+    providers.gradleProperty("zenwave.local.dslKotlinDir").orNull
+        ?: providers.environmentVariable("ZENWAVE_LOCAL_DSL_KOTLIN_DIR").orNull
+        ?: "../dsl-kotlin"
+)
+val dslKotlinGeneratedSrc = dslKotlinDir.resolve("build/generated/antlr/commonMain/kotlin")
 val dslKotlinSharedSrcRoots = listOf(
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/source"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/utils"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
+    // EventFlow view models and their generators (zenwave/eventFlowViews, zenwave/preview).
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/eventflow"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/source"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/utils"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl"),
+    // GenerateMermaidFromZdl (zenwave/preview for ZDL) and its class diagram transformer.
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/application"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/view"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
+    dslKotlinDir.resolve("src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
+)
+// The platform actuals of the EventFlow layout engine: ELK on the JVM, elkjs on JavaScript.
+val dslKotlinJvmSrcRoots = listOf(
+    dslKotlinDir.resolve("src/jvmMain/kotlin/io/zenwave360/language/eventflow"),
+)
+val dslKotlinJsSrcRoots = listOf(
+    dslKotlinDir.resolve("src/jsMain/kotlin/io/zenwave360/language/eventflow"),
 )
 
 kotlin {
@@ -28,7 +50,21 @@ kotlin {
 
     js(IR) {
         nodejs()
+        // The browser target makes browser use checkable: jsBrowserTest (part of check) loads lsp-core and
+        // its dependencies in headless Chromium, so a Node-only import fails the build here, not in a consumer.
+        browser {
+            testTask {
+                // The common test suite reads fixtures from the filesystem, so it runs on Node only.
+                filter.includeTestsMatching("io.zenwave360.lsp.core.LspCoreBrowserSmokeTest")
+                useKarma {
+                    useChromeHeadless()
+                }
+            }
+        }
         binaries.executable()
+        // ES modules, as dsl-kotlin and lsp-js use: the elkjs binding compiled from dsl-kotlin (@JsModule without
+        // @JsNonModule) cannot be compiled to UMD.
+        useEsModules()
     }
 
     sourceSets {
@@ -61,7 +97,10 @@ kotlin {
         }
 
         val jvmMain by getting {
+            dslKotlinJvmSrcRoots.forEach(kotlin::srcDir)
             dependencies {
+                // Same version as dsl-kotlin's jvmMain.
+                implementation("org.eclipse.elk:org.eclipse.elk.alg.layered:0.10.0")
                 implementation(kotlin("stdlib-jdk8"))
             }
         }
@@ -73,9 +112,13 @@ kotlin {
         }
 
         val jsMain by getting {
+            dslKotlinJsSrcRoots.forEach(kotlin::srcDir)
             dependencies {
+                // Same version as dsl-kotlin's jsMain. Bundlers targeting a Web Worker must keep elkjs'
+                // worker script from taking over the worker's message handler (see lsp-js/npm/build.mjs).
+                implementation(npm("elkjs", "0.9.3"))
                 implementation(kotlin("stdlib-js"))
-                implementation("org.jetbrains.kotlin-wrappers:kotlin-node:18.16.12-pre.610")
+                // No Node API here: lsp-core's JS artifact must load in a browser and a Web Worker.
             }
         }
 

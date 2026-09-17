@@ -28,6 +28,16 @@ interface LanguageModule {
     fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
         hierarchy(snapshot)
 
+    /**
+     * Other documents this document's hierarchy draws on, such as the ZDL models a ZFL annotates. The server
+     * obtains each (open content first, otherwise by reading it) and passes what it could reach to
+     * [hierarchy] with [RelatedDocuments].
+     */
+    fun hierarchyDependencies(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<String> = emptyList()
+
+    fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<HierarchyNode> =
+        hierarchy(snapshot, parsedArtifact)
+
     fun format(snapshot: DocumentSnapshot): String?
 
     fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution>

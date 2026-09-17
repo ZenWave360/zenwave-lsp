@@ -25,6 +25,9 @@ replay_pid*
 *.kotlin_module
 
 .*
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 
 ### IntelliJ IDEA ###
 .idea/
@@ -87,3 +90,5 @@ gradle-*.log
 # Local Serena HTTP client wiring (localhost ports; do not commit)
 .codex/
 .grok/config.toml
+### npm ###
+node_modules/

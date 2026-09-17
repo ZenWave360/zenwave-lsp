@@ -23,10 +23,10 @@ internal class ZflCrossReferenceContributor {
 
         val flowRefs = model.mapAt("flows").entries.flatMap { (flowName, rawFlow) ->
             rawFlow.asZflMap()["whens"].asZflList().flatMapIndexed { index, rawWhen ->
-                val whenModel = rawWhen.asZflMap()
-                val targetUri = zdlUris[whenModel["system"].asZflString()] ?: return@flatMapIndexed emptyList()
+                val whenModel = rawWhen.normalizedWhen()
+                val targetUri = zdlUris[whenModel.system] ?: return@flatMapIndexed emptyList()
                 buildList {
-                    whenModel["command"].asZflString()?.let { commandName ->
+                    whenModel.command?.let { commandName ->
                         add(
                             CrossReferenceContribution(
                                 sourceUri = uri,
@@ -41,7 +41,7 @@ internal class ZflCrossReferenceContributor {
                             )
                         )
                     }
-                    whenModel["events"].asZflList().mapNotNull { it.asZflString() }.forEach { eventName ->
+                    whenModel.events.forEach { eventName ->
                         add(
                             CrossReferenceContribution(
                                 sourceUri = uri,

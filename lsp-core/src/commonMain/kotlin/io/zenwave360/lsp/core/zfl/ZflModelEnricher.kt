@@ -16,19 +16,19 @@ internal class ZflModelEnricher {
                 name = flowName,
                 starts = flow.mapAt("starts").keys.toList(),
                 whens = flow["whens"].asZflList().mapIndexed { index, rawWhen ->
-                    val whenModel = rawWhen.asZflMap()
+                    val whenModel = rawWhen.normalizedWhen()
                     EnrichedWhen(
                         index = index,
-                        triggers = whenModel["triggers"].asZflList().mapNotNull { it.asZflString() },
-                        systemName = whenModel["system"].asZflString(),
-                        service = whenModel["service"].asZflString(),
-                        command = whenModel["command"].asZflString(),
-                        events = whenModel["events"].asZflList().mapNotNull { it.asZflString() },
+                        triggers = whenModel.triggers,
+                        systemName = whenModel.system,
+                        service = whenModel.service,
+                        command = whenModel.command,
+                        events = whenModel.events,
                         sourcePath = "flows.$flowName.whens[$index]"
                     )
                 },
                 end = EnrichedEnd(
-                    outcomes = flow["end"].asZflMap().mapValues { (_, rawValue) -> normalizeStrings(rawValue) },
+                    outcomes = flow["end"].endOutcomes().mapValues { (_, rawValue) -> normalizeStrings(rawValue) },
                     sourcePath = "flows.$flowName.end"
                 ),
                 sourcePath = "flows.$flowName"
@@ -86,6 +86,12 @@ internal class ZflModelEnricher {
                 sourcePath = "systems.$systemName"
             )
         }
+
+    /** Current dsl-kotlin models nest the outcomes under `endOutcomes`; earlier ones put them on `end` itself. */
+    private fun Any?.endOutcomes(): Map<String, Any?> {
+        val end = asZflMap()
+        return if ("endOutcomes" in end) end.mapAt("endOutcomes") else end
+    }
 
     private fun normalizeStrings(rawValue: Any?): List<String> =
         when (val value = rawValue.asZflString()) {

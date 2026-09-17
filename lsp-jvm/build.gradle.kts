@@ -11,6 +11,7 @@ dependencies {
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:0.21.1")
 
     implementation(kotlin("stdlib-jdk8"))
+    // zenwave/eventFlowViews: lsp-core's layout is a suspend function.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
 
     testImplementation(kotlin("test-junit"))

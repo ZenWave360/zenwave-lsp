@@ -25,4 +25,7 @@ data class DocumentSymbolRef(
     val uri: String,
     val semanticPath: String,
     val range: Range? = null,
-)
+) {
+    /** Document-local address used by the existing reference requests. */
+    val referenceId: String get() = "$uri#$semanticPath"
+}
