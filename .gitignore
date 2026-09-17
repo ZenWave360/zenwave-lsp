@@ -83,3 +83,7 @@ gradle-*.log
 /build/
 /.mcp_data/embeddings-cache.json
 /.mcp_data/identifier-embeddings-cache.json
+
+# Local Serena HTTP client wiring (localhost ports; do not commit)
+.codex/
+.grok/config.toml
