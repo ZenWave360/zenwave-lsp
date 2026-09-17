@@ -6,6 +6,7 @@ import io.zenwave360.jsonrefparser.model.RefParserOptions
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.NavigationTarget
@@ -89,13 +90,16 @@ internal fun defaultSpecHover(
     language: String,
 ): HoverResult? {
     val path = document.model.pathAtPosition(position) ?: return null
-    val semanticId = "${document.model.uri}#$path"
     val range = document.model.locationOf(path)?.range
     val markdown = when {
         path.endsWith(".\$ref") -> describeResolvedReference(document, path)
         else -> describeSpecNode(path, document.model.nodeAt(path))
     }
-    return HoverResult(semanticId = semanticId, markdown = markdown ?: "No information", range = range)
+    return HoverResult(
+        documentSymbol = DocumentSymbolRef(document.model.uri, path, range),
+        markdown = markdown ?: "No information",
+        range = range,
+    )
 }
 
 internal fun defaultSpecDefinition(

@@ -1,7 +1,6 @@
 package io.zenwave360.lsp.core.xref
 
 import io.zenwave360.lsp.core.contracts.NavigationTarget
-import io.zenwave360.lsp.core.contracts.SemanticId
 
 class InMemoryCrossReferenceIndex : CrossReferenceIndex {
     private val lock = io.zenwave360.lsp.core.platform.PlatformReadWriteLock()
@@ -29,7 +28,7 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
         }
     }
 
-    override fun forwardReferences(sourceUri: String, sourceSemanticId: SemanticId): List<NavigationTarget> =
+    override fun forwardReferences(sourceUri: String, sourceSemanticId: String): List<NavigationTarget> =
         lock.read {
             contributionsBySourceUri[sourceUri]
                 .orEmpty()
@@ -46,7 +45,7 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
                 }
         }
 
-    override fun reverseReferences(targetUri: String, targetSemanticId: SemanticId): List<NavigationTarget> =
+    override fun reverseReferences(targetUri: String, targetSemanticId: String): List<NavigationTarget> =
         lock.read {
             contributionsByTargetKey[targetKey(targetUri, targetSemanticId)]
                 .orEmpty()
@@ -81,6 +80,6 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
         contributionsBySourceUri.remove(sourceUri)
     }
 
-    private fun targetKey(targetUri: String, targetSemanticId: SemanticId?): String =
+    private fun targetKey(targetUri: String, targetSemanticId: String?): String =
         "$targetUri#${targetSemanticId.orEmpty()}"
 }

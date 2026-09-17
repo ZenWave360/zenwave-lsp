@@ -5,6 +5,7 @@ import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -142,7 +143,7 @@ class PlatformContractsTest {
 
         val hover = server.hover(snapshot.ref.uri, Position(0, 0))
         assertNotNull(hover)
-        assertEquals("${snapshot.ref.uri}#entities.Order", hover.semanticId)
+        assertEquals(DocumentSymbolRef(snapshot.ref.uri, "entities.Order", hover.range), hover.documentSymbol)
 
         val hierarchy = server.hierarchy(snapshot.ref.uri)
         assertEquals(1, hierarchy.size)
@@ -210,7 +211,7 @@ private class FakeLanguageModule : LanguageModule {
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult =
         ParseResult(
-            semanticId = "${snapshot.ref.uri}#entities.Order",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "entities.Order"),
             model = mapOf("name" to "Order"),
             diagnostics = diagnostics(snapshot)
         ).also {
@@ -230,7 +231,11 @@ private class FakeLanguageModule : LanguageModule {
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult =
         HoverResult(
-            semanticId = "${snapshot.ref.uri}#entities.Order",
+            documentSymbol = DocumentSymbolRef(
+                snapshot.ref.uri,
+                "entities.Order",
+                Range(Position(0, 0), Position(0, 5)),
+            ),
             markdown = "Order",
             range = Range(Position(0, 0), Position(0, 5))
         )

@@ -2,7 +2,10 @@ package io.zenwave360.lsp.jvm
 
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
+import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import kotlinx.coroutines.runBlocking
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
@@ -45,6 +48,12 @@ interface ZenwaveCustomRequests {
 
     @JsonRequest("zenwave/organizeZflServices")
     fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?>
+
+    @JsonRequest("zenwave/conceptAt")
+    fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>>
+
+    @JsonRequest("zenwave/workspaceStatus")
+    fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto>
 }
 
 class ZenwaveLspServer(
@@ -62,12 +71,15 @@ class ZenwaveLspServer(
     }
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =
-        CompletableFuture.completedFuture(
+        CompletableFuture.supplyAsync {
+            initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
+            initializationOptions?.projectManifestUri?.let { manifestUri ->
+                runBlocking { server.openWorkspace(manifestUri) }
+            }
             InitializeResult(buildCapabilities()).apply {
-                initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
                 serverInfo = ServerInfo("zenwave-lsp", "0.1.0-SNAPSHOT")
             }
-        )
+        }
 
     override fun shutdown(): CompletableFuture<Any> {
         shutdownRequested = true
@@ -151,9 +163,12 @@ class ZenwaveLspServer(
     override fun references(params: ReferenceParams): CompletableFuture<List<org.eclipse.lsp4j.Location>> {
         val uri = params.textDocument.uri
         val position = DtoMapper.toPosition(params.position)
-        val semanticId = server.hover(uri, position)?.semanticId
+        val documentSymbol = server.hover(uri, position)?.documentSymbol
             ?: return CompletableFuture.completedFuture(emptyList())
-        val refs = server.reverseReferences(uri, semanticId)
+        val refs = server.reverseReferences(
+            documentSymbol.uri,
+            "${documentSymbol.uri}#${documentSymbol.semanticPath}",
+        )
         return CompletableFuture.completedFuture(refs.mapNotNull(DtoMapper::toLocation))
     }
 
@@ -195,6 +210,28 @@ class ZenwaveLspServer(
             server.organizeZflServices(request.uri)
         )
 
+    override fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>> =
+        CompletableFuture.supplyAsync {
+            runBlocking {
+                when {
+                    request.semanticPath != null -> server.conceptsAt(
+                        DocumentSymbolRef(
+                            uri = request.uri,
+                            semanticPath = request.semanticPath,
+                        ),
+                    )
+                    request.position != null -> server.conceptsAt(
+                        request.uri,
+                        DtoMapper.toPosition(request.position),
+                    )
+                    else -> emptyList()
+                }
+            }
+        }
+
+    override fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto> =
+        CompletableFuture.completedFuture(server.workspaceStatus().toDto())
+
     override fun didChangeConfiguration(params: DidChangeConfigurationParams) {
     }
 
@@ -224,7 +261,9 @@ class ZenwaveLspServer(
                     "zenwave/hierarchy",
                     "zenwave/forwardReferences",
                     "zenwave/reverseReferences",
-                    "zenwave/organizeZflServices"
+                    "zenwave/organizeZflServices",
+                    "zenwave/conceptAt",
+                    "zenwave/workspaceStatus"
                 )
             )
         }

@@ -1,7 +1,7 @@
 package io.zenwave360.lsp.core.contracts
 
 data class HierarchyNode(
-    val id: SemanticId,
+    val id: String,
     val label: String,
     val kind: String,
     val language: String,

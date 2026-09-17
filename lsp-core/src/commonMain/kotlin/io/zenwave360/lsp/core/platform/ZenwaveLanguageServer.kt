@@ -7,18 +7,30 @@ import io.zenwave360.lsp.core.contracts.LanguageCapabilities
 import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
-import io.zenwave360.lsp.core.contracts.SemanticId
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
+import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
 
 class ZenwaveLanguageServer(
     private val modules: List<LanguageModule>,
     private val sessionStore: DocumentSessionStore,
-    private val crossReferenceIndex: CrossReferenceIndex
+    private val crossReferenceIndex: CrossReferenceIndex,
+    architecturePlane: WorkspaceArchitecturePlane? = null,
+    private val workspaceOpener: suspend (String) -> WorkspaceArchitecturePlane = { manifestUri ->
+        WorkspaceArchitecturePlane.open(manifestUri)
+    },
 ) {
     private val lock = PlatformReadWriteLock()
     private val parsedCache = linkedMapOf<String, DocumentCacheEntry>()
+    private var architecturePlane: WorkspaceArchitecturePlane? = architecturePlane
+    private var workspaceStatus = if (architecturePlane == null) {
+        WorkspaceStatus(WorkspaceState.NONE)
+    } else {
+        WorkspaceStatus(WorkspaceState.READY)
+    }
 
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
@@ -75,11 +87,48 @@ class ZenwaveLanguageServer(
             (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot, entry.parsedArtifact)
         }
 
-    fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
+    fun forwardReferences(uri: String, semanticId: String): List<NavigationTarget> =
         crossReferenceIndex.forwardReferences(uri, semanticId)
 
-    fun reverseReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
+    fun reverseReferences(uri: String, semanticId: String): List<NavigationTarget> =
         crossReferenceIndex.reverseReferences(uri, semanticId)
+
+    fun attachWorkspace(workspace: WorkspaceArchitecturePlane) {
+        lock.write {
+            architecturePlane = workspace
+            workspaceStatus = WorkspaceStatus(WorkspaceState.READY, workspaceStatus.manifestUri)
+        }
+    }
+
+    suspend fun openWorkspace(manifestUri: String): WorkspaceStatus {
+        lock.write { workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri) }
+        return try {
+            val workspace = workspaceOpener(manifestUri)
+            lock.write {
+                architecturePlane = workspace
+                workspaceStatus = WorkspaceStatus(WorkspaceState.READY, manifestUri)
+                workspaceStatus
+            }
+        } catch (error: Exception) {
+            lock.write {
+                architecturePlane = null
+                workspaceStatus = WorkspaceStatus(
+                    state = WorkspaceState.FAILED,
+                    manifestUri = manifestUri,
+                    message = error.message ?: error::class.simpleName,
+                )
+                workspaceStatus
+            }
+        }
+    }
+
+    fun workspaceStatus(): WorkspaceStatus = lock.read { workspaceStatus }
+
+    suspend fun conceptsAt(documentSymbol: DocumentSymbolRef): List<ArchitectureConceptRef> =
+        lock.read { architecturePlane }?.conceptsAt(documentSymbol)?.elements.orEmpty()
+
+    suspend fun conceptsAt(uri: String, position: Position): List<ArchitectureConceptRef> =
+        hover(uri, position)?.documentSymbol?.let { conceptsAt(it) }.orEmpty()
 
     private fun rebuildCache(uri: String) {
         val snapshot = sessionStore.get(uri) ?: return
@@ -165,12 +214,20 @@ class ZenwaveLanguageServer(
         }
 }
 
+enum class WorkspaceState { NONE, BUILDING, READY, STALE, FAILED }
+
+data class WorkspaceStatus(
+    val state: WorkspaceState,
+    val manifestUri: String? = null,
+    val message: String? = null,
+)
+
 private class DocumentCacheEntry(
     val uri: String,
     val version: Int,
     val module: LanguageModule?,
     val diagnostics: List<Diagnostic>,
     val parsedArtifact: Any?,
-    @Volatile var hierarchy: List<HierarchyNode>? = null,
-    @Volatile var xrefContributions: List<CrossReferenceContribution>? = null,
+    var hierarchy: List<HierarchyNode>? = null,
+    var xrefContributions: List<CrossReferenceContribution>? = null,
 )

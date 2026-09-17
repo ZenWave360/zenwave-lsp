@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.spec.openapi
 
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -38,7 +39,7 @@ class OpenApiLanguageModule(
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val document = parseSpecDocument(snapshot)
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = document,
             diagnostics = document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
         )

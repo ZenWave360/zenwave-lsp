@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.manifest
 
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -34,7 +35,7 @@ class ArchitectureManifestLanguageModule : LanguageModule {
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val parsed = parseDocument(snapshot)
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#manifest",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "manifest"),
             model = parsed,
             diagnostics = parsed.manifest.diagnostics
         )
@@ -59,10 +60,11 @@ class ArchitectureManifestLanguageModule : LanguageModule {
             target != null -> "### ${target.label}\n\n- kind: `${target.targetKind}`\n- uri: `${target.uri}`"
             else -> "### ${path.substringAfterLast('.')}\n\nManifest element"
         }
+        val range = parsed.document.locationOf(path)?.range
         return HoverResult(
-            semanticId = "${snapshot.ref.uri}#$path",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, path, range),
             markdown = markdown,
-            range = parsed.document.locationOf(path)?.range
+            range = range
         )
     }
 

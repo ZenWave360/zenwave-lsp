@@ -43,7 +43,7 @@ class ArchitectureManifestLanguageModuleTest {
         assertNotNull(repositoryHover)
         assertTrue(repositoryHover.markdown.contains("orders-api"))
         assertEquals("file:///workspace/orders-api", repositoryDefinition.single().uri)
-        assertEquals("file:///workspace/orders-api/domain-model.zdl", specDefinition.single().uri)
+        assertEquals("file:///workspace/orders/orders-api/domain-model.zdl", specDefinition.single().uri)
     }
 
     @Test
@@ -51,8 +51,8 @@ class ArchitectureManifestLanguageModuleTest {
         val contributions = module.crossReferenceContributions(snapshot)
 
         assertTrue(contributions.any { it.relationType == "repository-of" && it.targetUri == "file:///workspace/orders-api" })
-        assertTrue(contributions.any { it.relationType == "documentation-of" && it.targetUri == "file:///workspace/orders-api/SUMMARY.md" })
-        assertTrue(contributions.any { it.relationType == "spec-of" && it.targetUri == "file:///workspace/orders-api/domain-model.zdl" })
+        assertTrue(contributions.any { it.relationType == "documentation-of" && it.targetUri == "file:///workspace/orders/orders-api/SUMMARY.md" })
+        assertTrue(contributions.any { it.relationType == "spec-of" && it.targetUri == "file:///workspace/orders/orders-api/domain-model.zdl" })
     }
 
     private val snapshot = DocumentSnapshot(

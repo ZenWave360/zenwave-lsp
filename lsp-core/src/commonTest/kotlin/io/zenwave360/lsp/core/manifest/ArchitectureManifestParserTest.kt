@@ -79,9 +79,9 @@ class ArchitectureManifestParserTest {
 
         val service = manifest.services.single()
         assertEquals("file:///workspace/orders-api", service.repositoryUri)
-        assertEquals("file:///workspace/orders-api/SUMMARY.md", service.docs["summary"])
-        assertEquals("file:///workspace/orders-api/domain-model.zdl", service.specs[0].resolvedUri)
-        assertEquals("file:///workspace/orders-api/asyncapi.yml", service.specs[1].resolvedUri)
+        assertEquals("file:///workspace/my-docs/orders/orders-api/SUMMARY.md", service.docs["summary"])
+        assertEquals("file:///workspace/my-docs/orders/orders-api/domain-model.zdl", service.specs[0].resolvedUri)
+        assertEquals("file:///workspace/my-docs/orders/orders-api/asyncapi.yml", service.specs[1].resolvedUri)
         assertEquals("classpath:/templates/asyncapi.hbs", service.specs[2].resolvedUri)
     }
 
@@ -113,7 +113,7 @@ class ArchitectureManifestParserTest {
     }
 
     @Test
-    fun recordsUnresolvedVariablesAsDiagnostics() {
+    fun preservesUnresolvedRuntimeRepositoryVariables() {
         val manifest = ArchitectureManifestParser.parse(
             uri = "file:///workspace/my-docs/master.yml",
             text = """
@@ -125,6 +125,7 @@ class ArchitectureManifestParserTest {
             """.trimIndent()
         )
 
-        assertTrue(manifest.diagnostics.any { it.message.contains("Unresolved variable") })
+        assertEquals("\${missingRoot}/orders-api", manifest.services.single().repositoryUri)
+        assertTrue(manifest.diagnostics.none { it.code == "unresolved-static-variable" })
     }
 }

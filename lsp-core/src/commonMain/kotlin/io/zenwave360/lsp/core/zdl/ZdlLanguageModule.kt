@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.zdl
 import io.zenwave360.language.zdl.formatter.ZdlFormatter
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -40,7 +41,7 @@ class ZdlLanguageModule(
         val semanticModel = parseModel(snapshot)
         val model = semanticModel.asZdlMap()
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = semanticModel,
             diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
         )
@@ -63,10 +64,11 @@ class ZdlLanguageModule(
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position) ?: return null
         val model = semanticModel.asZdlMap()
+        val range = model.locationTable().findSource(snapshot.ref.uri, path).range
         return HoverResult(
-            semanticId = zdlSemanticId(snapshot.ref.uri, path),
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, path, range),
             markdown = describeZdlNode(path, findNodeAtPath(model, path.substringBeforeLast('.', path))),
-            range = model.locationTable().findSource(snapshot.ref.uri, path).range
+            range = range
         )
     }
 

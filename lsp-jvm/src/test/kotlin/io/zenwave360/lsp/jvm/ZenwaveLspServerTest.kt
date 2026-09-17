@@ -3,6 +3,7 @@ package io.zenwave360.lsp.jvm
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -54,6 +55,9 @@ class ZenwaveLspServerTest {
         assertTrue(result.capabilities.documentFormattingProvider.left)
         val moduleSelectors = result.capabilities.experimental.let { it as Map<*, *> }["moduleSelectors"] as List<*>
         assertTrue(moduleSelectors.any { selector -> selector.toString().contains("manifest") })
+        val customRequests = result.capabilities.experimental.let { it as Map<*, *> }["customRequests"] as List<*>
+        assertTrue("zenwave/conceptAt" in customRequests)
+        assertTrue("zenwave/workspaceStatus" in customRequests)
     }
 
     @Test
@@ -377,7 +381,7 @@ private class FakeReferenceModule(
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult =
         ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = snapshot.text,
             diagnostics = emptyList()
         )
@@ -387,7 +391,14 @@ private class FakeReferenceModule(
 
     override fun hover(snapshot: DocumentSnapshot, position: io.zenwave360.lsp.core.contracts.Position): HoverResult? =
         HoverResult(
-            semanticId = "$targetUri#entity.Target",
+            documentSymbol = DocumentSymbolRef(
+                targetUri,
+                "entity.Target",
+                io.zenwave360.lsp.core.contracts.Range(
+                    start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                    end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+                ),
+            ),
             markdown = "Target",
             range = io.zenwave360.lsp.core.contracts.Range(
                 start = io.zenwave360.lsp.core.contracts.Position(0, 0),

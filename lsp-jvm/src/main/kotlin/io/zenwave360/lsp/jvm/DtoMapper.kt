@@ -16,6 +16,7 @@ import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range as LspRange
+import io.zenwave360.lsp.core.platform.WorkspaceStatus
 
 internal object DtoMapper {
     fun toPosition(position: LspPosition): Position =
@@ -111,6 +112,25 @@ data class SemanticReferenceRequest(
 data class OrganizeZflServicesRequest(
     val uri: String
 )
+
+data class ConceptAtRequest(
+    val uri: String,
+    val semanticPath: String? = null,
+    val position: LspPosition? = null,
+)
+
+data class WorkspaceStatusDto(
+    val state: String,
+    val manifestUri: String?,
+    val message: String?,
+)
+
+internal fun WorkspaceStatus.toDto(): WorkspaceStatusDto =
+    WorkspaceStatusDto(
+        state = state.name.lowercase(),
+        manifestUri = manifestUri,
+        message = message,
+    )
 
 data class ModuleSelector(
     val languageId: String,

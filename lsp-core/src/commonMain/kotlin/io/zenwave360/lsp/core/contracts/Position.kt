@@ -1,7 +1,5 @@
 package io.zenwave360.lsp.core.contracts
 
-typealias SemanticId = String
-
 data class Position(
     val line: Int,
     val character: Int
@@ -15,4 +13,16 @@ data class Range(
 data class SourceLocation(
     val uri: String,
     val range: Range
+)
+
+/**
+ * Volatile address of a symbol inside one document.
+ *
+ * This is intentionally distinct from the stable `zw:` semantic IDs owned by
+ * the Workspace Query API.
+ */
+data class DocumentSymbolRef(
+    val uri: String,
+    val semanticPath: String,
+    val range: Range? = null,
 )

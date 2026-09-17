@@ -39,7 +39,7 @@ interface LanguageModule {
 }
 
 data class ParseResult(
-    val semanticId: String,
+    val documentSymbol: DocumentSymbolRef,
     val model: Any,
     val diagnostics: List<Diagnostic>
 )

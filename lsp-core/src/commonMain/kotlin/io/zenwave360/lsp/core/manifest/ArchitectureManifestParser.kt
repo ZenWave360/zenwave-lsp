@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.manifest
 
 import io.zenwave360.manifest.ManifestDiagnosticSeverity
+import io.zenwave360.manifest.ManifestVariableInterpolator
 import io.zenwave360.manifest.ManifestService
 import io.zenwave360.manifest.ZenWaveManifest
 import io.zenwave360.manifest.ZenWaveManifestLoader
@@ -9,7 +10,6 @@ import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge
 import io.zenwave360.lsp.core.spec.YamlDocumentModel
 import io.zenwave360.lsp.core.spec.rootLocation
-import io.zenwave360.lsp.core.config.ResourceReferenceResolver
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
@@ -74,17 +74,10 @@ object ArchitectureManifestParser {
         )
     }
 
-    private fun resolveRepositoryUri(manifest: ZenWaveManifest, service: ManifestService): String? {
-        val probeKey = "__zenwave_repository_root__"
-        val probePath = ".zenwave-repository-root"
-        val probeService = service.copy(docs = service.docs + (probeKey to probePath))
-        return runCatching {
-            loader.buildDocumentCandidates(manifest, probeService, probeKey)
-                .firstOrNull()
-                ?.uri
-                ?.let { ResourceReferenceResolver.resolveReference(it, ".") }
-        }.getOrNull()
-    }
+    private fun resolveRepositoryUri(manifest: ZenWaveManifest, service: ManifestService): String? =
+        service.repository?.let { expression ->
+            ManifestVariableInterpolator.interpolate(expression, manifest.config.properties).value
+        }
 
     private fun manifestLocationToSemanticPath(location: String): String? {
         val suffixIndex = location.lastIndexOf('.')

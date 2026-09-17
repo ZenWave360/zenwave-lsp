@@ -4,6 +4,7 @@ import io.zenwave360.language.zfl.ZflParser as DslZflParser
 import io.zenwave360.language.zfl.formatter.ZflFormatter
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -44,7 +45,7 @@ class ZflLanguageModule(
         val semanticModel = parseModel(snapshot)
         val model = semanticModel.asZflMap()
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = semanticModel,
             diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
         )
@@ -64,7 +65,7 @@ class ZflLanguageModule(
         val model = (parsedArtifact as SemanticModel).asZflMap()
         val context = locateZflContext(snapshot.text, model, position, snapshot.ref.uri) ?: return null
         return HoverResult(
-            semanticId = zflSemanticId(snapshot.ref.uri, context.semanticPath),
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, context.semanticPath, context.range),
             markdown = context.markdown,
             range = context.range
         )

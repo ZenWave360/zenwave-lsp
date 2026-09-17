@@ -50,7 +50,7 @@ class ZdlLanguageModuleTest {
         assertNotNull(hover)
         assertEquals(
             "file:///workspace/models/orders.zdl#entities.Customer.fields.customerId.type",
-            hover.semanticId
+            "${hover.documentSymbol.uri}#${hover.documentSymbol.semanticPath}"
         )
         assertTrue(hover.markdown.contains("customerId") || hover.markdown.contains("String"))
     }
