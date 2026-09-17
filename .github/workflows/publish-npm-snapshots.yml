@@ -1,0 +1,31 @@
+name: Build and Publish npm Snapshots
+
+on:
+  push:
+    branches: [develop, next]
+  workflow_dispatch:
+    inputs:
+      publishNpm:
+        description: "Publish the npm snapshot to next (disable to download the tarball only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-snapshots-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  npm-package:
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/next'
+    uses: ./.github/workflows/npm-package.yml
+    with:
+      ref: ${{ github.sha }}
+      snapshot: true
+      publish: ${{ github.event_name == 'push' || inputs.publishNpm }}
+      environment: npm-snapshots
+      # Build the DSL library from the pinned upstream source revision.
+      dsl-ref: 835a75fdb7b798fa382f90fb3c109de74d1e1115
