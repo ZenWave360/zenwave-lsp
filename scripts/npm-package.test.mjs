@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { npmVersion, releaseVersion } from './npm-package.mjs';
+import { checkRelease, npmVersion, releaseVersion } from './npm-package.mjs';
 
 test('maps the shared Gradle version to bootstrap, immutable snapshots, and releases', () => {
   const source = 'version = "0.1.0-SNAPSHOT"\r\n';
@@ -29,4 +29,15 @@ test('release tags reject snapshot builds, version drift, and unsupported tags',
   for (const version of ['0.1.0-next.1', '0.1.0-SNAPSHOT', 'v0.1.0', '0.1']) {
     assert.throws(() => releaseVersion('version = "0.1.0"', version));
   }
+});
+
+test('release preflight rejects duplicates, missing packages and registry failures before changing versions', async () => {
+  const response = versions => async () => ({ ok: true, json: async () => ({ versions }) });
+  await checkRelease('0.1.0', response({ '0.1.0-next.0': {} }));
+  await checkRelease('0.1.0-rc.1', response({}));
+  await assert.rejects(checkRelease('0.1.0', response({ '0.1.0': {} })), /already published/);
+  for (const status of [404, 503]) {
+    await assert.rejects(checkRelease('0.1.0', async () => ({ ok: false, status })), /registry HTTP/);
+  }
+  await assert.rejects(checkRelease('0.1.0-next.1', response({})), /Invalid release version/);
 });

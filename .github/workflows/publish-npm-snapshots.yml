@@ -1,5 +1,6 @@
-name: Build and Publish npm Snapshots
+name: Build and Publish Snapshots
 
+# Preserve this caller filename: npm trusted publishing uses its identity.
 on:
   push:
     branches: [develop, next]
@@ -15,15 +16,34 @@ permissions:
   id-token: write
 
 concurrency:
-  group: npm-snapshots-${{ github.ref }}
+  group: maven-snapshots-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  npm-package:
+  publish-snapshot:
+    uses: ZenWave360/release-workflows/.github/workflows/publish-snapshots-gradle.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
+    with:
+      java-version: "21"
+      node-version: "24"
+      gradle-arguments: "--refresh-dependencies -PuseLocalDependencies=false"
+      kover-xml-files: >-
+        ./lsp-core/build/reports/kover/report.xml
+        ./lsp-jvm/build/reports/kover/report.xml
+      publish-npm: false
+    secrets:
+      CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+      CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+      SIGN_KEY: ${{ secrets.SIGN_KEY }}
+      SIGN_KEY_PASS: ${{ secrets.SIGN_KEY_PASS }}
+
+  npm-packages:
+    needs: publish-snapshot
     if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/next'
-    uses: ./.github/workflows/npm-package.yml
+    uses: ZenWave360/release-workflows/.github/workflows/npm-packages.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
     with:
       ref: ${{ github.sha }}
+      npm-script: scripts/npm-package.mjs
+      gradle-arguments: "--refresh-dependencies -PuseLocalDependencies=false"
       snapshot: true
       publish: ${{ github.event_name == 'push' || inputs.publishNpm }}
       environment: npm-snapshots

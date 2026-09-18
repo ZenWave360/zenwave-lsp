@@ -1,21 +1,27 @@
-name: Release npm Package
+name: Release
+
+run-name: "Release v${{ inputs.version }} from main"
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Existing release tag version without v (e.g. 0.1.0 or 0.1.0-rc.1)"
+        description: "Semantic version to release without v (e.g. 0.1.0 or 0.1.0-rc.1)"
         required: true
         type: string
+      developmentVersion:
+        description: "Next development version; leave empty to derive the next SNAPSHOT"
+        type: string
+        default: ""
       publishNpm:
-        description: "Publish the tested package (disable to download the tarball only)"
+        description: "Publish the npm package (requires npm-publish environment approval)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
+  actions: write
   id-token: write
 
 concurrency:
@@ -23,50 +29,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
+  validate-npm:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    outputs:
-      version: ${{ steps.release.outputs.version }}
-      commit: ${{ steps.release.outputs.commit }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: inputs.publishNpm
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/v{0}', inputs.version) }}
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: inputs.publishNpm
         with:
           node-version: "24"
-      - name: Validate the tagged shared release version
-        id: release
+      - name: Check registry before preparing the shared release
+        if: inputs.publishNpm
         env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', inputs.version) }}
-          EVENT: ${{ github.event_name }}
-          DISPATCH_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT" == workflow_dispatch && "$DISPATCH_REF" != refs/heads/main ]]; then
-            echo "::error::Dispatch release.yml from main. The version input selects the existing release tag."
-            exit 1
-          fi
-          VERSION="$(node scripts/npm-package.mjs release-version "${RELEASE_TAG#v}")"
-          COMMIT="$(git rev-parse HEAD)"
-          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
-            echo "::error::The release tag must point at a commit integrated into main."
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          NPM_VERSION: ${{ inputs.version }}
+        run: node scripts/npm-package.mjs check-release "$NPM_VERSION"
 
-  npm-package:
-    needs: validate
-    uses: ./.github/workflows/npm-package.yml
+  release:
+    needs: validate-npm
+    uses: ZenWave360/release-workflows/.github/workflows/release-gradle.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
     with:
-      ref: ${{ needs.validate.outputs.commit }}
-      version: ${{ needs.validate.outputs.version }}
-      snapshot: false
-      publish: ${{ github.event_name == 'push' || inputs.publishNpm }}
+      version: ${{ inputs.version }}
+      development-version: ${{ inputs.developmentVersion }}
+      artifact-id: lsp-core
+      java-version: "21"
+      node-version: "24"
+      gradle-arguments: "--refresh-dependencies -PuseLocalDependencies=false"
+      snapshot-workflow: publish-npm-snapshots.yml
+      publish-npm: false
+    secrets:
+      CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+      CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+      SIGN_KEY: ${{ secrets.SIGN_KEY }}
+      SIGN_KEY_PASS: ${{ secrets.SIGN_KEY_PASS }}
+
+  npm-packages:
+    needs: release
+    uses: ZenWave360/release-workflows/.github/workflows/npm-packages.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
+    with:
+      ref: ${{ format('refs/tags/v{0}', inputs.version) }}
+      version: ${{ inputs.version }}
+      npm-script: scripts/npm-package.mjs
+      gradle-arguments: "--refresh-dependencies -PuseLocalDependencies=false"
+      publish: ${{ inputs.publishNpm }}
       environment: npm-publish

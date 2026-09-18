@@ -80,6 +80,14 @@ async function publish(version) {
   }
 }
 
+export async function checkRelease(version, registryFetch = fetch) {
+  assert(/^\d+\.\d+\.\d+(?:-rc\.\d+)?$/.test(version), `Invalid release version: ${version}`);
+  const response = await registryFetch(`${registry}${encodeURIComponent(packageName)}`);
+  assert(response.ok, `${packageName}: registry HTTP ${response.status}. Publish the first next version manually before enabling publishNpm.`);
+  const metadata = await response.json();
+  assert(!metadata.versions?.[version], `${packageName}@${version} is already published`);
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, version] = process.argv.slice(2);
   if (command === 'version') {
@@ -93,7 +101,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     await publish(version);
   } else if (command === 'release-version') {
     console.log(releaseVersion(readFileSync('build.gradle.kts', 'utf8'), version));
+  } else if (command === 'check-release') {
+    await checkRelease(version);
   } else {
-    throw new Error('Usage: node scripts/npm-package.mjs version|verify VERSION|publish VERSION|release-version VERSION');
+    throw new Error('Usage: node scripts/npm-package.mjs version|verify VERSION|publish VERSION|release-version VERSION|check-release VERSION');
   }
 }

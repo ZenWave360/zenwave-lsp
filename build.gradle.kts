@@ -1,9 +1,13 @@
+import com.vanniktech.maven.publish.MavenPublishBaseExtension
+
 plugins {
     base
     kotlin("multiplatform") version "2.3.0" apply false
     kotlin("jvm") version "2.3.0" apply false
     kotlin("js") version "2.3.0" apply false
     kotlin("plugin.serialization") version "2.3.0" apply false
+    id("com.vanniktech.maven.publish") version "0.34.0" apply false
+    id("org.jetbrains.kotlinx.kover") version "0.9.4" apply false
 }
 
 group = "io.zenwave360.language"
@@ -22,6 +26,44 @@ allprojects {
 }
 
 subprojects {
+    plugins.withId("com.vanniktech.maven.publish") {
+        extensions.configure<MavenPublishBaseExtension> {
+            publishToMavenCentral()
+            if (sequenceOf("signingInMemoryKey", "signingKey", "signing.secretKeyRingFile")
+                    .any { !providers.gradleProperty(it).orNull.isNullOrBlank() }) {
+                signAllPublications()
+            }
+            pom {
+                url.set("https://github.com/ZenWave360/zenwave-lsp")
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/licenses/MIT")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("ivangsa")
+                        name.set("Ivan Garcia Sainz-Aja")
+                        email.set("ivangsa@gmail.com")
+                    }
+                }
+                scm {
+                    connection.set("scm:git:git://github.com/ZenWave360/zenwave-lsp.git")
+                    developerConnection.set("scm:git:ssh://github.com/ZenWave360/zenwave-lsp.git")
+                    url.set("https://github.com/ZenWave360/zenwave-lsp")
+                }
+            }
+        }
+        extensions.configure<PublishingExtension> {
+            repositories {
+                maven {
+                    name = "localStaging"
+                    url = uri(rootProject.layout.buildDirectory.dir("staging-deploy"))
+                }
+            }
+        }
+    }
     repositories {
         mavenCentral()
         maven("https://central.sonatype.com/repository/maven-snapshots/")

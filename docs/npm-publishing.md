@@ -64,52 +64,51 @@ Create the `npm-publish` GitHub environment, allowing tags matching `v*` and the
 
 ## Release versions
 
-`release.yml` runs when a `v*` tag is pushed. It validates that the tagged commit
-is integrated into `main` and that the root Gradle version exactly matches the
-tag without its `v` prefix. A SNAPSHOT build cannot be published as a release.
-The same `npm-package.yml` builds, tests, verifies, and publishes the tarball:
+Dispatch `release.yml` from `main` with `version` (for example `0.1.0`
+or `0.1.0-rc.1`), optional `developmentVersion`, and `publishNpm`.
+Commit `release-notes/release-notes.v<VERSION>.md` before dispatching.
+The shared Gradle release workflow validates the release, creates and merges
+a version-bump PR, tags the immutable release commit, uploads the Kotlin
+libraries to Maven Central, creates a GitHub release, and syncs `develop`.
+Finish the Central deployment with Publish in the Central Portal.
 
-| Root Gradle version | Git tag | npm version | npm tag |
-| --- | --- | --- | --- |
-| `0.1.0` | `v0.1.0` | `0.1.0` | `latest` |
-| `0.1.0-rc.1` | `v0.1.0-rc.1` | `0.1.0-rc.1` | `next` |
-
-To release `0.1.0`, first integrate the LSP work into `main`. In a release PR,
-set the root `build.gradle.kts` line to `version = "0.1.0"` and commit it as
-`chore(release): release 0.1.0`. All LSP modules inherit that version. After the
-PR is merged, tag the exact release commit from your interactive terminal:
-
-```bash
-git fetch origin main
-# Confirm origin/main is the commit whose Gradle version is 0.1.0.
-git tag -a v0.1.0 origin/main -m "Release 0.1.0"
-git push origin v0.1.0
-```
-
-There is no manual build or packing step. For a release candidate, use
-`0.1.0-rc.1` in both the Gradle version and tag. To retry an existing release tag
-or build without publishing, dispatch `release.yml` from `main`, entering the
-version without `v`. Disable `publishNpm` for an artifact-only build.
-
-Once the tag exists, prepare the next development version (for example,
-`0.1.1-SNAPSHOT`) in a follow-up PR and sync it into `develop`. The release caller
-does not create version-bump PRs, Git tags, GitHub releases, or Maven publications.
-Both callers resolve the published DSL, parser, and manifest Kotlin snapshot
-libraries; the npm artifact bundles their code into its entry points. npm packages
-provide JavaScript exports, while the common Kotlin LSP requires Maven-published
-Kotlin libraries.
+The shared npm workflow checks out that same tag, builds and tests both
+transports, verifies and smoke-tests the tarball, and optionally publishes it.
+Stable versions use `latest`; release candidates use `next`. The npm and
+Kotlin module versions share the root Gradle release version. There is no
+manual build, packing, version commit or tag creation step.
 
 ## GitHub Actions and reuse
 
-Push `develop` or `next` to run `publish-npm-snapshots.yml`. Manual dispatch has a
-`publishNpm` switch; turn it off to build and download the tarball without publishing.
+All three callers use pinned workflows from `ZenWave360/release-workflows`:
 
-The caller contains triggers, branch policy, and publisher environment.
-`npm-package.yml` is a local reusable prototype containing
-the build, verification, artifact handoff, and OIDC publish jobs. It resolves
-DSL, JSON parser, and manifest Kotlin dependencies from Maven Central snapshots
-with `-PuseLocalDependencies=false`. It does not depend on sibling
-directories existing on the runner.
+- `main.yml`: build JVM, Node and browser targets, collect Kover coverage,
+  and publish coverage badges on main. Pull requests also build and test.
+- `publish-npm-snapshots.yml`: publish `lsp-core` and `lsp-jvm` Maven
+  snapshots, then build and publish the npm snapshot. Its filename is preserved
+  for the existing npm trusted publisher. Manual dispatch can disable npm
+  publication, leaving downloadable tarballs; Maven publication still runs.
+- `release.yml`: the standard shared Gradle release lifecycle followed by
+  the shared `npm-packages.yml` workflow.
+
+The shared npm workflow owns build, artifact handoff and OIDC publication;
+`scripts/npm-package.mjs`, its version tests and `scripts/npm-smoke.sh`
+stay here because they verify this server's entry points and wire behavior.
+CI uses `-PuseLocalDependencies=false` to resolve published Kotlin libraries.
+The npm tarball bundles their JavaScript code. npm packages are not Kotlin
+common metadata/KLIB dependencies.
+
+### Maven Central prerequisites
+
+Configure the same environments as the other ZenWave KMP repositories:
+
+- `maven-central-snapshots`: allow develop/next for automatic snapshots.
+- `maven-central-upload`: allow main and require approval for releases.
+
+Each environment needs `CENTRAL_USERNAME`, `CENTRAL_TOKEN`, `SIGN_KEY`
+and `SIGN_KEY_PASS`. Set these securely in GitHub; this repository cannot
+retrieve another repository's secret values. npm environments contain no tokens.
+The `badges` branch holds generated coverage SVGs.
 
 Publish the integrated upstream snapshots before triggering LSP CI:
 
@@ -124,17 +123,3 @@ git push -u origin develop
 In particular, the DSL artifact must contain `GenerateMermaidFromZdl`. The earlier
 `@zenwave360/dsl@1.10.0-next.6.2` predates that integration. CI no longer checks out
 a private DSL commit or requires a sibling directory.
-
-After this prototype passes in GitHub, extract the common jobs into
-`ZenWave360/release-workflows`, making package name, dependency source checkouts,
-Gradle build arguments, artifact path, and verification command inputs. Keep
-repository-specific bundling and version generation in Gradle. The caller then
-changes its `uses:` reference; npm continues trusting the caller workflow in
-`zenwave-lsp`, so extraction does not require changing the trusted publisher.
-
-The shared `release-gradle.yml` currently also requires Maven Central publication
-(`publishToMavenCentral`). LSP does not configure that Central task yet. Once the
-shared workflow supports this build and the desired publication targets, let it prepare versions
-and tags and call the same reusable npm build/publish jobs. Keep `release.yml`
-as the repository's trusted-publisher caller instead of copying the complete
-release preparation implementation into this repository.
