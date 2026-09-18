@@ -84,10 +84,11 @@ All three callers use pinned workflows from `ZenWave360/release-workflows`:
 
 - `main.yml`: build JVM, Node and browser targets, collect Kover coverage,
   and publish coverage badges on main. Pull requests also build and test.
-- `publish-npm-snapshots.yml`: publish `lsp-core` and `lsp-jvm` Maven
-  snapshots, then build and publish the npm snapshot. Its filename is preserved
+- `publish-npm-snapshots.yml`: build and publish the npm snapshot. If the
+  repository variable `PUBLISH_MAVEN` is `true`, publish `lsp-core` and `lsp-jvm`
+  Maven snapshots first. Its filename is preserved
   for the existing npm trusted publisher. Manual dispatch can disable npm
-  publication, leaving downloadable tarballs; Maven publication still runs.
+  publication, leaving downloadable tarballs; enabled Maven publication still runs.
 - `release.yml`: the standard shared Gradle release lifecycle followed by
   the shared `npm-packages.yml` workflow.
 
@@ -109,6 +110,16 @@ Each environment needs `CENTRAL_USERNAME`, `CENTRAL_TOKEN`, `SIGN_KEY`
 and `SIGN_KEY_PASS`. Set these securely in GitHub; this repository cannot
 retrieve another repository's secret values. npm environments contain no tokens.
 The `badges` branch holds generated coverage SVGs.
+
+Maven snapshot publication is opt-in so unconfigured Central credentials do not
+block npm snapshots. After configuring the snapshot environment, enable it:
+
+```bash
+gh variable set PUBLISH_MAVEN --body true --repo ZenWave360/zenwave-lsp
+```
+
+When enabled, a failed Maven publication also blocks npm publication for that
+run. `release.yml` always requires the Central release environment.
 
 Publish the integrated upstream snapshots before triggering LSP CI:
 

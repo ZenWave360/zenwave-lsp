@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   publish-snapshot:
+    if: vars.PUBLISH_MAVEN == 'true'
     uses: ZenWave360/release-workflows/.github/workflows/publish-snapshots-gradle.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
     with:
       java-version: "21"
@@ -38,7 +39,10 @@ jobs:
 
   npm-packages:
     needs: publish-snapshot
-    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/next'
+    if: >-
+      always() && !cancelled() &&
+      (needs.publish-snapshot.result == 'success' || needs.publish-snapshot.result == 'skipped') &&
+      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/next')
     uses: ZenWave360/release-workflows/.github/workflows/npm-packages.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
     with:
       ref: ${{ github.sha }}
