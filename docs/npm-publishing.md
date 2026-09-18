@@ -49,7 +49,9 @@ the replacement. The script does not delete other publisher entries.
 
 Create the `npm-snapshots` GitHub environment and allow deployment from `develop`
 and `next`. No npm token is needed: the publish job has `id-token: write` and uses
-OIDC with provenance.
+OIDC. npm generates provenance automatically for public source repositories;
+private source repositories publish through OIDC without provenance. The helper
+leaves that decision to npm instead of forcing `--provenance`.
 
 For releases, add the separate publisher without recreating the snapshot entry:
 

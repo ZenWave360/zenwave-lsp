@@ -73,7 +73,7 @@ async function publish(version) {
     assert.equal(existing.dist?.integrity, artifact.integrity, `${packageName}@${version} already exists with different contents`);
     console.log(`Already published: ${packageName}@${version}`);
   } else {
-    run('npm', ['publish', artifact.path, '--registry', registry, '--ignore-scripts', '--access', 'public', '--tag', version.includes('-') ? 'next' : 'latest', '--provenance'], { stdio: 'inherit' });
+    run('npm', ['publish', artifact.path, '--registry', registry, '--ignore-scripts', '--access', 'public', '--tag', version.includes('-') ? 'next' : 'latest'], { stdio: 'inherit' });
   }
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${packageName}@${version}\n`);
