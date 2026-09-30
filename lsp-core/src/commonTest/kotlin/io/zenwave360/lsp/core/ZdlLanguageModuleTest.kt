@@ -42,6 +42,37 @@ class ZdlLanguageModuleTest {
     }
 
     @Test
+    fun toOnlyServiceTransitionDoesNotRequireIdAndTransitionErrorsUseItsSourceLine() {
+        val text = """
+            @aggregate
+            @lifecycle(field: status, initial: RESERVED)
+            entity StockReservation {
+                status ReservationStatus required
+            }
+
+            enum ReservationStatus { RESERVED, RELEASED }
+            input ReserveStockInput { sku String }
+            output ReserveStockResult { reservationId String }
+
+            service InventoryService for (StockReservation) {
+                @transition(to: RESERVED)
+                reserveStock(ReserveStockInput) ReserveStockResult
+
+                @transition(from: RESERVED)
+                releaseStock(ReserveStockInput) ReserveStockResult
+            }
+        """.trimIndent()
+        val snapshot = zdlSnapshot("file:///workspace/models/inventory.zdl", text)
+
+        val diagnostics = module.diagnostics(snapshot)
+        assertEquals(1, diagnostics.size)
+        val missingId = diagnostics.single()
+        assertEquals("state transitions require an id parameter", missingId.message)
+        assertEquals("services.InventoryService.methods.releaseStock.options.transition.value.from", missingId.code)
+        assertEquals(text.lines().indexOfFirst { it.contains("@transition(from: RESERVED)") }, missingId.range.start.line)
+    }
+
+    @Test
     fun hoverReturnsSemanticIdForFieldType() {
         val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", readTestFile("complete.zdl"))
 
