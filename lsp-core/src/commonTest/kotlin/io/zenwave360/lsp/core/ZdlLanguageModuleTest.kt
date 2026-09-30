@@ -42,7 +42,7 @@ class ZdlLanguageModuleTest {
     }
 
     @Test
-    fun toOnlyServiceTransitionDoesNotRequireIdAndTransitionErrorsUseItsSourceLine() {
+    fun idlessServiceTransitionsProduceNoDiagnostics() {
         val text = """
             @aggregate
             @lifecycle(field: status, initial: RESERVED)
@@ -65,11 +65,7 @@ class ZdlLanguageModuleTest {
         val snapshot = zdlSnapshot("file:///workspace/models/inventory.zdl", text)
 
         val diagnostics = module.diagnostics(snapshot)
-        assertEquals(1, diagnostics.size)
-        val missingId = diagnostics.single()
-        assertEquals("state transitions require an id parameter", missingId.message)
-        assertEquals("services.InventoryService.methods.releaseStock.options.transition.value.from", missingId.code)
-        assertEquals(text.lines().indexOfFirst { it.contains("@transition(from: RESERVED)") }, missingId.range.start.line)
+        assertEquals(emptyList(), diagnostics)
     }
 
     @Test
