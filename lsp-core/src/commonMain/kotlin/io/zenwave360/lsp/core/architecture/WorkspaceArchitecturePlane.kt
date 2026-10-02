@@ -6,7 +6,7 @@ import io.zenwave360.manifest.workspace.WorkspaceQueryApi
 import io.zenwave360.manifest.workspace.WorkspaceRuntime
 import io.zenwave360.manifest.workspace.WorkspaceSourceLocation
 
-/** Thin LSP facade over the architecture contract owned by zenwave-manifest. */
+/** Thin LSP facade over the architecture contract owned by zenwave-architecture. */
 class WorkspaceArchitecturePlane(
     private val workspace: WorkspaceQueryApi,
 ) {

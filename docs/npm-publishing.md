@@ -128,7 +128,7 @@ Publish the integrated upstream snapshots before triggering LSP CI:
 ```bash
 git -C ../dsl-kotlin push origin develop
 # Wait for the DSL snapshot workflow to finish.
-git -C ../zenwave-manifest push origin develop
+git -C ../zenwave-architecture push origin develop
 # Wait for the manifest snapshot workflow to finish.
 git push -u origin develop
 ```

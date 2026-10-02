@@ -6,9 +6,9 @@ rootProject.name = "zenwave-lsp"
 // -PuseLocalDependencies=false.
 //   -Pzenwave.local.dslKotlinDir=../dsl-kotlin-feature                         (ZENWAVE_LOCAL_DSL_KOTLIN_DIR)
 //   -Pzenwave.local.jsonRefParserDir=../json-schema-ref-parser-kmp-feature   (ZENWAVE_LOCAL_JSON_REF_PARSER_DIR)
-//   -Pzenwave.local.manifestDir=../zenwave-manifest-feature                  (ZENWAVE_LOCAL_MANIFEST_DIR)
-// zenwave-manifest's own settings read ZENWAVE_LOCAL_DSL_KOTLIN_DIR / ZENWAVE_LOCAL_JSON_REF_PARSER_DIR
-// too, so the environment variables keep an included zenwave-manifest on the same upstream checkouts.
+//   -Pzenwave.local.manifestDir=../zenwave-architecture-feature                  (ZENWAVE_LOCAL_MANIFEST_DIR)
+// zenwave-architecture's own settings read ZENWAVE_LOCAL_DSL_KOTLIN_DIR / ZENWAVE_LOCAL_JSON_REF_PARSER_DIR
+// too, so the environment variables keep an included zenwave-architecture on the same upstream checkouts.
 fun localBuildDir(property: String, environmentVariable: String, default: String): File =
     file(
         providers.gradleProperty(property).orNull
@@ -36,7 +36,7 @@ if (useLocalDependencies && localJsonRefParser.exists()) {
     }
 }
 
-val localZenWaveManifest = localBuildDir("zenwave.local.manifestDir", "ZENWAVE_LOCAL_MANIFEST_DIR", "../zenwave-manifest")
+val localZenWaveManifest = localBuildDir("zenwave.local.manifestDir", "ZENWAVE_LOCAL_MANIFEST_DIR", "../zenwave-architecture")
 if (useLocalDependencies && localZenWaveManifest.exists()) {
     includeBuild(localZenWaveManifest) {
         dependencySubstitution {
