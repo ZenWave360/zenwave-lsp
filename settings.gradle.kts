@@ -40,9 +40,9 @@ val localZenWaveManifest = localBuildDir("zenwave.local.manifestDir", "ZENWAVE_L
 if (useLocalDependencies && localZenWaveManifest.exists()) {
     includeBuild(localZenWaveManifest) {
         dependencySubstitution {
-            substitute(module("io.zenwave360.manifest:manifest-core")).using(project(":manifest-core"))
-            substitute(module("io.zenwave360.manifest:manifest-graph")).using(project(":manifest-graph"))
-            substitute(module("io.zenwave360.manifest:workspace-runtime")).using(project(":workspace-runtime"))
+            substitute(module("io.zenwave360.architecture:architecture-manifest")).using(project(":architecture-manifest"))
+            substitute(module("io.zenwave360.architecture:architecture-graph")).using(project(":architecture-graph"))
+            substitute(module("io.zenwave360.architecture:workspace-runtime")).using(project(":workspace-runtime"))
         }
     }
 }

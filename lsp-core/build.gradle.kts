@@ -42,8 +42,8 @@ kotlin {
 
                 implementation("io.zenwave360.dsl:dsl-kotlin:1.10.0-SNAPSHOT")
                 implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:1.0.0-SNAPSHOT")
-                implementation("io.zenwave360.manifest:manifest-core:1.0.0-SNAPSHOT")
-                implementation("io.zenwave360.manifest:workspace-runtime:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.architecture:architecture-manifest:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.architecture:workspace-runtime:1.0.0-SNAPSHOT")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

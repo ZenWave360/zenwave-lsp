@@ -1,10 +1,10 @@
 package io.zenwave360.lsp.core.manifest
 
-import io.zenwave360.manifest.ManifestDiagnosticSeverity
-import io.zenwave360.manifest.ManifestVariableInterpolator
-import io.zenwave360.manifest.ManifestService
-import io.zenwave360.manifest.ZenWaveManifest
-import io.zenwave360.manifest.ZenWaveManifestLoader
+import io.zenwave360.architecture.manifest.ManifestDiagnosticSeverity
+import io.zenwave360.architecture.manifest.ManifestVariableInterpolator
+import io.zenwave360.architecture.manifest.ManifestService
+import io.zenwave360.architecture.manifest.ZenWaveManifest
+import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge

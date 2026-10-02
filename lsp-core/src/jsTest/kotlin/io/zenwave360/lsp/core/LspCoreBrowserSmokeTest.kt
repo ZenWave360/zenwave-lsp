@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
 /**
  * Runs in the browser (jsBrowserTest, headless Chromium) and on Node. It loads lsp-core with every
  * language module and its dependency chain (dsl-kotlin parsers, json-schema-ref-parser-kmp,
- * manifest-core) and serves documents supplied in memory, with no Node runtime or filesystem.
+ * architecture-manifest) and serves documents supplied in memory, with no Node runtime or filesystem.
  */
 class LspCoreBrowserSmokeTest {
 

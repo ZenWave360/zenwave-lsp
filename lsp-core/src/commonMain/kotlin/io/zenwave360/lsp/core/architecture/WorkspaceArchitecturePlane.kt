@@ -1,10 +1,10 @@
 package io.zenwave360.lsp.core.architecture
 
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
-import io.zenwave360.manifest.ZenWaveManifestLoader
-import io.zenwave360.manifest.workspace.WorkspaceQueryApi
-import io.zenwave360.manifest.workspace.WorkspaceRuntime
-import io.zenwave360.manifest.workspace.WorkspaceSourceLocation
+import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.architecture.workspace.WorkspaceQueryApi
+import io.zenwave360.architecture.workspace.WorkspaceRuntime
+import io.zenwave360.architecture.workspace.WorkspaceSourceLocation
 
 /** Thin LSP facade over the architecture contract owned by zenwave-architecture. */
 class WorkspaceArchitecturePlane(
