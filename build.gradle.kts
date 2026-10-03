@@ -26,6 +26,15 @@ allprojects {
 }
 
 subprojects {
+    // The shared CI workflow collects Kover XML after running the regular Gradle build.
+    // Kover does not make XML generation part of `check` by default, so produce the
+    // report as the final verification step for each covered module.
+    plugins.withId("org.jetbrains.kotlinx.kover") {
+        tasks.named("check") {
+            finalizedBy("koverXmlReport")
+        }
+    }
+
     plugins.withId("com.vanniktech.maven.publish") {
         extensions.configure<MavenPublishBaseExtension> {
             publishToMavenCentral()
