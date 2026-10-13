@@ -22,7 +22,7 @@ val localDslKotlin = localBuildDir("zenwave.local.dslKotlinDir", "ZENWAVE_LOCAL_
 if (useLocalDependencies && localDslKotlin.exists()) {
     includeBuild(localDslKotlin) {
         dependencySubstitution {
-            substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":"))
+            substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":dsl-kotlin"))
         }
     }
 }
