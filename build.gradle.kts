@@ -75,7 +75,7 @@ subprojects {
     }
     repositories {
         mavenCentral()
-        maven("https://central.sonatype.com/repository/maven-snapshots/")
+        maven("https://www.zenwave360.io/maven-snapshots/") { mavenContent { snapshotsOnly() } }
         if (providers.gradleProperty("useLocalDependencies").map { it.toBooleanStrict() }.getOrElse(true)) {
             mavenLocal()
         }

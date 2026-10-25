@@ -23,6 +23,7 @@ if (useLocalDependencies && localDslKotlin.exists()) {
     includeBuild(localDslKotlin) {
         dependencySubstitution {
             substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":dsl-kotlin"))
+            substitute(module("io.zenwave360.dsl:dsl-views")).using(project(":dsl-views"))
         }
     }
 }
