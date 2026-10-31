@@ -1,11 +1,11 @@
 package io.zenwave360.lsp.core.visualization
 
 import io.zenwave360.language.antlr.ZdlLexer
+import io.zenwave360.language.docs.DslDocs
 import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
 import io.zenwave360.language.eventflow.view.MermaidSequenceRenderMode
-import io.zenwave360.language.zdl.application.GenerateMermaidFromZdl
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
@@ -21,7 +21,8 @@ import org.antlr.v4.kotlinruntime.Recognizer
 /**
  * Turns an open ZDL or ZFL document into what an IDE shows: EventFlow view models and preview
  * representations. The generators are dsl-kotlin's, the same ones the IntelliJ plugin calls in-process,
- * and the representation ids, titles and default follow IntelliJ's ZFL preview, so both IDEs agree.
+ * and the ZFL representation ids, titles and default follow IntelliJ's preview, so both IDEs agree. A ZDL
+ * document is one Markdown page of its domain model (`DslDocs.previewZdl`), whose descriptions are escaped.
  *
  * A document that cannot be read — a syntax error, or a generator that fails on it — is answered with
  * [DocumentFailureKind.DOCUMENT_UNREADABLE]; semantic problems (an unknown reference, say) still produce a
@@ -54,17 +55,17 @@ class ModelVisualizations {
 
     private fun zdlPreview(document: VisualizedDocument): PreviewResult {
         requireReadable(document)
-        val content = generating(document) { GenerateMermaidFromZdl().execute(document.snapshot.text) }
+        val content = generating(document) { DslDocs().previewZdl(document.snapshot.text) }
         return PreviewResult(
             representations = listOf(
                 PreviewRepresentation(
-                    id = CLASS_DIAGRAM_ID,
-                    title = "Class diagram",
-                    format = PreviewFormat.MERMAID,
+                    id = DOMAIN_ID,
+                    title = "Domain model",
+                    format = PreviewFormat.MARKDOWN,
                     content = content,
                 )
             ),
-            defaultRepresentationId = CLASS_DIAGRAM_ID,
+            defaultRepresentationId = DOMAIN_ID,
         )
     }
 
@@ -177,7 +178,7 @@ class ModelVisualizations {
     companion object {
         const val ZDL = "zdl"
         const val ZFL = "zfl"
-        const val CLASS_DIAGRAM_ID = "class-diagram"
+        const val DOMAIN_ID = "domain"
         const val FLOWCHART_ID = "flowchart"
 
         /** `sequenceRenderMode` of `zenwave/preview`; absent means ALT_BLOCKS, as `GenerateMermaidFromZfl.execute(text)`. */

@@ -115,21 +115,33 @@ class ModelVisualizationsTest {
     }
 
     @Test
-    fun zdlPreviewIsOneMermaidClassDiagram() {
+    fun zdlPreviewIsOneMarkdownDomainPage() {
         val server = server(Triple(ORDERS_ZDL_URI, "zdl", ORDERS_ZDL))
 
         val preview = server.preview(ORDERS_ZDL_URI)
 
         assertEquals(1, preview.representations.size)
         val representation = preview.representations.single()
-        assertEquals("class-diagram", representation.id)
-        assertEquals("Class diagram", representation.title)
-        assertEquals(PreviewFormat.MERMAID, representation.format)
-        assertEquals("class-diagram", preview.defaultRepresentationId)
-        assertTrue(representation.content.startsWith("classDiagram"), representation.content)
-        assertTrue(representation.content.contains("CustomerOrder"))
+        assertEquals("domain", representation.id)
+        assertEquals("Domain model", representation.title)
+        assertEquals(PreviewFormat.MARKDOWN, representation.format)
+        assertEquals("domain", preview.defaultRepresentationId)
+        assertTrue(representation.content.contains("CustomerOrder"), representation.content)
         assertFalse(representation.content.contains("plantuml", ignoreCase = true))
-        assertFalse(representation.content.contains("click "))
+    }
+
+    @Test
+    fun aZdlDescriptionDoesNotReachThePreviewAsScript() {
+        val text = "/** <script>alert(1)</script> */\nentity Customer {\n    name String required\n}\n"
+        val server = server(Triple(ORDERS_ZDL_URI, "zdl", text))
+
+        val preview = server.preview(ORDERS_ZDL_URI)
+        val content = preview.representations.single().content
+        val wire = VisualizationJson.preview(preview)
+
+        assertFalse(content.contains("<script", ignoreCase = true), content)
+        assertTrue(content.contains("&lt;script&gt;"), content)
+        assertFalse(wire.contains("<script", ignoreCase = true), wire)
     }
 
     @Test
@@ -138,7 +150,7 @@ class ModelVisualizationsTest {
         val server = server(Triple(ORDERS_ZDL_URI, "zdl", text))
         assertTrue(server.diagnostics(ORDERS_ZDL_URI).isNotEmpty())
 
-        assertEquals("class-diagram", server.preview(ORDERS_ZDL_URI).defaultRepresentationId)
+        assertEquals("domain", server.preview(ORDERS_ZDL_URI).defaultRepresentationId)
     }
 
     @Test
@@ -240,10 +252,10 @@ class ModelVisualizationsTest {
 
         val json = Json.parseToJsonElement(VisualizationJson.preview(server.preview(ORDERS_ZDL_URI))).jsonObject
 
-        assertEquals("class-diagram", json.getValue("defaultRepresentationId").jsonPrimitive.content)
+        assertEquals("domain", json.getValue("defaultRepresentationId").jsonPrimitive.content)
         val representation = json.getValue("representations").jsonArray.single().jsonObject
         assertEquals(setOf("id", "title", "format", "content"), representation.keys)
-        assertEquals("MERMAID", representation.getValue("format").jsonPrimitive.content)
+        assertEquals("MARKDOWN", representation.getValue("format").jsonPrimitive.content)
     }
 
     @Test

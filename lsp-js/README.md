@@ -74,7 +74,7 @@ groups of the same document's `zenwave/eventFlowViews` that stand for the node's
 `event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:…`); it
 is empty when the diagram has no counterpart.
 
-`zenwave/preview` answers for ZDL (one Mermaid `class-diagram`) and ZFL (a `flowchart`, then one
+`zenwave/preview` answers for ZDL (one Markdown page of the domain model, `domain`, with its diagrams as `mermaid` fences; descriptions are escaped, so a `<script>` shows as text) and ZFL (a `flowchart`, then one
 `sequence:<outcome>:<index>` per end outcome; the first sequence is the default). `sequenceRenderMode`
 defaults to `ALT_BLOCKS`. Null properties are omitted from every result.
 

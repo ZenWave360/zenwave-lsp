@@ -152,8 +152,8 @@ class WorkerWireTest {
             assertEquals("sequence:completed:0", preview.defaultRepresentationId)
             client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
         }.then { preview: dynamic ->
-            assertEquals("class-diagram", preview.defaultRepresentationId)
-            assertEquals("MERMAID", (preview.representations as Array<dynamic>).single().format)
+            assertEquals("domain", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
             client.notify("textDocument/didOpen", textDocumentItem(brokenZflUri, "zfl", 1, "flow Broken {\n    when {{ do\n"))
             client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to brokenZflUri)))
         }.then { error: dynamic ->

@@ -125,8 +125,9 @@ class LspCoreBrowserSmokeTest {
         )
 
         val zdlPreview = server.preview(zdlUri)
-        assertEquals("class-diagram", zdlPreview.defaultRepresentationId)
-        assertEquals(PreviewFormat.MERMAID, zdlPreview.representations.single().format)
+        assertEquals("domain", zdlPreview.defaultRepresentationId)
+        assertEquals(PreviewFormat.MARKDOWN, zdlPreview.representations.single().format)
+        assertTrue(zdlPreview.representations.single().content.contains("Customer"))
         assertTrue(server.preview(zflUri).representations.first().content.startsWith("flowchart"))
 
         // ELK layout through elkjs, in the browser.

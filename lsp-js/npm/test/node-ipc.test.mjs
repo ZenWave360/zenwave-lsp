@@ -277,10 +277,10 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
 
     const zdl = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: ordersUri } });
     assert.deepEqual(zdl.representations.map(({ id, title, format }) => ({ id, title, format })), [
-      { id: 'class-diagram', title: 'Class diagram', format: 'MERMAID' },
+      { id: 'domain', title: 'Domain model', format: 'MARKDOWN' },
     ]);
-    assert.equal(zdl.defaultRepresentationId, 'class-diagram');
-    assert.ok(zdl.representations[0].content.startsWith('classDiagram'));
+    assert.equal(zdl.defaultRepresentationId, 'domain');
+    assert.ok(zdl.representations[0].content.includes('Customer'));
   });
 
   test('documents that cannot answer are errors with a kind, never empty results', async () => {

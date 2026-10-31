@@ -263,12 +263,12 @@ class ZenwaveLspWireTest {
         assertEquals("flowchart", separate.asJsonObject["representations"].asJsonArray.first().asJsonObject["id"].asString)
 
         val zdl = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"}}""").asJsonObject
-        val classDiagram = zdl["representations"].asJsonArray.single().asJsonObject
-        assertEquals("class-diagram", classDiagram["id"].asString)
-        assertEquals("Class diagram", classDiagram["title"].asString)
-        assertEquals("MERMAID", classDiagram["format"].asString)
-        assertTrue(classDiagram["content"].asString.startsWith("classDiagram"))
-        assertEquals("class-diagram", zdl["defaultRepresentationId"].asString)
+        val domain = zdl["representations"].asJsonArray.single().asJsonObject
+        assertEquals("domain", domain["id"].asString)
+        assertEquals("Domain model", domain["title"].asString)
+        assertEquals("MARKDOWN", domain["format"].asString)
+        assertTrue(domain["content"].asString.contains("Customer"))
+        assertEquals("domain", zdl["defaultRepresentationId"].asString)
     }
 
     @Test

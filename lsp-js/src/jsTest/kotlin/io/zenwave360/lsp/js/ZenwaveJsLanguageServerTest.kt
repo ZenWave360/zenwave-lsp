@@ -222,11 +222,11 @@ flow CheckoutFlow {
         val answer = recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
 
         return (answer as Promise<dynamic>).then { result: dynamic ->
-            assertEquals("class-diagram", result.defaultRepresentationId)
+            assertEquals("domain", result.defaultRepresentationId)
             val representation = (result.representations as Array<dynamic>).single()
-            assertEquals("MERMAID", representation.format)
-            assertEquals("Class diagram", representation.title)
-            assertTrue((representation.content as String).startsWith("classDiagram"))
+            assertEquals("MARKDOWN", representation.format)
+            assertEquals("Domain model", representation.title)
+            assertTrue((representation.content as String).contains("Customer"))
         }
     }
 
