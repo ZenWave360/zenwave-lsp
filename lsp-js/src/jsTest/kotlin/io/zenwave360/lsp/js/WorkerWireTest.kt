@@ -86,6 +86,8 @@ class WorkerWireTest {
             "        emits OrderCreated\n        emits OrderRejected\n    }\n\n    end {\n        completed: OrderCreated\n" +
             "        rejected: OrderRejected\n    }\n}\n"
         val brokenZflUri = "file:///workspace/broken.zfl"
+        val zwUri = "file:///workspace/orders.zw"
+        val brokenZwUri = "file:///workspace/broken.zw"
         val fixtures = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures"
 
         return client.request(
@@ -154,6 +156,16 @@ class WorkerWireTest {
         }.then { preview: dynamic ->
             assertEquals("domain", preview.defaultRepresentationId)
             assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(zwUri, "zw", 1, ordersText))
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to zwUri)))
+        }.then { preview: dynamic ->
+            assertEquals("domain", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(brokenZwUri, "zw", 1, "entity Customer {\n    name String required\n    ) ) )\n}\n"))
+            client.requestError("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to brokenZwUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentUnreadable", error.data.kind)
             client.notify("textDocument/didOpen", textDocumentItem(brokenZflUri, "zfl", 1, "flow Broken {\n    when {{ do\n"))
             client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to brokenZflUri)))
         }.then { error: dynamic ->

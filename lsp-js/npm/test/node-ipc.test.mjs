@@ -281,6 +281,19 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     ]);
     assert.equal(zdl.defaultRepresentationId, 'domain');
     assert.ok(zdl.representations[0].content.includes('Customer'));
+
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: 'file:///workspace/orders.zw', languageId: 'zw', version: 1, text: ordersText },
+    });
+    const zw = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: 'file:///workspace/orders.zw' } });
+    assert.deepEqual(zw.representations.map(({ id, format }) => ({ id, format })), [{ id: 'domain', format: 'MARKDOWN' }]);
+    assert.equal(zw.defaultRepresentationId, 'domain');
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: 'file:///workspace/broken.zw', languageId: 'zw', version: 1, text: 'entity Customer {\n  name String required\n  ) ) )\n}\n' },
+    });
+    const brokenZw = await requestFailure(server, 'zenwave/preview', { textDocument: { uri: 'file:///workspace/broken.zw' } });
+    assert.equal(brokenZw.code, REQUEST_FAILED);
+    assert.equal(brokenZw.data.kind, 'documentUnreadable');
   });
 
   test('documents that cannot answer are errors with a kind, never empty results', async () => {

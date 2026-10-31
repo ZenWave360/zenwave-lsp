@@ -33,9 +33,9 @@ class ModelVisualizations {
     fun preview(document: VisualizedDocument, sequenceRenderMode: String?): PreviewResult {
         val mode = parseSequenceRenderMode(sequenceRenderMode)
         return when (document.languageId) {
-            ZDL -> zdlPreview(document)
+            ZDL, ZW -> zdlPreview(document)
             ZFL -> zflPreview(document, mode)
-            else -> throw unsupported(document, "zenwave/preview covers ZDL and ZFL documents")
+            else -> throw unsupported(document, "zenwave/preview covers ZDL, ZW and ZFL documents")
         }
     }
 
@@ -95,7 +95,7 @@ class ModelVisualizations {
     private fun requireReadable(document: VisualizedDocument) {
         val syntaxDiagnostics = when (document.languageId) {
             ZFL -> document.diagnostics.filter { it.code == "syntax" || it.code == "parser" }
-            ZDL -> zdlSyntaxDiagnostics(document.snapshot)
+            ZDL, ZW -> zdlSyntaxDiagnostics(document.snapshot)
             else -> emptyList()
         }
         if (syntaxDiagnostics.isNotEmpty()) {
@@ -177,6 +177,7 @@ class ModelVisualizations {
 
     companion object {
         const val ZDL = "zdl"
+        const val ZW = "zw"
         const val ZFL = "zfl"
         const val DOMAIN_ID = "domain"
         const val FLOWCHART_ID = "flowchart"

@@ -31,6 +31,7 @@ class LspCoreBrowserSmokeTest {
         modules = listOf(
             ArchitectureManifestLanguageModule(),
             ZdlLanguageModule(),
+            ZdlLanguageModule.zw(),
             AsyncApiLanguageModule(),
             OpenApiLanguageModule(),
             AvroLanguageModule(),
@@ -129,6 +130,9 @@ class LspCoreBrowserSmokeTest {
         assertEquals(PreviewFormat.MARKDOWN, zdlPreview.representations.single().format)
         assertTrue(zdlPreview.representations.single().content.contains("Customer"))
         assertTrue(server.preview(zflUri).representations.first().content.startsWith("flowchart"))
+        val zwUri = "file:///workspace/orders.zw"
+        server.open(DocumentSnapshot(DocumentRef(zwUri, "zw", 1), "entity Customer {\n    name String required\n}\n"))
+        assertEquals(PreviewFormat.MARKDOWN, server.preview(zwUri).representations.single().format)
 
         // ELK layout through elkjs, in the browser.
         val views = server.eventFlowViews(zflUri)
@@ -167,7 +171,7 @@ class LspCoreBrowserSmokeTest {
     fun advertisesEveryLanguageModule() {
         val languageIds = server().capabilities().map { it.languageId }.toSet()
 
-        assertTrue(languageIds.containsAll(listOf("zdl", "zfl")), languageIds.toString())
-        assertEquals(6, languageIds.size, languageIds.toString())
+        assertTrue(languageIds.containsAll(listOf("zdl", "zw", "zfl")), languageIds.toString())
+        assertEquals(7, languageIds.size, languageIds.toString())
     }
 }

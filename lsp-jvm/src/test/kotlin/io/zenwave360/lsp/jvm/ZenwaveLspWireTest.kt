@@ -272,6 +272,32 @@ class ZenwaveLspWireTest {
     }
 
     @Test
+    fun zwDocumentsAreServedAsZdlAndPreviewedAsMarkdown() {
+        initialize()
+        val broken = open(BROKEN_ZW_URI, "zw", "entity Customer {\n    name String required\n    ) ) )\n}\n")
+        assertTrue(broken["diagnostics"].asJsonArray.size() > 0, "ZDL diagnostics reach a .zw document")
+        open(ORDERS_ZW_URI, "zw", ORDERS_ZDL)
+
+        val preview = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_ZW_URI"}}""").asJsonObject
+        val domain = preview["representations"].asJsonArray.single().asJsonObject
+        assertEquals("domain", domain["id"].asString)
+        assertEquals("MARKDOWN", domain["format"].asString)
+        assertTrue(domain["content"].asString.contains("CustomerOrder"))
+        assertEquals("domain", preview["defaultRepresentationId"].asString)
+
+        val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$ORDERS_ZW_URI"}}""").asJsonArray
+        assertTrue(symbols.toString().contains("CustomerOrder"), symbols.toString())
+
+        val (code, data) = requestError("zenwave/preview", """{"textDocument":{"uri":"$BROKEN_ZW_URI"}}""")
+        assertEquals(-32803, code)
+        assertEquals("documentUnreadable", data!!.asJsonObject["kind"].asString)
+
+        open(ORDERS_URI, "zdl", ORDERS_ZDL)
+        val zdl = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"}}""").asJsonObject
+        assertEquals("domain", zdl["defaultRepresentationId"].asString)
+    }
+
+    @Test
     fun documentsThatCannotAnswerAreErrorsWithAKind() {
         initialize()
         open(BROKEN_ZFL_URI, "zfl", BROKEN_ZFL)
@@ -384,6 +410,8 @@ class ZenwaveLspWireTest {
 
     private companion object {
         const val ORDERS_URI = "file:///workspace/orders.zdl"
+        const val ORDERS_ZW_URI = "file:///workspace/orders.zw"
+        const val BROKEN_ZW_URI = "file:///workspace/broken.zw"
         val ORDERS_ZDL = """
             entity Customer {
                 name String required

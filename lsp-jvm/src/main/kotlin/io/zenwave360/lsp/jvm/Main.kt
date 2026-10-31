@@ -16,6 +16,7 @@ fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
         modules = listOf(
             ArchitectureManifestLanguageModule(),
             ZdlLanguageModule(),
+            ZdlLanguageModule.zw(),
             AsyncApiLanguageModule(),
             OpenApiLanguageModule(),
             AvroLanguageModule(),

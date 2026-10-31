@@ -54,6 +54,7 @@ internal val CHECKOUT_ZFL = """
 """.trimIndent()
 
 internal const val ORDERS_ZDL_URI = "file:///workspace/orders.zdl"
+internal const val ORDERS_ZW_URI = "file:///workspace/orders.zw"
 internal val ORDERS_ZDL = """
     entity Customer {
         name String required
@@ -75,6 +76,7 @@ class ModelVisualizationsTest {
             modules = listOf(
                 ArchitectureManifestLanguageModule(),
                 ZdlLanguageModule(),
+                ZdlLanguageModule.zw(),
                 AsyncApiLanguageModule(),
                 OpenApiLanguageModule(),
                 AvroLanguageModule(),
@@ -162,6 +164,45 @@ class ModelVisualizationsTest {
         assertEquals(DocumentFailureKind.DOCUMENT_UNREADABLE, failure.kind)
         assertTrue(failure.diagnostics.isNotEmpty())
         assertTrue(failure.diagnostics.all { it.code == "syntax" && it.uri == ORDERS_ZDL_URI })
+    }
+
+    @Test
+    fun aZwDocumentIsPreviewedAsTheDomainPageWhetherIdentifiedByLanguageIdOrExtension() {
+        val byLanguageId = server(Triple(ORDERS_ZW_URI, "zw", ORDERS_ZDL))
+        val byExtension = server(Triple(ORDERS_ZW_URI, "plaintext", ORDERS_ZDL))
+
+        listOf(byLanguageId, byExtension).forEach { server ->
+            val preview = server.preview(ORDERS_ZW_URI)
+            assertEquals("domain", preview.defaultRepresentationId)
+            val representation = preview.representations.single()
+            assertEquals(PreviewFormat.MARKDOWN, representation.format)
+            assertTrue(representation.content.contains("CustomerOrder"), representation.content)
+        }
+    }
+
+    @Test
+    fun aZwDocumentGetsTheZdlFeatures() {
+        val broken = server(Triple(ORDERS_ZW_URI, "zw", BROKEN_ZDL))
+        val semantic = "entity Customer {\n    name String required\n}\n\naggregate CustomerAggregate(MissingEntity) {\n}\n"
+        val withProblems = server(Triple(ORDERS_ZW_URI, "zw", semantic))
+        val zdlEquivalent = server(Triple(ORDERS_ZDL_URI, "zdl", semantic))
+
+        assertTrue(broken.diagnostics(ORDERS_ZW_URI).isNotEmpty())
+        assertEquals(
+            zdlEquivalent.diagnostics(ORDERS_ZDL_URI).map { it.message to it.range },
+            withProblems.diagnostics(ORDERS_ZW_URI).map { it.message to it.range },
+        )
+        assertEquals(zdlEquivalent.format(ORDERS_ZDL_URI), withProblems.format(ORDERS_ZW_URI))
+    }
+
+    @Test
+    fun aZwWithASyntaxErrorIsUnreadable() {
+        val server = server(Triple(ORDERS_ZW_URI, "zw", BROKEN_ZDL))
+
+        val failure = assertFailsWith<DocumentRequestException> { server.preview(ORDERS_ZW_URI) }
+
+        assertEquals(DocumentFailureKind.DOCUMENT_UNREADABLE, failure.kind)
+        assertTrue(failure.diagnostics.all { it.code == "syntax" && it.uri == ORDERS_ZW_URI })
     }
 
     @Test

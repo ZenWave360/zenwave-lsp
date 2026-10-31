@@ -12,22 +12,28 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.model.SemanticModel
+import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
+/**
+ * The ZDL language. `.zw` files are the same language with a different purpose (they configure plugins), so
+ * they are served by a second instance, [zw]: same parser, diagnostics, symbols and hierarchy, but a language id
+ * of their own, which lets `zenwave/preview` tell them apart.
+ */
 class ZdlLanguageModule(
-    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter()
+    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter(),
+    override val languageId: String = ModelVisualizations.ZDL,
+    private val extension: String = ".zdl",
 ) : LanguageModule {
 
     private val hierarchyBuilder = ZdlHierarchyBuilder()
     private val crossReferenceContributor = ZdlCrossReferenceContributor()
     private val formatter = ZdlFormatter()
 
-    override val languageId: String = "zdl"
-
     override val capabilities: LanguageCapabilities =
         LanguageCapabilities(
             languageId = languageId,
-            extensions = listOf(".zdl"),
+            extensions = listOf(extension),
             supportsHover = true,
             supportsDefinition = true,
             supportsCompletion = false,
@@ -135,7 +141,7 @@ class ZdlLanguageModule(
         crossReferenceContributor.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
 
     override fun canHandle(uri: String, text: String?): Boolean =
-        uri.endsWith(".zdl")
+        uri.endsWith(extension)
 
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
@@ -238,5 +244,10 @@ class ZdlLanguageModule(
             }
             else -> null
         }
+    }
+
+    companion object {
+        /** The module for `.zw` files: ZDL by every means but its language id and extension. */
+        fun zw(): ZdlLanguageModule = ZdlLanguageModule(languageId = ModelVisualizations.ZW, extension = ".zw")
     }
 }
