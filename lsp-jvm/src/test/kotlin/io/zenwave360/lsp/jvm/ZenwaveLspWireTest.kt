@@ -272,6 +272,31 @@ class ZenwaveLspWireTest {
         assertEquals("domain", zdl["defaultRepresentationId"].asString)
     }
 
+    @Test
+    fun previewNeverServesModelControlledAnnotationTextAsImageOrScript() {
+        initialize()
+        fun zdlWith(api: String) = listOf(
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {}",
+            "service Orders for (OrderAggregate) {",
+            "    @asyncapi(api: \"$api\", channel: \"c\")",
+            "    create(Order) Order",
+            "}",
+            "",
+        ).joinToString("\n")
+        fun previewOf(uri: String, api: String): String {
+            open(uri, "zdl", zdlWith(api))
+            val representation = request("zenwave/preview", """{"textDocument":{"uri":"$uri"}}""").asJsonObject["representations"].asJsonArray.first().asJsonObject
+            assertEquals("MARKDOWN", representation["format"].asString)
+            return representation["content"].asString
+        }
+
+        val image = previewOf("file:///workspace/hostile-image.zdl", "![x](https://example.invalid/preview-probe.png)")
+        assertFalse(image.contains("![x](https://example.invalid"), image)
+        val script = previewOf("file:///workspace/hostile-script.zdl", "<script>alert(1)</script>")
+        assertFalse(script.contains("<script"), script)
+    }
+
     private fun catalogueJson(summary: String?, extra: String = "") =
         """{"source":"Test SDK","version":"9.9",$extra"plugins":[""" +
             (summary?.let { """{"name":"ZDLToOpenAPIPlugin","configClassName":"x.ZDLToOpenAPIPlugin","summary":"$it"}""" } ?: "") + "]}"

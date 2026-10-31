@@ -300,6 +300,31 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(brokenZw.data.kind, 'documentUnreadable');
   });
 
+  test('zenwave/preview never serves model-controlled annotation text as an image or script', async () => {
+    const zdlWith = (api) => [
+      'entity Order { name String }',
+      'aggregate OrderAggregate(Order) {}',
+      'service Orders for (OrderAggregate) {',
+      `    @asyncapi(api: "${api}", channel: "c")`,
+      '    create(Order) Order',
+      '}',
+      '',
+    ].join('\n');
+    const previewOf = async (uri, api) => {
+      await server.connection.sendNotification('textDocument/didOpen', {
+        textDocument: { uri, languageId: 'zdl', version: 1, text: zdlWith(api) },
+      });
+      const preview = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri } });
+      const [representation] = preview.representations;
+      assert.equal(representation.format, 'MARKDOWN');
+      return representation.content;
+    };
+    const image = await previewOf('file:///workspace/hostile-image.zdl', '![x](https://example.invalid/preview-probe.png)');
+    assert.ok(!image.includes('![x](https://example.invalid'), image);
+    const script = await previewOf('file:///workspace/hostile-script.zdl', '<script>alert(1)</script>');
+    assert.ok(!script.includes('<script'), script);
+  });
+
   test('documents that cannot answer are errors with a kind, never empty results', async () => {
     await server.connection.sendNotification('textDocument/didOpen', {
       textDocument: { uri: brokenZflUri, languageId: 'zfl', version: 1, text: brokenZflText },
