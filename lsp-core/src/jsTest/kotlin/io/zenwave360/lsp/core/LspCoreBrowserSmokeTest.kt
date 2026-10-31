@@ -131,8 +131,12 @@ class LspCoreBrowserSmokeTest {
         assertTrue(zdlPreview.representations.single().content.contains("Customer"))
         assertTrue(server.preview(zflUri).representations.first().content.startsWith("flowchart"))
         val zwUri = "file:///workspace/orders.zw"
-        server.open(DocumentSnapshot(DocumentRef(zwUri, "zw", 1), "entity Customer {\n    name String required\n}\n"))
-        assertEquals(PreviewFormat.MARKDOWN, server.preview(zwUri).representations.single().format)
+        server.open(DocumentSnapshot(DocumentRef(zwUri, "zw", 1), ZW_SCRIPTS))
+        val zwPreview = server.preview(zwUri)
+        assertEquals("configuration", zwPreview.defaultRepresentationId)
+        assertEquals(PreviewFormat.MARKDOWN, zwPreview.representations.single().format)
+        // The server's own copy of the plugin catalogue is embedded: no file is read in the browser.
+        assertTrue(zwPreview.representations.single().content.contains("draft OpenAPI"), zwPreview.representations.single().content)
 
         // ELK layout through elkjs, in the browser.
         val views = server.eventFlowViews(zflUri)
@@ -175,3 +179,14 @@ class LspCoreBrowserSmokeTest {
         assertEquals(7, languageIds.size, languageIds.toString())
     }
 }
+
+private val ZW_SCRIPTS = listOf(
+    "config {",
+    "    plugins {",
+    "        ZDLToOpenAPIPlugin {",
+    "            targetFile \"./openapi.yml\"",
+    "        }",
+    "    }",
+    "}",
+    "",
+).joinToString("\n")

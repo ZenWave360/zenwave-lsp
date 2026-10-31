@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { after, before, describe, test } from 'node:test';
+import { after, afterEach, before, describe, test } from 'node:test';
 import { createMessageConnection, IPCMessageReader, IPCMessageWriter } from 'vscode-jsonrpc/node.js';
 
 const packageDir = process.env.LSP_JS_PACKAGE_DIR;
@@ -111,6 +111,8 @@ function startServer(args) {
   const connection = createMessageConnection(new IPCMessageReader(child), new IPCMessageWriter(child));
   const diagnostics = new Map();
   const diagnosticWaiters = [];
+  const logs = [];
+  connection.onNotification('window/logMessage', (params) => logs.push(params));
   connection.onNotification('textDocument/publishDiagnostics', (params) => {
     diagnostics.set(params.uri, params.diagnostics);
     for (const waiter of diagnosticWaiters.splice(0)) waiter();
@@ -123,6 +125,7 @@ function startServer(args) {
     connection,
     exited,
     stderr: () => stderr,
+    logs,
     async diagnosticsFor(uri) {
       while (!diagnostics.has(uri)) {
         await new Promise((resolve) => diagnosticWaiters.push(resolve));
@@ -164,6 +167,7 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(result.capabilities.documentSymbolProvider, true);
     assert.equal(result.capabilities.documentFormattingProvider, true);
     assert.deepEqual(result.capabilities.experimental.customRequests, EXPECTED_CUSTOM_REQUESTS);
+    assert.deepEqual(result.capabilities.experimental.customNotifications, ['zenwave/pluginCatalogue']);
     const languageIds = result.capabilities.experimental.moduleSelectors.map((selector) => selector.languageId);
     assert.ok(languageIds.includes('zdl') && languageIds.includes('zfl'), JSON.stringify(languageIds));
     await server.connection.sendNotification('initialized', {});
@@ -286,8 +290,8 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
       textDocument: { uri: 'file:///workspace/orders.zw', languageId: 'zw', version: 1, text: ordersText },
     });
     const zw = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: 'file:///workspace/orders.zw' } });
-    assert.deepEqual(zw.representations.map(({ id, format }) => ({ id, format })), [{ id: 'domain', format: 'MARKDOWN' }]);
-    assert.equal(zw.defaultRepresentationId, 'domain');
+    assert.deepEqual(zw.representations.map(({ id, format }) => ({ id, format })), [{ id: 'configuration', format: 'MARKDOWN' }]);
+    assert.equal(zw.defaultRepresentationId, 'configuration');
     await server.connection.sendNotification('textDocument/didOpen', {
       textDocument: { uri: 'file:///workspace/broken.zw', languageId: 'zw', version: 1, text: 'entity Customer {\n  name String required\n  ) ) )\n}\n' },
     });
@@ -395,5 +399,99 @@ describe('Node entry point forked without transport arguments', { timeout: 120_0
     } finally {
       if (server.child.exitCode === null) server.child.kill();
     }
+  });
+});
+
+describe('Plugin catalogue (MP-R16) over Node IPC', { timeout: 120_000 }, () => {
+  const scriptsUri = 'file:///workspace/scripts.zw';
+  const scriptsText = [
+    'config {',
+    '    title "Orders scripts"',
+    '    basePackage "io.example.orders"',
+    '    plugins {',
+    '        ZDLToOpenAPIPlugin {',
+    '            targetFile "./openapi.yml"',
+    '        }',
+    '        TeamOwnPlugin {',
+    '            maxDepth 3',
+    '        }',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const shippedSummary = 'Generates a draft OpenAPI definitions from your ZDL entities and services.';
+  const catalogue = (summary, extra = {}) => ({
+    source: 'Test SDK',
+    version: '9.9',
+    ...extra,
+    plugins: summary === null ? [] : [{ name: 'ZDLToOpenAPIPlugin', configClassName: 'x.ZDLToOpenAPIPlugin', summary }],
+  });
+  let server;
+
+  async function start(initializationOptions) {
+    server = startServer(['--node-ipc']);
+    await server.connection.sendRequest('initialize', { processId: process.pid, rootUri: null, capabilities: {}, initializationOptions });
+    await server.connection.sendNotification('initialized', {});
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: scriptsUri, languageId: 'zw', version: 1, text: scriptsText },
+    });
+  }
+
+  async function page() {
+    const preview = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: scriptsUri } });
+    assert.equal(preview.defaultRepresentationId, 'configuration');
+    assert.deepEqual(preview.representations.map(({ id, title, format }) => ({ id, title, format })), [
+      { id: 'configuration', title: 'Plugin configuration', format: 'MARKDOWN' },
+    ]);
+    return preview.representations[0].content;
+  }
+
+  afterEach(() => {
+    if (server?.child.exitCode === null) server.child.kill();
+  });
+
+  test('a .zw page is described by the server\'s own copy of the catalogue', async () => {
+    await start(undefined);
+    const content = await page();
+    assert.ok(content.includes('### ZDLToOpenAPIPlugin'), content);
+    assert.ok(content.includes(shippedSummary), content);
+    assert.ok(content.includes('### TeamOwnPlugin'), content);
+  });
+
+  test('a catalogue in initializationOptions replaces it, tolerating unknown fields', async () => {
+    await start({ pluginCatalogue: catalogue('Summary from the client', { somethingNew: { a: [1] } }) });
+    const content = await page();
+    assert.ok(content.includes('Summary from the client'), content);
+    assert.ok(!content.includes(shippedSummary), content);
+  });
+
+  test('a notification replaces it for the next preview; a malformed one keeps the previous and is logged', async () => {
+    await start({});
+    assert.ok((await page()).includes(shippedSummary));
+
+    await server.connection.sendNotification('zenwave/pluginCatalogue', { catalogue: catalogue('First replacement') });
+    assert.ok((await page()).includes('First replacement'));
+    await server.connection.sendNotification('zenwave/pluginCatalogue', { catalogue: catalogue('Second replacement') });
+    const second = await page();
+    assert.ok(second.includes('Second replacement') && !second.includes('First replacement'), second);
+
+    await server.connection.sendNotification('zenwave/pluginCatalogue', { catalogue: { plugins: 'nope' } });
+    await server.connection.sendNotification('zenwave/pluginCatalogue', { catalogue: 'text' });
+    await server.connection.sendNotification('zenwave/pluginCatalogue', {});
+    assert.ok((await page()).includes('Second replacement'));
+    assert.ok(server.logs.length >= 1 && server.logs.every((log) => log.type === 2 && log.message.includes('plugin catalogue')), JSON.stringify(server.logs));
+  });
+
+  test('a plugin missing from the replacement shows without a description', async () => {
+    await start({ pluginCatalogue: catalogue(null) });
+    const content = await page();
+    assert.ok(content.includes('### ZDLToOpenAPIPlugin') && content.includes('targetFile'), content);
+    assert.ok(!content.includes(shippedSummary), content);
+  });
+
+  test('a malformed catalogue in initializationOptions never fails initialisation', async () => {
+    await start({ pluginCatalogue: 'not a catalogue' });
+    assert.ok((await page()).includes(shippedSummary));
+    assert.ok(server.logs.some((log) => log.message.includes('plugin catalogue')));
   });
 });

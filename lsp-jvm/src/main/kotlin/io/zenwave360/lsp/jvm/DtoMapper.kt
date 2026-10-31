@@ -5,6 +5,7 @@ import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
+import com.google.gson.JsonElement
 import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DocumentSymbol
 import org.eclipse.lsp4j.DiagnosticSeverity as LspDiagnosticSeverity
@@ -188,3 +189,8 @@ internal fun HierarchyNode.toDto(): HierarchyNodeDto =
         uiHints = uiHints,
         viewNodeIds = viewNodeIds
     )
+
+/** Params of the `zenwave/pluginCatalogue` notification: the catalogue as a JSON object. Nullable: Gson leaves absent properties null. */
+data class PluginCatalogueParams(
+    val catalogue: JsonElement? = null
+)

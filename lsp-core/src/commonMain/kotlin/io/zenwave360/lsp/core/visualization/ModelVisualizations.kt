@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.visualization
 
 import io.zenwave360.language.antlr.ZdlLexer
 import io.zenwave360.language.docs.DslDocs
+import io.zenwave360.lsp.core.catalogue.PluginCatalogues
 import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
@@ -22,18 +23,20 @@ import org.antlr.v4.kotlinruntime.Recognizer
  * Turns an open ZDL or ZFL document into what an IDE shows: EventFlow view models and preview
  * representations. The generators are dsl-kotlin's, the same ones the IntelliJ plugin calls in-process,
  * and the ZFL representation ids, titles and default follow IntelliJ's preview, so both IDEs agree. A ZDL
- * document is one Markdown page of its domain model (`DslDocs.previewZdl`), whose descriptions are escaped.
+ * document is one Markdown page of its domain model (`DslDocs.previewZdl`), and a ZW document one of its plugin
+ * configuration (`DslDocs.previewZw`, described by the current [PluginCatalogues]); both escape what the model wrote.
  *
  * A document that cannot be read — a syntax error, or a generator that fails on it — is answered with
  * [DocumentFailureKind.DOCUMENT_UNREADABLE]; semantic problems (an unknown reference, say) still produce a
  * result, since the diagram of an incomplete model is what a user editing it wants to see.
  */
-class ModelVisualizations {
+class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = PluginCatalogues()) {
 
     fun preview(document: VisualizedDocument, sequenceRenderMode: String?): PreviewResult {
         val mode = parseSequenceRenderMode(sequenceRenderMode)
         return when (document.languageId) {
-            ZDL, ZW -> zdlPreview(document)
+            ZDL -> zdlPreview(document)
+            ZW -> zwPreview(document)
             ZFL -> zflPreview(document, mode)
             else -> throw unsupported(document, "zenwave/preview covers ZDL, ZW and ZFL documents")
         }
@@ -66,6 +69,22 @@ class ModelVisualizations {
                 )
             ),
             defaultRepresentationId = DOMAIN_ID,
+        )
+    }
+
+    private fun zwPreview(document: VisualizedDocument): PreviewResult {
+        requireReadable(document)
+        val content = generating(document) { DslDocs().previewZw(document.snapshot.text, pluginCatalogues.current()) }
+        return PreviewResult(
+            representations = listOf(
+                PreviewRepresentation(
+                    id = CONFIGURATION_ID,
+                    title = "Plugin configuration",
+                    format = PreviewFormat.MARKDOWN,
+                    content = content,
+                )
+            ),
+            defaultRepresentationId = CONFIGURATION_ID,
         )
     }
 
@@ -178,6 +197,7 @@ class ModelVisualizations {
     companion object {
         const val ZDL = "zdl"
         const val ZW = "zw"
+        const val CONFIGURATION_ID = "configuration"
         const val ZFL = "zfl"
         const val DOMAIN_ID = "domain"
         const val FLOWCHART_ID = "flowchart"

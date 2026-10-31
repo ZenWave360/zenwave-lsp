@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.platform
 
+import io.zenwave360.lsp.core.catalogue.PluginCatalogues
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
@@ -44,7 +45,8 @@ class ZenwaveLanguageServer(
     } else {
         WorkspaceStatus(WorkspaceState.READY)
     }
-    private val visualizations = ModelVisualizations()
+    private val pluginCatalogues = PluginCatalogues()
+    private val visualizations = ModelVisualizations(pluginCatalogues)
 
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
@@ -204,6 +206,14 @@ class ZenwaveLanguageServer(
         ModelVisualizations.parseSequenceRenderMode(sequenceRenderMode)
         return visualizations.preview(visualizedDocument(uri), sequenceRenderMode)
     }
+
+    /**
+     * Makes the plugin catalogue in [catalogueJson] the one `.zw` previews describe plugins with (MP-R16); previews are
+     * not cached, so the next one uses it.
+     *
+     * @throws IllegalArgumentException when it is not a plugin catalogue; the current one is kept
+     */
+    fun replacePluginCatalogue(catalogueJson: String) = pluginCatalogues.replace(catalogueJson)
 
     /**
      * The laid-out flow and service view models of an open ZFL document (`zenwave/eventFlowViews`).

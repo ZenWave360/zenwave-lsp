@@ -13,6 +13,7 @@ import kotlin.test.assertTrue
 internal class RecordingConnection {
     val handlers = mutableMapOf<String, dynamic>()
     val diagnostics = mutableListOf<dynamic>()
+    val warnings = mutableListOf<String>()
     var listening = false
     val connection: dynamic = js("({})")
 
@@ -26,6 +27,8 @@ internal class RecordingConnection {
         }
         connection["onRequest"] = { method: String, handler: dynamic -> handlers[method] = handler }
         connection["sendDiagnostics"] = { params: dynamic -> diagnostics.add(params) }
+        connection["onNotification"] = { method: String, handler: dynamic -> handlers[method] = handler }
+        connection["console"] = jsonObject("warn" to { message: String -> warnings.add(message) })
         connection["listen"] = { listening = true }
     }
 
@@ -214,6 +217,60 @@ flow CheckoutFlow {
         }
     }
 
+
+    private fun catalogue(summary: String?): dynamic {
+        val catalogue = jsonObject("source" to "Test SDK", "version" to "9.9", "plugins" to emptyArray<dynamic>())
+        if (summary != null) {
+            catalogue.plugins = arrayOf(jsonObject("name" to "ZDLToOpenAPIPlugin", "configClassName" to "x.P", "summary" to summary))
+        }
+        return catalogue
+    }
+
+    private fun zwContent(recording: RecordingConnection): Promise<String> {
+        recording.call(
+            "onDidOpenTextDocument",
+            textDocumentItem("file:///workspace/scripts.zw", "zw", 1, "config {\n    plugins {\n        ZDLToOpenAPIPlugin {\n            targetFile \"./openapi.yml\"\n        }\n    }\n}\n"),
+        )
+        return (recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/scripts.zw"))) as Promise<dynamic>)
+            .then { result: dynamic -> (result.representations as Array<dynamic>).single().content as String }
+    }
+
+    @Test
+    fun advertisesAndAcceptsThePluginCatalogueNotification(): Promise<Unit> {
+        val (_, recording) = listening()
+        val result = recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        assertEquals(listOf("zenwave/pluginCatalogue"), (result.capabilities.experimental.customNotifications as Array<String>).toList())
+        assertTrue("zenwave/pluginCatalogue" in recording.handlers)
+
+        return zwContent(recording).then { content ->
+            assertTrue(content.contains("draft OpenAPI"), "the server's own copy describes the plugin")
+            recording.call("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue("Replaced")))
+            recording.call("zenwave/pluginCatalogue", jsonObject("catalogue" to jsonObject("plugins" to 3)))
+            recording.call("zenwave/pluginCatalogue", jsonObject())
+            assertEquals(2, recording.warnings.size, recording.warnings.toString())
+            assertTrue(recording.warnings.all { it.contains("plugin catalogue") })
+        }.then {
+            (recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/scripts.zw"))) as Promise<dynamic>)
+        }.then { result: dynamic ->
+            assertTrue(((result.representations as Array<dynamic>).single().content as String).contains("Replaced"))
+        }
+    }
+
+    @Test
+    fun aCatalogueInInitializationOptionsIsUsedAndAMalformedOneNeverFailsInitialisation(): Promise<Unit> {
+        val (_, replaced) = listening()
+        replaced.call("onInitialize", jsonObject("capabilities" to jsonObject(), "initializationOptions" to jsonObject("pluginCatalogue" to catalogue("From init"))))
+        val (_, malformed) = listening()
+        val result = malformed.call("onInitialize", jsonObject("capabilities" to jsonObject(), "initializationOptions" to jsonObject("pluginCatalogue" to "nope")))
+        assertEquals("zenwave-lsp", result.serverInfo.name)
+        assertEquals(1, malformed.warnings.size)
+
+        return zwContent(replaced).then { content ->
+            assertTrue(content.contains("From init"), content)
+        }.then { zwContent(malformed) }.then { content ->
+            assertTrue(content.contains("draft OpenAPI"), content)
+        }
+    }
     @Test
     fun answersPreviewWithPlainObjects(): Promise<Unit> {
         val (_, recording) = listening()

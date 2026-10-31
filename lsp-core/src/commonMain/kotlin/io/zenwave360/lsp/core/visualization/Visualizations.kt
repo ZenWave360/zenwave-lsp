@@ -89,3 +89,14 @@ class DocumentRequestException(
 
 /** A request's parameters are malformed. Servers send it as [ZenwaveErrorCodes.INVALID_PARAMS]. */
 class InvalidRequestParamsException(message: String) : IllegalArgumentException(message)
+
+/**
+ * The ZenWave-specific notifications a server accepts, advertised in `capabilities.experimental.customNotifications`
+ * (additive to `customRequests`, decision 0002).
+ */
+object ZenwaveCustomNotifications {
+    /** Params `{catalogue: <plugin catalogue JSON object>}`: replaces the catalogue `.zw` previews use. */
+    const val PLUGIN_CATALOGUE = "zenwave/pluginCatalogue"
+
+    val ALL: List<String> = listOf(PLUGIN_CATALOGUE)
+}

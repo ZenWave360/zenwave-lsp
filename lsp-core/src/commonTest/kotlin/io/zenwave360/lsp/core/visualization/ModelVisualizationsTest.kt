@@ -167,16 +167,15 @@ class ModelVisualizationsTest {
     }
 
     @Test
-    fun aZwDocumentIsPreviewedAsTheDomainPageWhetherIdentifiedByLanguageIdOrExtension() {
+    fun aZwDocumentIsPreviewedAsTheConfigurationPageWhetherIdentifiedByLanguageIdOrExtension() {
         val byLanguageId = server(Triple(ORDERS_ZW_URI, "zw", ORDERS_ZDL))
         val byExtension = server(Triple(ORDERS_ZW_URI, "plaintext", ORDERS_ZDL))
 
         listOf(byLanguageId, byExtension).forEach { server ->
             val preview = server.preview(ORDERS_ZW_URI)
-            assertEquals("domain", preview.defaultRepresentationId)
+            assertEquals("configuration", preview.defaultRepresentationId)
             val representation = preview.representations.single()
             assertEquals(PreviewFormat.MARKDOWN, representation.format)
-            assertTrue(representation.content.contains("CustomerOrder"), representation.content)
         }
     }
 
