@@ -86,6 +86,8 @@ class WorkerWireTest {
             "        emits OrderCreated\n        emits OrderRejected\n    }\n\n    end {\n        completed: OrderCreated\n" +
             "        rejected: OrderRejected\n    }\n}\n"
         val brokenZflUri = "file:///workspace/broken.zfl"
+        val zwUri = "file:///workspace/orders.zw"
+        val brokenZwUri = "file:///workspace/broken.zw"
         val fixtures = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures"
 
         return client.request(
@@ -108,6 +110,7 @@ class WorkerWireTest {
                 ),
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
+            assertEquals(listOf("zenwave/pluginCatalogue"), (result.capabilities.experimental.customNotifications as Array<String>).toList())
             client.notify("initialized", jsonObject())
             val diagnostics = client.nextNotification("textDocument/publishDiagnostics") { it.uri == brokenUri }
             client.notify("textDocument/didOpen", textDocumentItem(brokenUri, "zdl", 1, brokenText))
@@ -152,8 +155,18 @@ class WorkerWireTest {
             assertEquals("sequence:completed:0", preview.defaultRepresentationId)
             client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
         }.then { preview: dynamic ->
-            assertEquals("class-diagram", preview.defaultRepresentationId)
-            assertEquals("MERMAID", (preview.representations as Array<dynamic>).single().format)
+            assertEquals("domain", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(zwUri, "zw", 1, ordersText))
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to zwUri)))
+        }.then { preview: dynamic ->
+            assertEquals("configuration", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(brokenZwUri, "zw", 1, "entity Customer {\n    name String required\n    ) ) )\n}\n"))
+            client.requestError("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to brokenZwUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentUnreadable", error.data.kind)
             client.notify("textDocument/didOpen", textDocumentItem(brokenZflUri, "zfl", 1, "flow Broken {\n    when {{ do\n"))
             client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to brokenZflUri)))
         }.then { error: dynamic ->
@@ -193,6 +206,64 @@ class WorkerWireTest {
         }.then { error: dynamic ->
             assertEquals(-32803, error.code)
             assertEquals("documentNotFound", error.data.kind)
+            client.request("shutdown", null)
+        }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
+    fun pluginCatalogueIsReplacedByInitializationOptionsAndNotification(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+        val scriptsUri = "file:///workspace/scripts.zw"
+        val scripts = "config {\n    basePackage \"io.example.orders\"\n    plugins {\n        ZDLToOpenAPIPlugin {\n            targetFile \"./openapi.yml\"\n        }\n" +
+            "        TeamOwnPlugin {\n            maxDepth 3\n        }\n    }\n}\n"
+        fun catalogue(summary: String?): dynamic {
+            val catalogue: dynamic = jsonObject("source" to "Test SDK", "version" to "9.9", "futureField" to arrayOf(1), "plugins" to emptyArray<dynamic>())
+            if (summary != null) {
+                catalogue.plugins = arrayOf(jsonObject("name" to "ZDLToOpenAPIPlugin", "configClassName" to "x.P", "summary" to summary))
+            }
+            return catalogue
+        }
+        fun page(): Promise<dynamic> = client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to scriptsUri))).then { preview: dynamic ->
+            assertEquals("configuration", preview.defaultRepresentationId)
+            (preview.representations as Array<dynamic>).single().content as String
+        }
+
+        return client.request(
+            "initialize",
+            jsonObject(
+                "processId" to null,
+                "rootUri" to null,
+                "capabilities" to jsonObject(),
+                "initializationOptions" to jsonObject("pluginCatalogue" to catalogue("Summary from the client")),
+            ),
+        ).then { _: dynamic ->
+            client.notify("initialized", jsonObject())
+            client.notify("textDocument/didOpen", textDocumentItem(scriptsUri, "zw", 1, scripts))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Summary from the client"), text)
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue("Replaced by notification")))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Replaced by notification") && !text.contains("Summary from the client"), text)
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to jsonObject("plugins" to "nope")))
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to "text"))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Replaced by notification"), "a malformed catalogue keeps the previous one")
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue(null)))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("### ZDLToOpenAPIPlugin") && text.contains("targetFile"), text)
+            assertTrue(!text.contains("Replaced by notification"), text)
             client.request("shutdown", null)
         }.then {
             client.notify("exit", null)

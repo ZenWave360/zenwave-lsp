@@ -12,6 +12,7 @@ import io.zenwave360.lsp.core.visualization.DocumentRequestException
 import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.visualization.VisualizationJson
 import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
 import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
@@ -26,6 +27,7 @@ fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
         modules = listOf(
             ArchitectureManifestLanguageModule(),
             ZdlLanguageModule(),
+            ZdlLanguageModule.zw(),
             AsyncApiLanguageModule(),
             OpenApiLanguageModule(),
             AvroLanguageModule(),
@@ -173,15 +175,35 @@ class ZenwaveJsLanguageServer(
         customRequests.forEach { (method, handler) ->
             connection.onRequest(method) { params: dynamic -> handler(params) }
         }
+        connection.onNotification(ZenwaveCustomNotifications.PLUGIN_CATALOGUE) { params: dynamic ->
+            replacePluginCatalogue(if (isPresent(params)) params.catalogue else null)
+        }
         connection.listen()
     }
 
     fun initialize(params: dynamic): dynamic {
         initializationOptions = parseInitializationOptions(if (isPresent(params)) params.initializationOptions else null)
+        if (isPresent(params) && isPresent(params.initializationOptions)) {
+            val catalogue = params.initializationOptions.pluginCatalogue
+            if (isPresent(catalogue)) replacePluginCatalogue(catalogue)
+        }
         return jsonObject(
             "capabilities" to buildCapabilities(),
             "serverInfo" to jsonObject("name" to "zenwave-lsp", "version" to serverVersion),
         )
+    }
+
+    /** Uses [catalogue] for the next `.zw` previews. Anything that is not a catalogue is logged and ignored. */
+    private fun replacePluginCatalogue(catalogue: dynamic) {
+        try {
+            if (!isPresent(catalogue) || jsTypeOf(catalogue) != "object" || js("Array").isArray(catalogue) as Boolean) {
+                throw IllegalArgumentException("The plugin catalogue must be a JSON object")
+            }
+            server.replacePluginCatalogue(JSON.stringify(catalogue))
+        } catch (e: IllegalArgumentException) {
+            val console = connection.console
+            if (isPresent(console)) console.warn("Ignored the plugin catalogue sent by the client: ${e.message}")
+        }
     }
 
     fun shutdown(): Any? {
@@ -271,6 +293,7 @@ class ZenwaveJsLanguageServer(
                     jsonObject("languageId" to it.languageId, "extensions" to it.extensions.toTypedArray())
                 }.toTypedArray(),
                 "customRequests" to customRequestMethods.toTypedArray(),
+                "customNotifications" to ZenwaveCustomNotifications.ALL.toTypedArray(),
             ),
         )
     }

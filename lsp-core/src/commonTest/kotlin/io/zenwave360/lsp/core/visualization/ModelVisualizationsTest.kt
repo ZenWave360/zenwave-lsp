@@ -54,6 +54,7 @@ internal val CHECKOUT_ZFL = """
 """.trimIndent()
 
 internal const val ORDERS_ZDL_URI = "file:///workspace/orders.zdl"
+internal const val ORDERS_ZW_URI = "file:///workspace/orders.zw"
 internal val ORDERS_ZDL = """
     entity Customer {
         name String required
@@ -75,6 +76,7 @@ class ModelVisualizationsTest {
             modules = listOf(
                 ArchitectureManifestLanguageModule(),
                 ZdlLanguageModule(),
+                ZdlLanguageModule.zw(),
                 AsyncApiLanguageModule(),
                 OpenApiLanguageModule(),
                 AvroLanguageModule(),
@@ -115,21 +117,33 @@ class ModelVisualizationsTest {
     }
 
     @Test
-    fun zdlPreviewIsOneMermaidClassDiagram() {
+    fun zdlPreviewIsOneMarkdownDomainPage() {
         val server = server(Triple(ORDERS_ZDL_URI, "zdl", ORDERS_ZDL))
 
         val preview = server.preview(ORDERS_ZDL_URI)
 
         assertEquals(1, preview.representations.size)
         val representation = preview.representations.single()
-        assertEquals("class-diagram", representation.id)
-        assertEquals("Class diagram", representation.title)
-        assertEquals(PreviewFormat.MERMAID, representation.format)
-        assertEquals("class-diagram", preview.defaultRepresentationId)
-        assertTrue(representation.content.startsWith("classDiagram"), representation.content)
-        assertTrue(representation.content.contains("CustomerOrder"))
+        assertEquals("domain", representation.id)
+        assertEquals("Domain model", representation.title)
+        assertEquals(PreviewFormat.MARKDOWN, representation.format)
+        assertEquals("domain", preview.defaultRepresentationId)
+        assertTrue(representation.content.contains("CustomerOrder"), representation.content)
         assertFalse(representation.content.contains("plantuml", ignoreCase = true))
-        assertFalse(representation.content.contains("click "))
+    }
+
+    @Test
+    fun aZdlDescriptionDoesNotReachThePreviewAsScript() {
+        val text = "/** <script>alert(1)</script> */\nentity Customer {\n    name String required\n}\n"
+        val server = server(Triple(ORDERS_ZDL_URI, "zdl", text))
+
+        val preview = server.preview(ORDERS_ZDL_URI)
+        val content = preview.representations.single().content
+        val wire = VisualizationJson.preview(preview)
+
+        assertFalse(content.contains("<script", ignoreCase = true), content)
+        assertTrue(content.contains("&lt;script&gt;"), content)
+        assertFalse(wire.contains("<script", ignoreCase = true), wire)
     }
 
     @Test
@@ -138,7 +152,7 @@ class ModelVisualizationsTest {
         val server = server(Triple(ORDERS_ZDL_URI, "zdl", text))
         assertTrue(server.diagnostics(ORDERS_ZDL_URI).isNotEmpty())
 
-        assertEquals("class-diagram", server.preview(ORDERS_ZDL_URI).defaultRepresentationId)
+        assertEquals("domain", server.preview(ORDERS_ZDL_URI).defaultRepresentationId)
     }
 
     @Test
@@ -150,6 +164,44 @@ class ModelVisualizationsTest {
         assertEquals(DocumentFailureKind.DOCUMENT_UNREADABLE, failure.kind)
         assertTrue(failure.diagnostics.isNotEmpty())
         assertTrue(failure.diagnostics.all { it.code == "syntax" && it.uri == ORDERS_ZDL_URI })
+    }
+
+    @Test
+    fun aZwDocumentIsPreviewedAsTheConfigurationPageWhetherIdentifiedByLanguageIdOrExtension() {
+        val byLanguageId = server(Triple(ORDERS_ZW_URI, "zw", ORDERS_ZDL))
+        val byExtension = server(Triple(ORDERS_ZW_URI, "plaintext", ORDERS_ZDL))
+
+        listOf(byLanguageId, byExtension).forEach { server ->
+            val preview = server.preview(ORDERS_ZW_URI)
+            assertEquals("configuration", preview.defaultRepresentationId)
+            val representation = preview.representations.single()
+            assertEquals(PreviewFormat.MARKDOWN, representation.format)
+        }
+    }
+
+    @Test
+    fun aZwDocumentGetsTheZdlFeatures() {
+        val broken = server(Triple(ORDERS_ZW_URI, "zw", BROKEN_ZDL))
+        val semantic = "entity Customer {\n    name String required\n}\n\naggregate CustomerAggregate(MissingEntity) {\n}\n"
+        val withProblems = server(Triple(ORDERS_ZW_URI, "zw", semantic))
+        val zdlEquivalent = server(Triple(ORDERS_ZDL_URI, "zdl", semantic))
+
+        assertTrue(broken.diagnostics(ORDERS_ZW_URI).isNotEmpty())
+        assertEquals(
+            zdlEquivalent.diagnostics(ORDERS_ZDL_URI).map { it.message to it.range },
+            withProblems.diagnostics(ORDERS_ZW_URI).map { it.message to it.range },
+        )
+        assertEquals(zdlEquivalent.format(ORDERS_ZDL_URI), withProblems.format(ORDERS_ZW_URI))
+    }
+
+    @Test
+    fun aZwWithASyntaxErrorIsUnreadable() {
+        val server = server(Triple(ORDERS_ZW_URI, "zw", BROKEN_ZDL))
+
+        val failure = assertFailsWith<DocumentRequestException> { server.preview(ORDERS_ZW_URI) }
+
+        assertEquals(DocumentFailureKind.DOCUMENT_UNREADABLE, failure.kind)
+        assertTrue(failure.diagnostics.all { it.code == "syntax" && it.uri == ORDERS_ZW_URI })
     }
 
     @Test
@@ -240,10 +292,10 @@ class ModelVisualizationsTest {
 
         val json = Json.parseToJsonElement(VisualizationJson.preview(server.preview(ORDERS_ZDL_URI))).jsonObject
 
-        assertEquals("class-diagram", json.getValue("defaultRepresentationId").jsonPrimitive.content)
+        assertEquals("domain", json.getValue("defaultRepresentationId").jsonPrimitive.content)
         val representation = json.getValue("representations").jsonArray.single().jsonObject
         assertEquals(setOf("id", "title", "format", "content"), representation.keys)
-        assertEquals("MERMAID", representation.getValue("format").jsonPrimitive.content)
+        assertEquals("MARKDOWN", representation.getValue("format").jsonPrimitive.content)
     }
 
     @Test

@@ -24,6 +24,7 @@ if (useLocalDependencies && localDslKotlin.exists()) {
         dependencySubstitution {
             substitute(module("io.zenwave360.dsl:dsl-kotlin")).using(project(":dsl-kotlin"))
             substitute(module("io.zenwave360.dsl:dsl-views")).using(project(":dsl-views"))
+            substitute(module("io.zenwave360.dsl:dsl-docs")).using(project(":dsl-docs"))
         }
     }
 }

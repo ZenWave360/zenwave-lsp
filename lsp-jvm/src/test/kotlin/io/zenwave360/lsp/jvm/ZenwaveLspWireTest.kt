@@ -21,6 +21,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -178,8 +179,8 @@ class ZenwaveLspWireTest {
         }
     }
 
-    private fun initialize(): JsonObject {
-        val result = request("initialize", """{"processId":null,"rootUri":null,"capabilities":{}}""").asJsonObject
+    private fun initialize(initializationOptions: String = "null"): JsonObject {
+        val result = request("initialize", """{"processId":null,"rootUri":null,"capabilities":{},"initializationOptions":$initializationOptions}""").asJsonObject
         notify("initialized", "{}")
         return result
     }
@@ -263,12 +264,148 @@ class ZenwaveLspWireTest {
         assertEquals("flowchart", separate.asJsonObject["representations"].asJsonArray.first().asJsonObject["id"].asString)
 
         val zdl = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"}}""").asJsonObject
-        val classDiagram = zdl["representations"].asJsonArray.single().asJsonObject
-        assertEquals("class-diagram", classDiagram["id"].asString)
-        assertEquals("Class diagram", classDiagram["title"].asString)
-        assertEquals("MERMAID", classDiagram["format"].asString)
-        assertTrue(classDiagram["content"].asString.startsWith("classDiagram"))
-        assertEquals("class-diagram", zdl["defaultRepresentationId"].asString)
+        val domain = zdl["representations"].asJsonArray.single().asJsonObject
+        assertEquals("domain", domain["id"].asString)
+        assertEquals("Domain model", domain["title"].asString)
+        assertEquals("MARKDOWN", domain["format"].asString)
+        assertTrue(domain["content"].asString.contains("Customer"))
+        assertEquals("domain", zdl["defaultRepresentationId"].asString)
+    }
+
+    @Test
+    fun previewNeverServesModelControlledAnnotationTextAsImageOrScript() {
+        initialize()
+        fun zdlWith(api: String) = listOf(
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {}",
+            "service Orders for (OrderAggregate) {",
+            "    @asyncapi(api: \"$api\", channel: \"c\")",
+            "    create(Order) Order",
+            "}",
+            "",
+        ).joinToString("\n")
+        fun previewOf(uri: String, api: String): String {
+            open(uri, "zdl", zdlWith(api))
+            val representation = request("zenwave/preview", """{"textDocument":{"uri":"$uri"}}""").asJsonObject["representations"].asJsonArray.first().asJsonObject
+            assertEquals("MARKDOWN", representation["format"].asString)
+            return representation["content"].asString
+        }
+
+        val image = previewOf("file:///workspace/hostile-image.zdl", "![x](https://example.invalid/preview-probe.png)")
+        assertFalse(image.contains("![x](https://example.invalid"), image)
+        val script = previewOf("file:///workspace/hostile-script.zdl", "<script>alert(1)</script>")
+        assertFalse(script.contains("<script"), script)
+    }
+
+    private fun catalogueJson(summary: String?, extra: String = "") =
+        """{"source":"Test SDK","version":"9.9",$extra"plugins":[""" +
+            (summary?.let { """{"name":"ZDLToOpenAPIPlugin","configClassName":"x.ZDLToOpenAPIPlugin","summary":"$it"}""" } ?: "") + "]}"
+
+    private fun zwPage(): String {
+        val preview = request("zenwave/preview", """{"textDocument":{"uri":"$SCRIPTS_ZW_URI"}}""").asJsonObject
+        return preview["representations"].asJsonArray.single().asJsonObject["content"].asString
+    }
+
+    @Test
+    fun initializeAdvertisesThePluginCatalogueNotification() {
+        val result = initialize()
+
+        val experimental = result["capabilities"].asJsonObject["experimental"].asJsonObject
+        assertEquals(listOf("zenwave/pluginCatalogue"), experimental["customNotifications"].asJsonArray.map { it.asString })
+        val annotated = ZenwaveCustomRequests::class.java.methods.mapNotNull { it.getAnnotation(org.eclipse.lsp4j.jsonrpc.services.JsonNotification::class.java)?.value }
+        assertEquals(annotated, listOf("zenwave/pluginCatalogue"))
+    }
+
+    @Test
+    fun zwPreviewIsDescribedByTheServersOwnCatalogue() {
+        initialize()
+        open(SCRIPTS_ZW_URI, "zw", SCRIPTS_ZW)
+
+        val page = zwPage()
+
+        assertTrue(page.contains("### ZDLToOpenAPIPlugin"), page)
+        assertTrue(page.contains("Generates a draft OpenAPI"), page)
+        assertTrue(page.contains("### TeamOwnPlugin"), page)
+    }
+
+    @Test
+    fun aCatalogueInInitializationOptionsReplacesTheServersCopy() {
+        initialize("""{"pluginCatalogue":${catalogueJson("Summary from the client", """"somethingNew":[1],""")}}""")
+        open(SCRIPTS_ZW_URI, "zw", SCRIPTS_ZW)
+
+        val page = zwPage()
+
+        assertTrue(page.contains("Summary from the client"), page)
+        assertFalse(page.contains("Generates a draft OpenAPI"), page)
+    }
+
+    @Test
+    fun aCatalogueNotificationChangesTheNextPreviewAndAMalformedOneKeepsIt() {
+        initialize()
+        open(SCRIPTS_ZW_URI, "zw", SCRIPTS_ZW)
+        assertTrue(zwPage().contains("Generates a draft OpenAPI"))
+
+        notify("zenwave/pluginCatalogue", """{"catalogue":${catalogueJson("First replacement")}}""")
+        assertTrue(zwPage().contains("First replacement"))
+
+        notify("zenwave/pluginCatalogue", """{"catalogue":${catalogueJson("Second replacement")}}""")
+        val second = zwPage()
+        assertTrue(second.contains("Second replacement") && !second.contains("First replacement"), second)
+
+        notify("zenwave/pluginCatalogue", """{"catalogue":{"plugins":"nope"}}""")
+        notify("zenwave/pluginCatalogue", """{"catalogue":"text"}""")
+        notify("zenwave/pluginCatalogue", """{}""")
+        assertTrue(zwPage().contains("Second replacement"), "a malformed catalogue keeps the previous one")
+        val logged = generateSequence { client.notifications.poll(5, TimeUnit.SECONDS) }
+            .firstOrNull { it["method"].asString == "window/logMessage" }
+        assertNotNull(logged, "the ignored catalogue is logged")
+        assertEquals(2, logged["params"].asJsonObject["type"].asInt, "a warning")
+    }
+
+    @Test
+    fun aPluginMissingFromTheReplacementShowsWithoutADescription() {
+        initialize("""{"pluginCatalogue":${catalogueJson(null)}}""")
+        open(SCRIPTS_ZW_URI, "zw", SCRIPTS_ZW)
+
+        val page = zwPage()
+
+        assertTrue(page.contains("### ZDLToOpenAPIPlugin") && page.contains("targetFile"), page)
+        assertFalse(page.contains("Generates a draft OpenAPI"), page)
+    }
+
+    @Test
+    fun aMalformedCatalogueInInitializationOptionsNeverFailsInitialisation() {
+        val result = initialize("""{"pluginCatalogue":"not a catalogue"}""")
+        open(SCRIPTS_ZW_URI, "zw", SCRIPTS_ZW)
+
+        assertEquals("zenwave-lsp", result["serverInfo"].asJsonObject["name"].asString)
+        assertTrue(zwPage().contains("Generates a draft OpenAPI"), "the server's copy is used")
+    }
+
+    @Test
+    fun zwDocumentsAreServedAsZdlAndPreviewedAsMarkdown() {
+        initialize()
+        val broken = open(BROKEN_ZW_URI, "zw", "entity Customer {\n    name String required\n    ) ) )\n}\n")
+        assertTrue(broken["diagnostics"].asJsonArray.size() > 0, "ZDL diagnostics reach a .zw document")
+        open(ORDERS_ZW_URI, "zw", ORDERS_ZDL)
+
+        val preview = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_ZW_URI"}}""").asJsonObject
+        val configuration = preview["representations"].asJsonArray.single().asJsonObject
+        assertEquals("configuration", configuration["id"].asString)
+        assertEquals("Plugin configuration", configuration["title"].asString)
+        assertEquals("MARKDOWN", configuration["format"].asString)
+        assertEquals("configuration", preview["defaultRepresentationId"].asString)
+
+        val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$ORDERS_ZW_URI"}}""").asJsonArray
+        assertTrue(symbols.toString().contains("CustomerOrder"), symbols.toString())
+
+        val (code, data) = requestError("zenwave/preview", """{"textDocument":{"uri":"$BROKEN_ZW_URI"}}""")
+        assertEquals(-32803, code)
+        assertEquals("documentUnreadable", data!!.asJsonObject["kind"].asString)
+
+        open(ORDERS_URI, "zdl", ORDERS_ZDL)
+        val zdl = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"}}""").asJsonObject
+        assertEquals("domain", zdl["defaultRepresentationId"].asString)
     }
 
     @Test
@@ -384,6 +521,10 @@ class ZenwaveLspWireTest {
 
     private companion object {
         const val ORDERS_URI = "file:///workspace/orders.zdl"
+        const val ORDERS_ZW_URI = "file:///workspace/orders.zw"
+        const val SCRIPTS_ZW_URI = "file:///workspace/scripts.zw"
+        val SCRIPTS_ZW = "config {\n    title \"Orders scripts\"\n    basePackage \"io.example.orders\"\n    plugins {\n        ZDLToOpenAPIPlugin {\n            targetFile \"./openapi.yml\"\n        }\n        TeamOwnPlugin {\n            maxDepth 3\n        }\n    }\n}\n"
+        const val BROKEN_ZW_URI = "file:///workspace/broken.zw"
         val ORDERS_ZDL = """
             entity Customer {
                 name String required

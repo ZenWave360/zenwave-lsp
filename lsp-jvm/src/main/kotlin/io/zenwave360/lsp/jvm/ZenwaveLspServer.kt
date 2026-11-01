@@ -12,6 +12,7 @@ import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.visualization.VisualizationJson
 import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
 import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests as CustomRequestMethods
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
 import kotlinx.coroutines.runBlocking
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
@@ -38,6 +39,9 @@ import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
+import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
+import org.eclipse.lsp4j.MessageParams
+import org.eclipse.lsp4j.MessageType
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -87,6 +91,13 @@ interface ZenwaveCustomRequests {
      */
     @JsonRequest("zenwave/symbolAt")
     fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?>
+
+    /**
+     * Replaces the plugin catalogue `.zw` previews use (MP-R16). Params `{catalogue: <catalogue JSON object>}`; one that is
+     * not a catalogue is ignored and logged, and the previous one stays.
+     */
+    @JsonNotification("zenwave/pluginCatalogue")
+    fun pluginCatalogue(params: PluginCatalogueParams)
 }
 
 class ZenwaveLspServer(
@@ -94,6 +105,7 @@ class ZenwaveLspServer(
 ) : LanguageServer, TextDocumentService, WorkspaceService, LanguageClientAware, ZenwaveCustomRequests {
 
     private val documentTexts = ConcurrentHashMap<String, String>()
+    private val gson = com.google.gson.Gson()
     private var client: LanguageClient? = null
     private var shutdownRequested = false
     internal var initializationOptions: ZenwaveInitializationOptions? = null
@@ -106,6 +118,7 @@ class ZenwaveLspServer(
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =
         CompletableFuture.supplyAsync {
             initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
+            pluginCatalogueFrom(params.initializationOptions)?.let(::replacePluginCatalogue)
             initializationOptions?.projectManifestUri?.let { manifestUri ->
                 runBlocking { server.openWorkspace(manifestUri) }
             }
@@ -113,6 +126,32 @@ class ZenwaveLspServer(
                 serverInfo = ServerInfo("zenwave-lsp", "0.1.0-SNAPSHOT")
             }
         }
+
+    override fun pluginCatalogue(params: PluginCatalogueParams) {
+        replacePluginCatalogue(params.catalogue)
+    }
+
+    /** Uses [catalogue] for the next `.zw` previews. Anything that is not a catalogue is logged and ignored. */
+    private fun replacePluginCatalogue(catalogue: JsonElement?) {
+        try {
+            if (catalogue == null || !catalogue.isJsonObject) {
+                throw IllegalArgumentException("The plugin catalogue must be a JSON object")
+            }
+            server.replacePluginCatalogue(catalogue.toString())
+        } catch (e: IllegalArgumentException) {
+            client?.logMessage(MessageParams(MessageType.Warning, "Ignored the plugin catalogue sent by the client: ${e.message}"))
+        }
+    }
+
+    /** `initializationOptions.pluginCatalogue`, as JSON, when the client sent one. */
+    private fun pluginCatalogueFrom(initializationOptions: Any?): JsonElement? {
+        val options = when (initializationOptions) {
+            is JsonElement -> initializationOptions
+            null -> return null
+            else -> gson.toJsonTree(initializationOptions)
+        }
+        return options.takeIf { it.isJsonObject }?.asJsonObject?.get("pluginCatalogue")?.takeIf { !it.isJsonNull }
+    }
 
     override fun shutdown(): CompletableFuture<Any> {
         shutdownRequested = true
@@ -337,7 +376,8 @@ class ZenwaveLspServer(
                         extensions = it.extensions
                     )
                 },
-                "customRequests" to (CustomRequestMethods.ALL + listOf("zenwave/conceptAt", "zenwave/workspaceStatus"))
+                "customRequests" to (CustomRequestMethods.ALL + listOf("zenwave/conceptAt", "zenwave/workspaceStatus")),
+                "customNotifications" to ZenwaveCustomNotifications.ALL
             )
         }
     }

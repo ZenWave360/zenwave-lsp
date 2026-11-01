@@ -42,6 +42,7 @@ kotlin {
 
                 implementation("io.zenwave360.dsl:dsl-kotlin:1.11.0-SNAPSHOT")
                 implementation("io.zenwave360.dsl:dsl-views:1.11.0-SNAPSHOT")
+                implementation("io.zenwave360.dsl:dsl-docs:1.11.0-SNAPSHOT")
                 implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:1.0.0-SNAPSHOT")
                 implementation("io.zenwave360.architecture:architecture-manifest:1.0.0-SNAPSHOT")
                 implementation("io.zenwave360.architecture:workspace-runtime:1.0.0-SNAPSHOT")
