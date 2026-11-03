@@ -7,6 +7,13 @@ import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
 import io.zenwave360.language.eventflow.view.MermaidSequenceRenderMode
+import io.zenwave360.language.zdl.ZdlParser
+import io.zenwave360.language.zdl.application.GenerateMermaidCommandDiagramFromZdl
+import io.zenwave360.language.zdl.view.ZdlAggregateToMermaidClassDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlDomain
+import io.zenwave360.language.zdl.view.ZdlEventToMermaidClassDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlLifecycleToMermaidStateDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlServiceToEventStormingTransformer
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
@@ -32,12 +39,16 @@ import org.antlr.v4.kotlinruntime.Recognizer
  */
 class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = PluginCatalogues()) {
 
-    fun preview(document: VisualizedDocument, sequenceRenderMode: String?): PreviewResult {
-        val mode = parseSequenceRenderMode(sequenceRenderMode)
+    fun preview(document: VisualizedDocument, sequenceRenderMode: String?, previewMode: String?): PreviewResult {
+        val sequenceMode = parseSequenceRenderMode(sequenceRenderMode)
+        val mode = parsePreviewMode(previewMode)
         return when (document.languageId) {
-            ZDL -> zdlPreview(document)
+            ZDL -> when (mode) {
+                PreviewMode.DOCS -> zdlPreview(document)
+                PreviewMode.DIAGRAMS -> zdlDiagramsPreview(document)
+            }
             ZW -> zwPreview(document)
-            ZFL -> zflPreview(document, mode)
+            ZFL -> zflPreview(document, sequenceMode)
             else -> throw unsupported(document, "zenwave/preview covers ZDL, ZW and ZFL documents")
         }
     }
@@ -71,6 +82,44 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
             defaultRepresentationId = DOMAIN_ID,
         )
     }
+
+    /** The individual ZDL diagrams, grouped for the preview's Show and Element selectors. */
+    private fun zdlDiagramsPreview(document: VisualizedDocument): PreviewResult {
+        requireReadable(document)
+        val representations = generating(document) {
+            val domain = ZdlDomain(ZdlParser().parseModel(document.snapshot.text))
+            buildList {
+                var others: String? = null
+                ZdlServiceToEventStormingTransformer().transform(domain).forEach { diagram ->
+                    diagram.mermaid?.let { mermaid ->
+                        add(diagram("service:${diagram.service}", diagram.service, GROUP_SERVICES, mermaid))
+                    }
+                }
+                ZdlAggregateToMermaidClassDiagramTransformer().transform(domain).let { diagrams ->
+                    diagrams.aggregates.forEach { diagram ->
+                        add(diagram("aggregate:${diagram.aggregate}", diagram.aggregate, GROUP_AGGREGATES, diagram.mermaid))
+                    }
+                    others = diagrams.others
+                }
+                ZdlLifecycleToMermaidStateDiagramTransformer().transform(domain).forEach { diagram ->
+                    add(diagram("state-machine:${diagram.aggregate}", diagram.aggregate, GROUP_STATE_MACHINES, diagram.mermaid))
+                }
+                ZdlEventToMermaidClassDiagramTransformer().transform(domain)?.let { mermaid ->
+                    add(diagram(EVENTS_ID, "Events", GROUP_EVENTS, mermaid))
+                }
+                GenerateMermaidCommandDiagramFromZdl().execute(document.snapshot.text).forEach { diagram ->
+                    add(diagram("command:${diagram.service}:${diagram.command}", "${diagram.service}.${diagram.command}", GROUP_COMMANDS, diagram.mermaid))
+                }
+                others?.let { mermaid ->
+                    add(diagram(OTHER_ENTITIES_ID, "Other entities", GROUP_OTHER_ENTITIES, mermaid))
+                }
+            }
+        }
+        return PreviewResult(representations, representations.firstOrNull()?.id)
+    }
+
+    private fun diagram(id: String, title: String, group: String, content: String) =
+        PreviewRepresentation(id, title, PreviewFormat.MERMAID, content, group)
 
     private fun zwPreview(document: VisualizedDocument): PreviewResult {
         requireReadable(document)
@@ -201,6 +250,14 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         const val ZFL = "zfl"
         const val DOMAIN_ID = "domain"
         const val FLOWCHART_ID = "flowchart"
+        const val OTHER_ENTITIES_ID = "other-entities"
+        const val EVENTS_ID = "events"
+        const val GROUP_SERVICES = "Services"
+        const val GROUP_AGGREGATES = "Aggregates"
+        const val GROUP_STATE_MACHINES = "State Machines"
+        const val GROUP_EVENTS = "Events"
+        const val GROUP_COMMANDS = "Commands"
+        const val GROUP_OTHER_ENTITIES = "Other entities"
 
         /** `sequenceRenderMode` of `zenwave/preview`; absent means ALT_BLOCKS, as `GenerateMermaidFromZfl.execute(text)`. */
         fun parseSequenceRenderMode(value: String?): MermaidSequenceRenderMode =
@@ -211,7 +268,20 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                         "sequenceRenderMode must be one of ${MermaidSequenceRenderMode.entries.joinToString { it.name }}, not $value"
                     )
             }
+
+        /** `mode` of `zenwave/preview`; absent stays the original documentation page. */
+        fun parsePreviewMode(value: String?): PreviewMode =
+            when (value) {
+                null, PreviewMode.DOCS.wireName -> PreviewMode.DOCS
+                PreviewMode.DIAGRAMS.wireName -> PreviewMode.DIAGRAMS
+                else -> throw InvalidRequestParamsException("mode must be docs or diagrams, not $value")
+            }
     }
+}
+
+enum class PreviewMode(val wireName: String) {
+    DOCS("docs"),
+    DIAGRAMS("diagrams"),
 }
 
 /** An open document as the visualisations see it: its current text, the language serving it and its diagnostics. */

@@ -138,10 +138,11 @@ data class TextDocumentRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?
 )
 
-/** Params of `zenwave/preview`; `sequenceRenderMode` is SEPARATE_VARIANTS, ALT_BLOCKS (default) or AUTO. */
+/** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
 data class PreviewRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
-    val sequenceRenderMode: String? = null
+    val sequenceRenderMode: String? = null,
+    val mode: String? = null,
 )
 
 /** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */

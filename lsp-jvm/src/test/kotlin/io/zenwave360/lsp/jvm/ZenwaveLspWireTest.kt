@@ -194,6 +194,7 @@ class ZenwaveLspWireTest {
         val annotated = ZenwaveCustomRequests::class.java.methods.mapNotNull { it.getAnnotation(JsonRequest::class.java)?.value }
         assertEquals(annotated.toSet(), advertised.toSet(), "customRequests lists exactly the @JsonRequest methods")
         assertEquals("zenwave-lsp", result["serverInfo"].asJsonObject["name"].asString)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["previewModes"].asBoolean)
     }
 
     @Test
@@ -270,6 +271,11 @@ class ZenwaveLspWireTest {
         assertEquals("MARKDOWN", domain["format"].asString)
         assertTrue(domain["content"].asString.contains("Customer"))
         assertEquals("domain", zdl["defaultRepresentationId"].asString)
+
+        val diagrams = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"},"mode":"diagrams"}""").asJsonObject
+        val otherEntities = diagrams["representations"].asJsonArray.single().asJsonObject
+        assertEquals("other-entities", otherEntities["id"].asString)
+        assertEquals("Other entities", otherEntities["group"].asString)
     }
 
     @Test

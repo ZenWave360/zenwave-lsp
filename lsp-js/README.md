@@ -51,6 +51,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 - `customRequests`: `string[]`, the `zenwave/*` requests this server answers. The list is built from the
   server's handler registration, so a client can rely on it. A request that is not listed is answered
   with JSON-RPC `-32601`. lsp-jvm additionally exposes workspace concept and status requests.
+- `previewModes`: `true` when `zenwave/preview` accepts its additive `mode` parameter and grouped diagram representations.
 
 ## Custom requests
 
@@ -60,7 +61,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 | `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
 | `zenwave/organizeZflServices` | `{ uri }` | the reorganised ZFL text, or `null` |
 | `zenwave/eventFlowViews` | `{ textDocument: { uri } }` | `{ flowGraph, serviceGraph }`: dsl-kotlin's laid-out flow and service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`) |
-| `zenwave/preview` | `{ textDocument: { uri }, sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content }[], defaultRepresentationId }` |
+| `zenwave/preview` | `{ textDocument: { uri }, mode?: "docs" \| "diagrams", sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content, group? }[], defaultRepresentationId }` |
 | `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
 
 `zenwave/hierarchy` answers whether or not the document is open. An open document is answered from the
@@ -74,12 +75,15 @@ groups of the same document's `zenwave/eventFlowViews` that stand for the node's
 `event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:…`); it
 is empty when the diagram has no counterpart.
 
-`zenwave/preview` answers for ZDL (one `MARKDOWN` representation `domain`, "Domain model": the model's page with its
+`zenwave/preview` defaults to `mode: "docs"`, so it answers for ZDL (one `MARKDOWN` representation `domain`, "Domain model": the model's page with its
 diagrams as `mermaid` fences), `.zw` (one `MARKDOWN` representation `configuration`, "Plugin configuration": the `config`
 block and each plugin with what it is for and its resolved configuration; the document's language id is `zw`, or its
 URI ends in `.zw`) and ZFL (a `flowchart`, then one `sequence:<outcome>:<index>` per end outcome; the first sequence is
 the default). What a model wrote is escaped in the Markdown, so a `<script>` shows as text. `sequenceRenderMode`
 defaults to `ALT_BLOCKS`. Null properties are omitted from every result.
+
+For a ZDL, `mode: "diagrams"` returns only individual `MERMAID` diagrams. Every representation has a `group` of
+`Services`, `Aggregates`, `State Machines`, `Events`, `Commands` or `Other entities`; absent kinds have no representation.
 
 ### Plugin catalogue
 
