@@ -85,7 +85,13 @@ class ZenwaveJsLanguageServer(
                 .map(::navigationTargetToJson).toTypedArray()
         }
         registerCustomRequest(ZenwaveCustomRequests.ORGANIZE_ZFL_SERVICES) { params ->
-            server.organizeZflServices(params.uri as String)
+            answer {
+                val mode = if (isPresent(params)) params.mode else null
+                if (isPresent(mode) && jsTypeOf(mode) != "string") {
+                    throw InvalidRequestParamsException("mode must be a string")
+                }
+                server.organizeZflServices(params.uri as String, stringOrNull(mode))
+            }
         }
         registerCustomRequest(ZenwaveCustomRequests.EVENT_FLOW_VIEWS) { params ->
             answer {
@@ -299,6 +305,7 @@ class ZenwaveJsLanguageServer(
                 "customRequests" to customRequestMethods.toTypedArray(),
                 "customNotifications" to ZenwaveCustomNotifications.ALL.toTypedArray(),
                 "previewModes" to true,
+                "organizeModes" to true,
             ),
         )
     }

@@ -58,6 +58,7 @@ class ZenwaveLspServerTest {
         val customRequests = result.capabilities.experimental.let { it as Map<*, *> }["customRequests"] as List<*>
         assertTrue("zenwave/conceptAt" in customRequests)
         assertTrue("zenwave/workspaceStatus" in customRequests)
+        assertEquals(true, result.capabilities.experimental.let { it as Map<*, *> }["organizeModes"])
     }
 
     @Test
