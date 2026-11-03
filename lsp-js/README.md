@@ -51,6 +51,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 - `customRequests`: `string[]`, the `zenwave/*` requests this server answers. The list is built from the
   server's handler registration, so a client can rely on it. A request that is not listed is answered
   with JSON-RPC `-32601`. lsp-jvm additionally exposes workspace concept and status requests.
+- `organizeModes`: `true` when `zenwave/organizeZflServices` accepts `mode` (`full`, the default, or `additive`).
 
 ## Custom requests
 
@@ -58,7 +59,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 | --- | --- | --- |
 | `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints, viewNodeIds }[]` |
 | `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
-| `zenwave/organizeZflServices` | `{ uri }` | the reorganised ZFL text, or `null` |
+| `zenwave/organizeZflServices` | `{ uri, mode?: "full" \| "additive" }` | the reorganised ZFL text, or `null` |
 | `zenwave/eventFlowViews` | `{ textDocument: { uri } }` | `{ flowGraph, serviceGraph }`: dsl-kotlin's laid-out flow and service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`) |
 | `zenwave/preview` | `{ textDocument: { uri }, sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content }[], defaultRepresentationId }` |
 | `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
@@ -73,6 +74,10 @@ refers to them as a `referenced-by` related resource. `viewNodeIds` names the id
 groups of the same document's `zenwave/eventFlowViews` that stand for the node's concept (`command:createOrder`,
 `event:OrderCreated`, `event:OrderCreated@Orders>OrderService`, `group:Orders>OrderService`, `policy:…`); it
 is empty when the diagram has no counterpart.
+
+`zenwave/organizeZflServices` defaults to `mode: "full"`, which rebuilds the systems block from the flows.
+`mode: "additive"` adds what the flows use and removes nothing. A document the server cannot process answers
+`null` in either mode.
 
 `zenwave/preview` answers for ZDL (one `MARKDOWN` representation `domain`, "Domain model": the model's page with its
 diagrams as `mermaid` fences), `.zw` (one `MARKDOWN` representation `configuration`, "Plugin configuration": the `config`

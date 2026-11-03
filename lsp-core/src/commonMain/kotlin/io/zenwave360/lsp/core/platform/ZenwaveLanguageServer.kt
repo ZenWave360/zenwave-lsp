@@ -22,6 +22,7 @@ import io.zenwave360.lsp.core.visualization.EventFlowViews
 import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.visualization.PreviewResult
 import io.zenwave360.lsp.core.visualization.VisualizedDocument
+import io.zenwave360.lsp.core.zfl.parseOrganizeMode
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
 import kotlin.concurrent.Volatile
@@ -191,10 +192,21 @@ class ZenwaveLanguageServer(
     fun format(uri: String): String? =
         withEntry(uri) { entry, snapshot -> entry.module?.format(snapshot) }
 
-    fun organizeZflServices(uri: String): String? =
-        withEntry(uri) { entry, snapshot ->
-            (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot, entry.parsedArtifact)
+    /**
+     * Rewrites the systems block of an open ZFL document (`zenwave/organizeZflServices`).
+     *
+     * [mode] is `full` (the default, including when it is absent) or `additive`.
+     * Null when the document is not open, is not ZFL, or has errors.
+     *
+     * @throws io.zenwave360.lsp.core.visualization.InvalidRequestParamsException for an unknown mode
+     */
+    fun organizeZflServices(uri: String, mode: String? = null): String? {
+        val organizationMode = parseOrganizeMode(mode)
+        return withEntry(uri) { entry, snapshot ->
+            (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)
+                ?.organizeServices(snapshot, entry.parsedArtifact, organizationMode)
         }
+    }
 
     /**
      * The ordered preview representations of an open ZDL or ZFL document (`zenwave/preview`).

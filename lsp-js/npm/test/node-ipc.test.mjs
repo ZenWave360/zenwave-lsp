@@ -168,6 +168,7 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(result.capabilities.documentFormattingProvider, true);
     assert.deepEqual(result.capabilities.experimental.customRequests, EXPECTED_CUSTOM_REQUESTS);
     assert.deepEqual(result.capabilities.experimental.customNotifications, ['zenwave/pluginCatalogue']);
+    assert.equal(result.capabilities.experimental.organizeModes, true);
     const languageIds = result.capabilities.experimental.moduleSelectors.map((selector) => selector.languageId);
     assert.ok(languageIds.includes('zdl') && languageIds.includes('zfl'), JSON.stringify(languageIds));
     await server.connection.sendNotification('initialized', {});

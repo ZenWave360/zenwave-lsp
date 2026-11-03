@@ -194,6 +194,7 @@ class ZenwaveLspWireTest {
         val annotated = ZenwaveCustomRequests::class.java.methods.mapNotNull { it.getAnnotation(JsonRequest::class.java)?.value }
         assertEquals(annotated.toSet(), advertised.toSet(), "customRequests lists exactly the @JsonRequest methods")
         assertEquals("zenwave-lsp", result["serverInfo"].asJsonObject["name"].asString)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["organizeModes"].asBoolean)
     }
 
     @Test
@@ -220,6 +221,48 @@ class ZenwaveLspWireTest {
 
         val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonArray
         assertTrue(symbols.toString().contains("\"name\":\"OrderService\""), symbols.toString())
+    }
+
+    @Test
+    fun organizeZflServicesAcceptsFullAndAdditiveModes() {
+        initialize()
+        val uri = "file:///workspace/organize-mode.zfl"
+        open(
+            uri,
+            "zfl",
+            """
+            systems {
+                Orders {
+                    service OrdersService {
+                        commands: createOrder, unusedCommand
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                when CheckoutStarted do createOrder {
+                    service Orders/OrdersService/Order
+                    emits OrderCreated
+                }
+
+                when OrderCancelled do cancelOrder {
+                    service Orders/OrdersService
+                    emits OrderCancelled
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val omitted = request("zenwave/organizeZflServices", """{"uri":"$uri"}""").asString
+        val full = request("zenwave/organizeZflServices", """{"uri":"$uri","mode":"full"}""").asString
+        val additive = request("zenwave/organizeZflServices", """{"uri":"$uri","mode":"additive"}""").asString
+
+        assertEquals(full, omitted)
+        assertTrue(omitted.contains("cancelOrder"), omitted)
+        assertFalse(omitted.contains("unusedCommand"), omitted)
+        assertTrue(additive.contains("unusedCommand"), additive)
+        assertTrue(additive.contains("cancelOrder"), additive)
+        assertEquals(-32602, requestError("zenwave/organizeZflServices", """{"uri":"$uri","mode":"sideways"}""").first)
     }
 
     @Test

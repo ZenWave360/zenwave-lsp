@@ -110,8 +110,10 @@ data class SemanticReferenceRequest(
     val semanticId: String
 )
 
+/** Params of `zenwave/organizeZflServices`. `mode` is `full` (default) or `additive`. */
 data class OrganizeZflServicesRequest(
-    val uri: String
+    val uri: String,
+    val mode: String? = null,
 )
 
 data class ConceptAtRequest(

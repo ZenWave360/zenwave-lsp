@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.zfl
 
 import io.zenwave360.language.zfl.ZflParser as DslZflParser
 import io.zenwave360.language.zfl.formatter.ZflFormatter
+import io.zenwave360.language.zfl.formatter.ZflSystemsOrganizationMode
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
@@ -17,6 +18,7 @@ import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.parser.ZflParser
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 class ZflLanguageModule(
@@ -116,12 +118,16 @@ class ZflLanguageModule(
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
 
-    fun organizeServices(snapshot: DocumentSnapshot, parsedArtifact: Any? = null): String? {
+    fun organizeServices(
+        snapshot: DocumentSnapshot,
+        parsedArtifact: Any? = null,
+        mode: ZflSystemsOrganizationMode = ZflSystemsOrganizationMode.FULL,
+    ): String? {
         val diagnostics = if (parsedArtifact != null) diagnostics(snapshot, parsedArtifact) else diagnostics(snapshot)
         if (diagnostics.any { it.severity == DiagnosticSeverity.ERROR }) {
             return null
         }
-        return DslZflParser().organizeSystems(snapshot.text)
+        return DslZflParser().organizeSystems(snapshot.text, mode)
     }
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution> =
@@ -158,3 +164,11 @@ class ZflLanguageModule(
         return emptyList()
     }
 }
+
+/** `mode` of `zenwave/organizeZflServices`. Absent stays `full`, the rewrite the request already did. */
+internal fun parseOrganizeMode(value: String?): ZflSystemsOrganizationMode =
+    when (value) {
+        null, "full" -> ZflSystemsOrganizationMode.FULL
+        "additive" -> ZflSystemsOrganizationMode.ADDITIVE
+        else -> throw InvalidRequestParamsException("mode must be full or additive, not $value")
+    }
