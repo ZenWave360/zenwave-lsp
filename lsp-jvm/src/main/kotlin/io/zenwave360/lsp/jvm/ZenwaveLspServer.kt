@@ -289,7 +289,7 @@ class ZenwaveLspServer(
 
     override fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?> =
         answer {
-            server.organizeZflServices(request.uri, request.mode)
+            server.organizeZflServices(request.uri, modeOrNull(request.mode))
         }
 
     override fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>> =
@@ -323,7 +323,7 @@ class ZenwaveLspServer(
     override fun preview(request: PreviewRequest): CompletableFuture<JsonElement> =
         answer {
             val uri = requireTextDocumentUri(request.textDocument)
-            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, request.mode)))
+            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, modeOrNull(request.mode))))
         }
 
     /**

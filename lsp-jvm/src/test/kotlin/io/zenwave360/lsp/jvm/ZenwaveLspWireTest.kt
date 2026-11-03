@@ -557,6 +557,20 @@ class ZenwaveLspWireTest {
     private fun position(uri: String, line: Int, character: Int) =
         """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":$character}}"""
 
+    @Test
+    fun nonStringModesAreInvalidParamsLikeLspJs() {
+        initialize()
+        for (method in listOf("zenwave/preview", "zenwave/organizeZflServices")) {
+            for (mode in listOf("42", "true", "{}", "[]")) {
+                val params = JsonParser.parseString("""{"uri":"$ORDERS_URI","textDocument":{"uri":"$ORDERS_URI"},"mode":$mode}""")
+                val error = client.request(method, params)["error"].asJsonObject
+                assertEquals(-32602, error["code"].asInt, "$method mode=$mode")
+                assertEquals("mode must be a string", error["message"].asString, "$method mode=$mode")
+                assertEquals(null, error["data"], "$method mode=$mode")
+            }
+        }
+    }
+
     private fun flatten(node: JsonObject): List<JsonObject> =
         listOf(node) + node["children"].asJsonArray.flatMap { flatten(it.asJsonObject) }
 
