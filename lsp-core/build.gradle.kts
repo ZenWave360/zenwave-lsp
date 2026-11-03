@@ -109,3 +109,12 @@ publishing {
         }
     }
 }
+
+// Parsing and ELK layout exceed Mocha's default 2s when a full build keeps Node busy.
+tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>()
+    .matching { it.name == "jsNodeTest" }
+    .configureEach {
+        useMocha {
+            timeout = "20s"
+        }
+    }
