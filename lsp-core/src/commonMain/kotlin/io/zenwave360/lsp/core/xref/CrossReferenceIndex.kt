@@ -15,6 +15,17 @@ data class CrossReferenceContribution(
     val relationType: String
 )
 
+/** What a forward reference to the target of this contribution reports; [range] is where the target is, when known. */
+fun CrossReferenceContribution.toForwardTarget(range: Range? = targetRange): NavigationTarget =
+    NavigationTarget(
+        targetKind = "reference",
+        label = targetLabel ?: targetSemanticId ?: targetUri,
+        uri = targetUri,
+        range = range,
+        category = null,
+        relationType = relationType
+    )
+
 interface CrossReferenceIndex {
     fun index(contributions: List<CrossReferenceContribution>)
 

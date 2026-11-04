@@ -5,6 +5,7 @@ import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.LoaderDocumentReader
@@ -243,6 +244,51 @@ class HierarchyRequestTest {
         assertEquals(DocumentFailureKind.DOCUMENT_NOT_FOUND, assertFailsWith<DocumentRequestException> {
             server.symbolAt("file:///workspace/symbols/never-opened.zfl", Position(0, 0))
         }.kind)
+    }
+
+    @Test
+    fun theNameOfAZdlDeclarationResolvesToTheDeclaration() {
+        val server = server()
+        val uri = "file:///workspace/names/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(uri, "zdl", 1), ORDERS_MODEL_ZDL))
+
+        val entity = assertNotNull(server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "entity Order"), 8)))
+        assertEquals("$uri#entities.Order", entity.semanticId)
+        assertEquals(Range(Position(0, 7), Position(0, 12)), entity.range)
+        val service = assertNotNull(server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "service OrderService"), 10)))
+        assertEquals("$uri#services.OrderService", service.semanticId)
+        assertEquals("$uri#services.OrderService.methods.createOrder", server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "createOrder"), 6))?.semanticId)
+    }
+
+    @Test
+    fun aFlowUsesAreFoundFromTheZdlItAnnotates() {
+        val server = server()
+        val flowUri = "file:///workspace/uses/checkout.zfl"
+        val zdlUri = "file:///workspace/uses/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(flowUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL))
+
+        val command = assertNotNull(server.symbolAt(zdlUri, Position(lineOf(ORDERS_MODEL_ZDL, "createOrder"), 6)))
+        val uses = server.reverseReferences(command.uri, command.semanticId)
+        assertEquals(listOf(flowUri), uses.map { it.uri }, "uses of ${command.semanticId}: $uses")
+        assertEquals("uses", uses.single().relationType)
+        assertEquals("createOrder", uses.single().label)
+        assertEquals(lineOf(CHECKOUT_FLOW_ZFL, "when CheckoutStarted"), uses.single().range?.start?.line)
+    }
+
+    @Test
+    fun aReferenceSaysWhereItsTargetIsDeclared() {
+        val server = server()
+        val flowUri = "file:///workspace/uses/checkout.zfl"
+        val zdlUri = "file:///workspace/uses/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(flowUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL))
+        val commandLine = lineOf(ORDERS_MODEL_ZDL, "createOrder")
+
+        val forward = server.forwardReferences(flowUri, "$flowUri#flows.CheckoutFlow.commands.createOrder")
+
+        assertEquals(zdlUri, forward.single().uri)
+        assertEquals(Range(Position(commandLine, 4), Position(commandLine, 15)), forward.single().range)
     }
 
     @Test

@@ -33,16 +33,7 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
             contributionsBySourceUri[sourceUri]
                 .orEmpty()
                 .filter { it.sourceSemanticId == sourceSemanticId }
-                .map {
-                    NavigationTarget(
-                        targetKind = "reference",
-                        label = it.targetLabel ?: it.targetSemanticId ?: it.targetUri,
-                        uri = it.targetUri,
-                        range = it.targetRange,
-                        category = null,
-                        relationType = it.relationType
-                    )
-                }
+                .map { it.toForwardTarget() }
         }
 
     override fun reverseReferences(targetUri: String, targetSemanticId: String): List<NavigationTarget> =

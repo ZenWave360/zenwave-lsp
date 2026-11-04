@@ -46,6 +46,12 @@ interface LanguageModule {
         crossReferenceContributions(snapshot)
 
     fun canHandle(uri: String, text: String?): Boolean
+
+    /**
+     * Where the document declares the concept a semantic id of this document names (the ids cross-reference
+     * contributions use as targets), or null when it declares no such thing or the module cannot tell.
+     */
+    fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? = null
 }
 
 data class ParseResult(

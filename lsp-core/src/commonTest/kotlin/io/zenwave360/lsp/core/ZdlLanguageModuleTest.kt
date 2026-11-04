@@ -72,7 +72,7 @@ class ZdlLanguageModuleTest {
     fun hoverReturnsSemanticIdForFieldType() {
         val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", readTestFile("complete.zdl"))
 
-        val hover = module.hover(snapshot, Position(line = 86, character = 20))
+        val hover = module.hover(snapshot, Position(line = 85, character = 20))
 
         assertNotNull(hover)
         assertEquals(

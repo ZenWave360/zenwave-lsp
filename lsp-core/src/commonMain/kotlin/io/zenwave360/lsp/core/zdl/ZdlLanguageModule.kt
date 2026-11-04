@@ -11,6 +11,7 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
@@ -72,7 +73,7 @@ class ZdlLanguageModule(
         val model = semanticModel.asZdlMap()
         val range = model.locationTable().findSource(snapshot.ref.uri, path).range
         return HoverResult(
-            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, path, range),
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, declarationPath(path), range),
             markdown = describeZdlNode(path, findNodeAtPath(model, path.substringBeforeLast('.', path))),
             range = range
         )
@@ -143,6 +144,13 @@ class ZdlLanguageModule(
     override fun canHandle(uri: String, text: String?): Boolean =
         uri.endsWith(extension)
 
+    override fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? {
+        val path = semanticId.substringAfter('#', "")
+        if (path.isEmpty() || semanticId.substringBefore('#') != snapshot.ref.uri) return null
+        val locations = (parsedArtifact as SemanticModel).asZdlMap().locationTable()
+        return (locations["$path.name"] ?: locations[path])?.toRange()
+    }
+
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
 
@@ -154,22 +162,27 @@ class ZdlLanguageModule(
         semanticModel: SemanticModel,
         position: Position
     ): String? {
-        semanticModel.getLocation(position.line, position.character)?.let { return it }
+        // dsl-kotlin numbers lines from 1, positions here from 0.
+        semanticModel.getLocation(position.line + 1, position.character)?.let { return it }
 
         val lineText = snapshot.text.lineSequence().elementAtOrNull(position.line) ?: return null
         val maxCharacter = lineText.length
         for (delta in 1..maxCharacter) {
             val left = position.character - delta
             if (left >= 0) {
-                semanticModel.getLocation(position.line, left)?.let { return it }
+                semanticModel.getLocation(position.line + 1, left)?.let { return it }
             }
             val right = position.character + delta
             if (right <= maxCharacter) {
-                semanticModel.getLocation(position.line, right)?.let { return it }
+                semanticModel.getLocation(position.line + 1, right)?.let { return it }
             }
         }
         return null
     }
+
+    /** The name of a declaration stands for it: `entities.Order.name` is `entities.Order`, a service method's too. */
+    private fun declarationPath(path: String): String =
+        Regex("""^((?:entities|enums|inputs|outputs|events|services)\.[^.]+(?:\.methods\.[^.]+)?)\.name$""").matchEntire(path)?.groupValues?.get(1) ?: path
 
     private fun tokenAtPosition(text: String, position: Position): String? {
         val line = text.lines().getOrNull(position.line) ?: return null
