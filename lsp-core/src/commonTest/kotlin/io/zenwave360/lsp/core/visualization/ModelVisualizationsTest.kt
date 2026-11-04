@@ -318,8 +318,8 @@ class ModelVisualizationsTest {
         assertTrue(views.serviceGraph.nodes.isNotEmpty())
         assertTrue(views.serviceGraph.nodes.all { it.position != null && it.dimensions != null })
         assertTrue(views.flowGraph.nodes.all { it.sourceRef.line > 0 }, "nodes point back at the source")
-        assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), views.variants.map { it.id })
-        assertEquals(listOf("Completed", "Rejected"), views.variants.map { it.title })
+        assertEquals(listOf("sequence:completed:0", "sequence:cancelled:1"), views.variants.map { it.id })
+        assertEquals(listOf("completed: from CheckoutStarted via PaymentAuthorized", "cancelled: from CheckoutStarted via PaymentDeclined"), views.variants.map { it.title })
     }
 
     @Test
@@ -349,7 +349,7 @@ class ModelVisualizationsTest {
         val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject
 
         assertEquals(setOf("flowGraph", "serviceGraph", "variants"), json.keys)
-        assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), json.getValue("variants").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
+        assertEquals(listOf("sequence:completed:0", "sequence:cancelled:1"), json.getValue("variants").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
         val flowGraph = json.getValue("flowGraph").jsonObject
         assertEquals("zfl.eventflow.view@1", flowGraph.getValue("schema").jsonPrimitive.content)
         assertEquals("zfl.services.view@1", json.getValue("serviceGraph").jsonObject.getValue("schema").jsonPrimitive.content)
