@@ -53,6 +53,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
   with JSON-RPC `-32601`. lsp-jvm additionally exposes workspace concept and status requests.
 - `previewModes`: `true` when `zenwave/preview` accepts its additive `mode` parameter and grouped diagram representations.
 - `organizeModes`: `true` when `zenwave/organizeZflServices` accepts `mode` (`full`, the default, or `additive`).
+- `flowVariants`: `true` when `zenwave/eventFlowViews` accepts its optional `variant` parameter and returns variants.
 
 ## Custom requests
 
@@ -61,7 +62,7 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 | `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints, viewNodeIds }[]` |
 | `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
 | `zenwave/organizeZflServices` | `{ uri, mode?: "full" \| "additive" }` | the reorganised ZFL text, or `null` |
-| `zenwave/eventFlowViews` | `{ textDocument: { uri } }` | `{ flowGraph, serviceGraph }`: dsl-kotlin's laid-out flow and service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`) |
+| `zenwave/eventFlowViews` | `{ textDocument: { uri }, variant?: string }` | `{ flowGraph, serviceGraph, variants: [{ id, title }] }`: dsl-kotlin's laid-out flow and full service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`); `variant` selects the flow graph only |
 | `zenwave/preview` | `{ textDocument: { uri }, mode?: "docs" \| "diagrams", sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content, group? }[], defaultRepresentationId }` |
 | `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
 

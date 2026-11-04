@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.visualization
 
 import io.zenwave360.language.eventflow.view.FlowViewModel
+import io.zenwave360.language.eventflow.view.FlowVariant
 import io.zenwave360.language.eventflow.view.ServiceViewModel
 import io.zenwave360.lsp.core.contracts.Diagnostic
 
@@ -64,6 +65,7 @@ data class PreviewResult(
 data class EventFlowViews(
     val flowGraph: FlowViewModel,
     val serviceGraph: ServiceViewModel,
+    val variants: List<FlowVariant>,
 )
 
 /** Why a document could not answer a request; [wireName] is the `data.kind` sent to the client. */
