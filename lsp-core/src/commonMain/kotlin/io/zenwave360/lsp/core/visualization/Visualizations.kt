@@ -50,6 +50,8 @@ data class PreviewRepresentation(
     val title: String,
     val format: PreviewFormat,
     val content: String,
+    /** The optional kind a client uses to group diagram representations. */
+    val group: String? = null,
 )
 
 /** The ordered representations of a document and the one a client shows first. */

@@ -194,6 +194,8 @@ class ZenwaveLspWireTest {
         val annotated = ZenwaveCustomRequests::class.java.methods.mapNotNull { it.getAnnotation(JsonRequest::class.java)?.value }
         assertEquals(annotated.toSet(), advertised.toSet(), "customRequests lists exactly the @JsonRequest methods")
         assertEquals("zenwave-lsp", result["serverInfo"].asJsonObject["name"].asString)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["previewModes"].asBoolean)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["organizeModes"].asBoolean)
     }
 
     @Test
@@ -220,6 +222,48 @@ class ZenwaveLspWireTest {
 
         val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonArray
         assertTrue(symbols.toString().contains("\"name\":\"OrderService\""), symbols.toString())
+    }
+
+    @Test
+    fun organizeZflServicesAcceptsFullAndAdditiveModes() {
+        initialize()
+        val uri = "file:///workspace/organize-mode.zfl"
+        open(
+            uri,
+            "zfl",
+            """
+            systems {
+                Orders {
+                    service OrdersService {
+                        commands: createOrder, unusedCommand
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                when CheckoutStarted do createOrder {
+                    service Orders/OrdersService/Order
+                    emits OrderCreated
+                }
+
+                when OrderCancelled do cancelOrder {
+                    service Orders/OrdersService
+                    emits OrderCancelled
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val omitted = request("zenwave/organizeZflServices", """{"uri":"$uri"}""").asString
+        val full = request("zenwave/organizeZflServices", """{"uri":"$uri","mode":"full"}""").asString
+        val additive = request("zenwave/organizeZflServices", """{"uri":"$uri","mode":"additive"}""").asString
+
+        assertEquals(full, omitted)
+        assertTrue(omitted.contains("cancelOrder"), omitted)
+        assertFalse(omitted.contains("unusedCommand"), omitted)
+        assertTrue(additive.contains("unusedCommand"), additive)
+        assertTrue(additive.contains("cancelOrder"), additive)
+        assertEquals(-32602, requestError("zenwave/organizeZflServices", """{"uri":"$uri","mode":"sideways"}""").first)
     }
 
     @Test
@@ -270,6 +314,11 @@ class ZenwaveLspWireTest {
         assertEquals("MARKDOWN", domain["format"].asString)
         assertTrue(domain["content"].asString.contains("Customer"))
         assertEquals("domain", zdl["defaultRepresentationId"].asString)
+
+        val diagrams = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"},"mode":"diagrams"}""").asJsonObject
+        val otherEntities = diagrams["representations"].asJsonArray.single().asJsonObject
+        assertEquals("other-entities", otherEntities["id"].asString)
+        assertEquals("Other entities", otherEntities["group"].asString)
     }
 
     @Test
@@ -507,6 +556,20 @@ class ZenwaveLspWireTest {
 
     private fun position(uri: String, line: Int, character: Int) =
         """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":$character}}"""
+
+    @Test
+    fun nonStringModesAreInvalidParamsLikeLspJs() {
+        initialize()
+        for (method in listOf("zenwave/preview", "zenwave/organizeZflServices")) {
+            for (mode in listOf("42", "true", "{}", "[]")) {
+                val params = JsonParser.parseString("""{"uri":"$ORDERS_URI","textDocument":{"uri":"$ORDERS_URI"},"mode":$mode}""")
+                val error = client.request(method, params)["error"].asJsonObject
+                assertEquals(-32602, error["code"].asInt, "$method mode=$mode")
+                assertEquals("mode must be a string", error["message"].asString, "$method mode=$mode")
+                assertEquals(null, error["data"], "$method mode=$mode")
+            }
+        }
+    }
 
     private fun flatten(node: JsonObject): List<JsonObject> =
         listOf(node) + node["children"].asJsonArray.flatMap { flatten(it.asJsonObject) }

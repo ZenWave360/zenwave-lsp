@@ -110,8 +110,10 @@ data class SemanticReferenceRequest(
     val semanticId: String
 )
 
+/** Params of `zenwave/organizeZflServices`. `mode` is `full` (default) or `additive`. */
 data class OrganizeZflServicesRequest(
-    val uri: String
+    val uri: String,
+    val mode: com.google.gson.JsonElement? = null,
 )
 
 data class ConceptAtRequest(
@@ -138,10 +140,11 @@ data class TextDocumentRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?
 )
 
-/** Params of `zenwave/preview`; `sequenceRenderMode` is SEPARATE_VARIANTS, ALT_BLOCKS (default) or AUTO. */
+/** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
 data class PreviewRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
-    val sequenceRenderMode: String? = null
+    val sequenceRenderMode: String? = null,
+    val mode: com.google.gson.JsonElement? = null,
 )
 
 /** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */
@@ -194,3 +197,10 @@ internal fun HierarchyNode.toDto(): HierarchyNodeDto =
 data class PluginCatalogueParams(
     val catalogue: JsonElement? = null
 )
+
+/** The `mode` param as lsp-js reads it: absent or null is the default, any other non-string is InvalidParams. */
+internal fun modeOrNull(mode: com.google.gson.JsonElement?): String? {
+    if (mode == null || mode.isJsonNull) return null
+    if (!mode.isJsonPrimitive || !mode.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("mode must be a string")
+    return mode.asString
+}

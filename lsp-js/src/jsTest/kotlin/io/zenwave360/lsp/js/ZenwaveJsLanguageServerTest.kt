@@ -85,6 +85,7 @@ class ZenwaveJsLanguageServerTest {
         )
         // The same list lsp-jvm advertises.
         assertEquals(ZenwaveCustomRequests.ALL, advertised)
+        assertEquals(true, result.capabilities.experimental.organizeModes)
         assertEquals("zenwave-lsp", result.serverInfo.name)
         assertEquals("1.2.3-test", result.serverInfo.version)
         assertEquals(2, result.capabilities.textDocumentSync)
@@ -351,5 +352,53 @@ flow CheckoutFlow {
 
         assertEquals(0, (recording.diagnostics.last().diagnostics as Array<dynamic>).size)
         assertEquals(0, (recording.call("onDocumentSymbol", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI))) as Array<dynamic>).size)
+    }
+
+    @Test
+    fun organizeZflServicesPassesTheMode(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/organize.zfl"
+        val text = """
+            systems {
+                Orders {
+                    service OrdersService {
+                        commands: createOrder, unusedCommand
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                when CheckoutStarted do createOrder {
+                    service Orders/OrdersService/Order
+                    emits OrderCreated
+                }
+
+                when OrderCancelled do cancelOrder {
+                    service Orders/OrdersService
+                    emits OrderCancelled
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        return recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri)).unsafeCast<Promise<dynamic>>().then { omitted: dynamic ->
+            recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "full")).unsafeCast<Promise<dynamic>>().then { full: dynamic ->
+                assertEquals(omitted, full)
+                val rewritten = full as String
+                assertTrue(rewritten.contains("cancelOrder"), rewritten)
+                assertTrue(!rewritten.contains("unusedCommand"), rewritten)
+                recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "additive"))
+            }
+        }.then { added: dynamic ->
+            val organized = added as String
+            assertTrue(organized.contains("unusedCommand"), organized)
+            assertTrue(organized.contains("cancelOrder"), organized)
+            recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "sideways")).unsafeCast<Promise<dynamic>>().then<dynamic>(
+                { _: dynamic -> fail("expected a rejection") },
+                { error: Throwable -> error.asDynamic() },
+            )
+        }.then { error: dynamic ->
+            assertEquals(-32602, error.code)
+        }
     }
 }

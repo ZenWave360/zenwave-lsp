@@ -45,6 +45,7 @@ object VisualizationJson {
                                 put("title", representation.title)
                                 put("format", representation.format.name)
                                 put("content", representation.content)
+                                representation.group?.let { put("group", it) }
                             }
                         )
                     }

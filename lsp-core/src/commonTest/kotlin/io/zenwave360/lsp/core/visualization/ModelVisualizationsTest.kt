@@ -66,6 +66,35 @@ internal val ORDERS_ZDL = """
     }
 """.trimIndent()
 
+internal val DIAGRAMS_ZDL = """
+    @aggregate
+    @lifecycle(field: status, initial: DRAFT)
+    entity Order {
+        status String
+    }
+
+    entity Loose {
+        name String
+    }
+
+    input PlaceOrderInput {
+        name String
+    }
+
+    output PlaceOrderOutput {
+        id String
+    }
+
+    event OrderPlaced {
+        id String
+    }
+
+    service Orders for (Order) {
+        @transition(to: DRAFT)
+        placeOrder(PlaceOrderInput) PlaceOrderOutput withEvents OrderPlaced
+    }
+""".trimIndent()
+
 /** A ZDL syntax error (a stray token) that dsl-kotlin's parser survives. */
 internal val BROKEN_ZDL = "entity Customer {\n    name String required\n    ) ) )\n}\n"
 
@@ -130,6 +159,26 @@ class ModelVisualizationsTest {
         assertEquals("domain", preview.defaultRepresentationId)
         assertTrue(representation.content.contains("CustomerOrder"), representation.content)
         assertFalse(representation.content.contains("plantuml", ignoreCase = true))
+    }
+
+    @Test
+    fun zdlDiagramsPreviewUsesGroupedIndividualRepresentations() {
+        val server = server(Triple(ORDERS_ZDL_URI, "zdl", DIAGRAMS_ZDL))
+
+        val preview = server.preview(ORDERS_ZDL_URI, mode = "diagrams")
+
+        assertEquals(
+            listOf("service:Orders", "aggregate:Order", "state-machine:Order", "events", "command:Orders:placeOrder", "other-entities"),
+            preview.representations.map { it.id },
+        )
+        assertEquals(
+            listOf("Services", "Aggregates", "State Machines", "Events", "Commands", "Other entities"),
+            preview.representations.map { it.group },
+        )
+        assertEquals("service:Orders", preview.defaultRepresentationId)
+        assertTrue(preview.representations.all { it.format == PreviewFormat.MERMAID && it.content.isNotBlank() })
+        assertEquals("Orders.placeOrder", preview.representations.single { it.id == "command:Orders:placeOrder" }.title)
+        assertFailsWith<InvalidRequestParamsException> { server.preview(ORDERS_ZDL_URI, mode = "page") }
     }
 
     @Test
@@ -296,6 +345,17 @@ class ModelVisualizationsTest {
         val representation = json.getValue("representations").jsonArray.single().jsonObject
         assertEquals(setOf("id", "title", "format", "content"), representation.keys)
         assertEquals("MARKDOWN", representation.getValue("format").jsonPrimitive.content)
+    }
+
+    @Test
+    fun previewJsonIncludesGroupOnlyForDiagramRepresentations() {
+        val server = server(Triple(ORDERS_ZDL_URI, "zdl", DIAGRAMS_ZDL))
+
+        val json = Json.parseToJsonElement(VisualizationJson.preview(server.preview(ORDERS_ZDL_URI, mode = "diagrams"))).jsonObject
+
+        assertEquals("Services", json.getValue("representations").jsonArray.first().jsonObject.getValue("group").jsonPrimitive.content)
+        val docs = Json.parseToJsonElement(VisualizationJson.preview(server.preview(ORDERS_ZDL_URI))).jsonObject
+        assertFalse("group" in docs.getValue("representations").jsonArray.single().jsonObject)
     }
 
     @Test

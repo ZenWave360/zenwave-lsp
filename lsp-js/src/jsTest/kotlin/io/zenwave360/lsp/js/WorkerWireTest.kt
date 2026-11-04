@@ -111,6 +111,7 @@ class WorkerWireTest {
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
             assertEquals(listOf("zenwave/pluginCatalogue"), (result.capabilities.experimental.customNotifications as Array<String>).toList())
+            assertEquals(true, result.capabilities.experimental.organizeModes)
             client.notify("initialized", jsonObject())
             val diagnostics = client.nextNotification("textDocument/publishDiagnostics") { it.uri == brokenUri }
             client.notify("textDocument/didOpen", textDocumentItem(brokenUri, "zdl", 1, brokenText))

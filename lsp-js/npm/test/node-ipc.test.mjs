@@ -168,6 +168,8 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(result.capabilities.documentFormattingProvider, true);
     assert.deepEqual(result.capabilities.experimental.customRequests, EXPECTED_CUSTOM_REQUESTS);
     assert.deepEqual(result.capabilities.experimental.customNotifications, ['zenwave/pluginCatalogue']);
+    assert.equal(result.capabilities.experimental.previewModes, true);
+    assert.equal(result.capabilities.experimental.organizeModes, true);
     const languageIds = result.capabilities.experimental.moduleSelectors.map((selector) => selector.languageId);
     assert.ok(languageIds.includes('zdl') && languageIds.includes('zfl'), JSON.stringify(languageIds));
     await server.connection.sendNotification('initialized', {});
@@ -285,6 +287,11 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     ]);
     assert.equal(zdl.defaultRepresentationId, 'domain');
     assert.ok(zdl.representations[0].content.includes('Customer'));
+
+    const diagrams = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: ordersUri }, mode: 'diagrams' });
+    assert.deepEqual(diagrams.representations.map(({ id, group, format }) => ({ id, group, format })), [
+      { id: 'other-entities', group: 'Other entities', format: 'MERMAID' },
+    ]);
 
     await server.connection.sendNotification('textDocument/didOpen', {
       textDocument: { uri: 'file:///workspace/orders.zw', languageId: 'zw', version: 1, text: ordersText },

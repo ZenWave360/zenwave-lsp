@@ -69,6 +69,7 @@ interface ZenwaveCustomRequests {
     @JsonRequest("zenwave/reverseReferences")
     fun reverseReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>>
 
+    /** The rewritten ZFL document, or null. `mode` is `full` (default) or `additive`. */
     @JsonRequest("zenwave/organizeZflServices")
     fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?>
 
@@ -287,9 +288,9 @@ class ZenwaveLspServer(
         )
 
     override fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?> =
-        CompletableFuture.completedFuture(
-            server.organizeZflServices(request.uri)
-        )
+        answer {
+            server.organizeZflServices(request.uri, modeOrNull(request.mode))
+        }
 
     override fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>> =
         CompletableFuture.supplyAsync {
@@ -322,7 +323,7 @@ class ZenwaveLspServer(
     override fun preview(request: PreviewRequest): CompletableFuture<JsonElement> =
         answer {
             val uri = requireTextDocumentUri(request.textDocument)
-            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode)))
+            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, modeOrNull(request.mode))))
         }
 
     /**
@@ -377,7 +378,9 @@ class ZenwaveLspServer(
                     )
                 },
                 "customRequests" to (CustomRequestMethods.ALL + listOf("zenwave/conceptAt", "zenwave/workspaceStatus")),
-                "customNotifications" to ZenwaveCustomNotifications.ALL
+                "customNotifications" to ZenwaveCustomNotifications.ALL,
+                "previewModes" to true,
+                "organizeModes" to true,
             )
         }
     }
