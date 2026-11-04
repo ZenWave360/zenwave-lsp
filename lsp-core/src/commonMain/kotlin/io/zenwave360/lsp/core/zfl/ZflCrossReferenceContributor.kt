@@ -27,6 +27,7 @@ internal class ZflCrossReferenceContributor {
                 val targetUri = zdlUris[whenModel.system] ?: return@flatMapIndexed emptyList()
                 buildList {
                     whenModel.command?.let { commandName ->
+                        val serviceName = whenModel.service?.substringAfterLast('.')
                         add(
                             CrossReferenceContribution(
                                 sourceUri = uri,
@@ -34,7 +35,7 @@ internal class ZflCrossReferenceContributor {
                                 sourceRange = locations.findSource(uri, "flows.$flowName.whens[$index].command").range,
                                 sourceLabel = commandName,
                                 targetUri = targetUri,
-                                targetSemanticId = null,
+                                targetSemanticId = serviceName?.let { "$targetUri#services.$it.methods.$commandName" },
                                 targetRange = null,
                                 targetLabel = commandName,
                                 relationType = "uses"
@@ -49,7 +50,7 @@ internal class ZflCrossReferenceContributor {
                                 sourceRange = locations.findSource(uri, "flows.$flowName.whens[$index].events.$eventName").range,
                                 sourceLabel = eventName,
                                 targetUri = targetUri,
-                                targetSemanticId = null,
+                                targetSemanticId = "$targetUri#events.$eventName",
                                 targetRange = null,
                                 targetLabel = eventName,
                                 relationType = "references"

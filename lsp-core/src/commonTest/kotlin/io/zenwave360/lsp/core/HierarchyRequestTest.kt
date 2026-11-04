@@ -261,6 +261,22 @@ class HierarchyRequestTest {
     }
 
     @Test
+    fun aFlowUsesAreFoundFromTheZdlItAnnotates() {
+        val server = server()
+        val flowUri = "file:///workspace/uses/checkout.zfl"
+        val zdlUri = "file:///workspace/uses/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(flowUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL))
+
+        val command = assertNotNull(server.symbolAt(zdlUri, Position(lineOf(ORDERS_MODEL_ZDL, "createOrder"), 6)))
+        val uses = server.reverseReferences(command.uri, command.semanticId)
+        assertEquals(listOf(flowUri), uses.map { it.uri }, "uses of ${command.semanticId}: $uses")
+        assertEquals("uses", uses.single().relationType)
+        assertEquals("createOrder", uses.single().label)
+        assertEquals(lineOf(CHECKOUT_FLOW_ZFL, "when CheckoutStarted"), uses.single().range?.start?.line)
+    }
+
+    @Test
     fun fileUrisBecomePathsEveryPlatformReads() {
         assertEquals("c:/Users/me/a b/orders.zdl", LoaderDocumentReader.loaderLocation("file:///c%3A/Users/me/a%20b/orders.zdl"))
         assertEquals("C:/Users/me/orders.zdl", LoaderDocumentReader.loaderLocation("file://C:/Users/me/orders.zdl"))
