@@ -25,6 +25,7 @@ import io.zenwave360.lsp.core.visualization.VisualizedDocument
 import io.zenwave360.lsp.core.zfl.parseOrganizeMode
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
+import io.zenwave360.lsp.core.xref.toForwardTarget
 import kotlin.concurrent.Volatile
 
 class ZenwaveLanguageServer(
@@ -243,8 +244,24 @@ class ZenwaveLanguageServer(
         return VisualizedDocument(snapshot, entry.module?.languageId, entry.diagnostics)
     }
 
-    fun forwardReferences(uri: String, semanticId: String): List<NavigationTarget> =
-        crossReferenceIndex.forwardReferences(uri, semanticId)
+    /**
+     * What the symbol references. Each result carries the place in its document when it is known: recorded with
+     * the reference, or declared in the target document when that is open.
+     */
+    fun forwardReferences(uri: String, semanticId: String): List<NavigationTarget> {
+        val snapshot = sessionStore.get(uri) ?: return crossReferenceIndex.forwardReferences(uri, semanticId)
+        val entry = getOrBuildCacheEntry(snapshot)
+        return getOrComputeCrossReferenceContributions(entry, snapshot)
+            .filter { it.sourceUri == uri && it.sourceSemanticId == semanticId }
+            .map { it.toForwardTarget(it.targetRange ?: declaredTargetRange(it)) }
+    }
+
+    private fun declaredTargetRange(contribution: CrossReferenceContribution): Range? {
+        val semanticId = contribution.targetSemanticId ?: return null
+        val target = sessionStore.get(contribution.targetUri) ?: return null
+        val entry = getOrBuildCacheEntry(target)
+        return entry.module?.declarationRange(target, entry.parsedArtifact, semanticId)
+    }
 
     fun reverseReferences(uri: String, semanticId: String): List<NavigationTarget> =
         crossReferenceIndex.reverseReferences(uri, semanticId)

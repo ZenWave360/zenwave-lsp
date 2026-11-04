@@ -278,5 +278,12 @@ private fun loadExternalLocation(uri: String, path: String): SourceLocation? {
         ?: loadExternalModel(uri)?.locationOf(normalizedPath)
 }
 
+/** Where a document of a spec declares the node a `uri#path` semantic id names, when its own uri is the id's. */
+internal fun specDeclarationRange(parsedArtifact: Any?, semanticId: String): Range? {
+    val model = (parsedArtifact as? SpecDocument)?.model ?: return null
+    if (semanticId.substringBefore('#') != model.uri) return null
+    return model.locationOf(semanticId.substringAfter('#'))?.range
+}
+
 internal fun rootLocation(uri: String) =
     SourceLocation(uri = uri, range = Range(Position(0, 0), Position(0, 0)))

@@ -10,11 +10,13 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.spec.defaultSpecDefinition
 import io.zenwave360.lsp.core.spec.defaultSpecHover
 import io.zenwave360.lsp.core.spec.detectSpecFile
 import io.zenwave360.lsp.core.spec.parseSpecDocument
 import io.zenwave360.lsp.core.spec.refContribution
+import io.zenwave360.lsp.core.spec.specDeclarationRange
 import io.zenwave360.lsp.core.spec.requiredFieldDiagnostics
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
@@ -92,4 +94,7 @@ class OpenApiLanguageModule(
 
     override fun canHandle(uri: String, text: String?): Boolean =
         detectSpecFile(uri, text, "openapi")
+
+    override fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? =
+        specDeclarationRange(parsedArtifact, semanticId)
 }

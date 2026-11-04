@@ -11,6 +11,7 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
@@ -142,6 +143,13 @@ class ZdlLanguageModule(
 
     override fun canHandle(uri: String, text: String?): Boolean =
         uri.endsWith(extension)
+
+    override fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? {
+        val path = semanticId.substringAfter('#', "")
+        if (path.isEmpty() || semanticId.substringBefore('#') != snapshot.ref.uri) return null
+        val locations = (parsedArtifact as SemanticModel).asZdlMap().locationTable()
+        return (locations["$path.name"] ?: locations[path])?.toRange()
+    }
 
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)

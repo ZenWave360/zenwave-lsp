@@ -277,6 +277,21 @@ class HierarchyRequestTest {
     }
 
     @Test
+    fun aReferenceSaysWhereItsTargetIsDeclared() {
+        val server = server()
+        val flowUri = "file:///workspace/uses/checkout.zfl"
+        val zdlUri = "file:///workspace/uses/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(flowUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL))
+        val commandLine = lineOf(ORDERS_MODEL_ZDL, "createOrder")
+
+        val forward = server.forwardReferences(flowUri, "$flowUri#flows.CheckoutFlow.commands.createOrder")
+
+        assertEquals(zdlUri, forward.single().uri)
+        assertEquals(Range(Position(commandLine, 4), Position(commandLine, 15)), forward.single().range)
+    }
+
+    @Test
     fun fileUrisBecomePathsEveryPlatformReads() {
         assertEquals("c:/Users/me/a b/orders.zdl", LoaderDocumentReader.loaderLocation("file:///c%3A/Users/me/a%20b/orders.zdl"))
         assertEquals("C:/Users/me/orders.zdl", LoaderDocumentReader.loaderLocation("file://C:/Users/me/orders.zdl"))
