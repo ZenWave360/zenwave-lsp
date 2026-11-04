@@ -172,9 +172,13 @@ class ModelVisualizationsTest {
             preview.representations.map { it.id },
         )
         assertEquals(
-            listOf("Services", "Aggregates", "State Machines", "Events", "Commands", "Other entities"),
+            listOf("Services", "Aggregates", "State Machines", "Events", "Commands", "Unused entities and enums"),
             preview.representations.map { it.group },
         )
+        val unused = preview.representations.single { it.id == "other-entities" }
+        assertEquals("Unused entities and enums", unused.title)
+        assertTrue(unused.content.contains("Loose"), unused.content)
+        assertFalse(unused.content.contains("Order {"), unused.content)
         assertEquals("service:Orders", preview.defaultRepresentationId)
         assertTrue(preview.representations.all { it.format == PreviewFormat.MERMAID && it.content.isNotBlank() })
         assertEquals("Orders.placeOrder", preview.representations.single { it.id == "command:Orders:placeOrder" }.title)

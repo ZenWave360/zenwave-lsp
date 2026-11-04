@@ -106,7 +106,7 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                     diagrams.aggregates.forEach { diagram ->
                         add(diagram("aggregate:${diagram.aggregate}", diagram.aggregate, GROUP_AGGREGATES, diagram.mermaid))
                     }
-                    others = diagrams.others
+                    others = diagrams.unused
                 }
                 ZdlLifecycleToMermaidStateDiagramTransformer().transform(domain).forEach { diagram ->
                     add(diagram("state-machine:${diagram.aggregate}", diagram.aggregate, GROUP_STATE_MACHINES, diagram.mermaid))
@@ -118,7 +118,7 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                     add(diagram("command:${diagram.service}:${diagram.command}", "${diagram.service}.${diagram.command}", GROUP_COMMANDS, diagram.mermaid))
                 }
                 others?.let { mermaid ->
-                    add(diagram(OTHER_ENTITIES_ID, "Other entities", GROUP_OTHER_ENTITIES, mermaid))
+                    add(diagram(OTHER_ENTITIES_ID, UNUSED_TITLE, GROUP_OTHER_ENTITIES, mermaid))
                 }
             }
         }
@@ -259,14 +259,16 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         const val ZFL = "zfl"
         const val DOMAIN_ID = "domain"
         const val FLOWCHART_ID = "flowchart"
+        /** Id kept from the former "Other entities" kind so clients keep working. */
         const val OTHER_ENTITIES_ID = "other-entities"
+        const val UNUSED_TITLE = "Unused entities and enums"
         const val EVENTS_ID = "events"
         const val GROUP_SERVICES = "Services"
         const val GROUP_AGGREGATES = "Aggregates"
         const val GROUP_STATE_MACHINES = "State Machines"
         const val GROUP_EVENTS = "Events"
         const val GROUP_COMMANDS = "Commands"
-        const val GROUP_OTHER_ENTITIES = "Other entities"
+        const val GROUP_OTHER_ENTITIES = "Unused entities and enums"
 
         /** `sequenceRenderMode` of `zenwave/preview`; absent means ALT_BLOCKS, as `GenerateMermaidFromZfl.execute(text)`. */
         fun parseSequenceRenderMode(value: String?): MermaidSequenceRenderMode =

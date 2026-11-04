@@ -89,7 +89,7 @@ the default). What a model wrote is escaped in the Markdown, so a `<script>` sho
 defaults to `ALT_BLOCKS`. Null properties are omitted from every result.
 
 For a ZDL, `mode: "diagrams"` returns only individual `MERMAID` diagrams. Every representation has a `group` of
-`Services`, `Aggregates`, `State Machines`, `Events`, `Commands` or `Other entities`; absent kinds have no representation.
+`Services`, `Aggregates`, `State Machines`, `Events`, `Commands` or `Unused entities and enums`; absent kinds have no representation.
 
 ### Plugin catalogue
 

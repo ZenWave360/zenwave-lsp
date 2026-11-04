@@ -337,7 +337,7 @@ class ZenwaveLspWireTest {
         val diagrams = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"},"mode":"diagrams"}""").asJsonObject
         val otherEntities = diagrams["representations"].asJsonArray.single().asJsonObject
         assertEquals("other-entities", otherEntities["id"].asString)
-        assertEquals("Other entities", otherEntities["group"].asString)
+        assertEquals("Unused entities and enums", otherEntities["group"].asString)
     }
 
     @Test
