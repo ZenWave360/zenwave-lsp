@@ -5,6 +5,7 @@ import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.LoaderDocumentReader
@@ -243,6 +244,20 @@ class HierarchyRequestTest {
         assertEquals(DocumentFailureKind.DOCUMENT_NOT_FOUND, assertFailsWith<DocumentRequestException> {
             server.symbolAt("file:///workspace/symbols/never-opened.zfl", Position(0, 0))
         }.kind)
+    }
+
+    @Test
+    fun theNameOfAZdlDeclarationResolvesToTheDeclaration() {
+        val server = server()
+        val uri = "file:///workspace/names/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(uri, "zdl", 1), ORDERS_MODEL_ZDL))
+
+        val entity = assertNotNull(server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "entity Order"), 8)))
+        assertEquals("$uri#entities.Order", entity.semanticId)
+        assertEquals(Range(Position(0, 7), Position(0, 12)), entity.range)
+        val service = assertNotNull(server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "service OrderService"), 10)))
+        assertEquals("$uri#services.OrderService", service.semanticId)
+        assertEquals("$uri#services.OrderService.methods.createOrder", server.symbolAt(uri, Position(lineOf(ORDERS_MODEL_ZDL, "createOrder"), 6))?.semanticId)
     }
 
     @Test
