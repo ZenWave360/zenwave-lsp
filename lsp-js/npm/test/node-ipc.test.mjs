@@ -290,7 +290,7 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
 
     const diagrams = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: ordersUri }, mode: 'diagrams' });
     assert.deepEqual(diagrams.representations.map(({ id, group, format }) => ({ id, group, format })), [
-      { id: 'other-entities', group: 'Other entities', format: 'MERMAID' },
+      { id: 'other-entities', group: 'Unused entities and enums', format: 'MERMAID' },
     ]);
 
     await server.connection.sendNotification('textDocument/didOpen', {
