@@ -8,6 +8,7 @@ import io.zenwave360.lsp.core.contracts.Range
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -31,6 +32,18 @@ object VisualizationJson {
         buildJsonObject {
             put("flowGraph", viewModelJson.encodeToJsonElement(FlowViewModel.serializer(), views.flowGraph))
             put("serviceGraph", viewModelJson.encodeToJsonElement(ServiceViewModel.serializer(), views.serviceGraph))
+            views.savedPositions?.let { saved ->
+                put("savedPositions", buildJsonObject {
+                    when (saved) {
+                        SavedPositions.Applied -> put("applied", true)
+                        is SavedPositions.NotApplied -> {
+                            put("applied", false)
+                            put("reason", saved.reason)
+                            put("missing", buildJsonArray { saved.missing.forEach { add(JsonPrimitive(it)) } })
+                        }
+                    }
+                })
+            }
             put("variants", buildJsonArray {
                 views.variants.forEach { variant ->
                     add(buildJsonObject {

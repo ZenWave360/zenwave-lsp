@@ -139,6 +139,7 @@ internal fun WorkspaceStatus.toDto(): WorkspaceStatusDto =
 data class TextDocumentRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
     val variant: com.google.gson.JsonElement? = null,
+    val positions: com.google.gson.JsonElement? = null,
 )
 
 /** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
@@ -211,4 +212,22 @@ internal fun variantOrNull(variant: com.google.gson.JsonElement?): String? {
     if (variant == null || variant.isJsonNull) return null
     if (!variant.isJsonPrimitive || !variant.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("variant must be a string")
     return variant.asString
+}
+
+/**
+ * The `positions` param as lsp-js reads it: absent or null is no positions, anything but an object is invalid
+ * params, and an entry that is not `{ x, y }` of numbers becomes a non-finite point (reported as `invalid`).
+ */
+internal fun positionsOrNull(positions: JsonElement?): Map<String, io.zenwave360.lsp.core.visualization.SavedPoint>? {
+    if (positions == null || positions.isJsonNull) return null
+    if (!positions.isJsonObject) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("positions must be an object")
+    fun number(entry: JsonElement?): Double? =
+        entry?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asDouble
+    return positions.asJsonObject.entrySet().associate { (id, entry) ->
+        val obj = entry.takeIf { it.isJsonObject }?.asJsonObject
+        val x = number(obj?.get("x"))
+        val y = number(obj?.get("y"))
+        id to if (x != null && y != null) io.zenwave360.lsp.core.visualization.SavedPoint(x, y)
+        else io.zenwave360.lsp.core.visualization.SavedPoint(Double.NaN, Double.NaN)
+    }
 }

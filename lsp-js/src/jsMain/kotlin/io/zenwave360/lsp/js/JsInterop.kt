@@ -35,6 +35,29 @@ internal fun isPresent(value: dynamic): Boolean =
 internal fun stringOrNull(value: dynamic): String? =
     if (jsTypeOf(value) == "string") value.unsafeCast<String>() else null
 
+/**
+ * The `positions` param of `zenwave/eventFlowViews`: absent or null is no positions, anything but an object is
+ * invalid params. An entry that is not `{ x, y }` of numbers becomes a non-finite point, which the server reports
+ * as `invalid` rather than failing the request.
+ */
+internal fun positionsOrNull(value: dynamic): Map<String, io.zenwave360.lsp.core.visualization.SavedPoint>? {
+    if (!isPresent(value)) return null
+    if (jsTypeOf(value) != "object" || js("Array.isArray(value)") as Boolean) {
+        throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("positions must be an object")
+    }
+    val keys = js("Object.keys(value)").unsafeCast<Array<String>>()
+    return keys.associateWith { id ->
+        val entry = value[id]
+        val x = if (isPresent(entry)) entry.x else null
+        val y = if (isPresent(entry)) entry.y else null
+        if (jsTypeOf(x) == "number" && jsTypeOf(y) == "number") {
+            io.zenwave360.lsp.core.visualization.SavedPoint((x as Number).toDouble(), (y as Number).toDouble())
+        } else {
+            io.zenwave360.lsp.core.visualization.SavedPoint(Double.NaN, Double.NaN)
+        }
+    }
+}
+
 internal fun positionFromJson(value: dynamic): Position =
     Position(line = (value.line as Number).toInt(), character = (value.character as Number).toInt())
 

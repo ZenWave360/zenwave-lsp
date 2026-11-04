@@ -171,6 +171,7 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(result.capabilities.experimental.previewModes, true);
     assert.equal(result.capabilities.experimental.organizeModes, true);
     assert.equal(result.capabilities.experimental.flowVariants, true);
+    assert.equal(result.capabilities.experimental.savedPositions, true);
     const languageIds = result.capabilities.experimental.moduleSelectors.map((selector) => selector.languageId);
     assert.ok(languageIds.includes('zdl') && languageIds.includes('zfl'), JSON.stringify(languageIds));
     await server.connection.sendNotification('initialized', {});
@@ -270,6 +271,15 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     });
     assert.ok(variant.flowGraph.nodes.length < views.flowGraph.nodes.length);
     assert.deepEqual(variant.serviceGraph, views.serviceGraph);
+
+    const positions = Object.fromEntries(views.flowGraph.nodes.map((node) => [node.id, { x: 11, y: 13 }]));
+    const placed = await server.connection.sendRequest('zenwave/eventFlowViews', { textDocument: { uri: checkoutUri }, positions });
+    assert.deepEqual(placed.savedPositions, { applied: true });
+    assert.ok(placed.flowGraph.nodes.every((node) => node.position.x === 11 && node.position.y === 13));
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/eventFlowViews', { textDocument: { uri: checkoutUri }, positions: 'x' }),
+      /positions must be an object/,
+    );
   });
 
   test('zenwave/preview returns ordered representations for ZFL and ZDL', async () => {
