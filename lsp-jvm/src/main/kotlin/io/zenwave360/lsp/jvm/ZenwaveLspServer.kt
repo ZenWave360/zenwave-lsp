@@ -78,7 +78,7 @@ interface ZenwaveCustomRequests {
 
     @JsonRequest("zenwave/workspaceStatus")
     fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto>
-    /** `{flowGraph, serviceGraph}`, or a -32803 error whose `data.kind` says why the document cannot answer. */
+    /** `{flowGraph, serviceGraph, variants}`, or a -32803 error whose `data.kind` says why the document cannot answer. */
     @JsonRequest("zenwave/eventFlowViews")
     fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement>
 
@@ -316,7 +316,7 @@ class ZenwaveLspServer(
     override fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement> =
         answer {
             val uri = requireTextDocumentUri(request.textDocument)
-            val views = runBlocking { server.eventFlowViews(uri) }
+            val views = runBlocking { server.eventFlowViews(uri, variantOrNull(request.variant)) }
             JsonParser.parseString(VisualizationJson.eventFlowViews(views))
         }
 
@@ -381,6 +381,7 @@ class ZenwaveLspServer(
                 "customNotifications" to ZenwaveCustomNotifications.ALL,
                 "previewModes" to true,
                 "organizeModes" to true,
+                "flowVariants" to true,
             )
         }
     }

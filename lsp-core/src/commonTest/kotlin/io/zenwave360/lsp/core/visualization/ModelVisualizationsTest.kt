@@ -314,6 +314,27 @@ class ModelVisualizationsTest {
         assertTrue(views.serviceGraph.nodes.isNotEmpty())
         assertTrue(views.serviceGraph.nodes.all { it.position != null && it.dimensions != null })
         assertTrue(views.flowGraph.nodes.all { it.sourceRef.line > 0 }, "nodes point back at the source")
+        assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), views.variants.map { it.id })
+        assertEquals(listOf("Completed", "Rejected"), views.variants.map { it.title })
+    }
+
+    @Test
+    fun eventFlowViewsCanSelectALaidOutVariantWithoutChangingTheServiceGraph() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+
+        val full = server.eventFlowViews(CHECKOUT_ZFL_URI)
+        val variant = server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:completed:0")
+
+        assertTrue(variant.flowGraph.nodes.size < full.flowGraph.nodes.size)
+        assertTrue(variant.flowGraph.hasLayout())
+        assertEquals(full.serviceGraph, variant.serviceGraph)
+        assertEquals(full.variants, variant.variants)
+        assertEquals(
+            "unknown variant: sequence:missing:0",
+            assertFailsWith<InvalidRequestParamsException> {
+                server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:missing:0")
+            }.message,
+        )
     }
 
     @Test
@@ -323,7 +344,8 @@ class ModelVisualizationsTest {
 
         val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject
 
-        assertEquals(setOf("flowGraph", "serviceGraph"), json.keys)
+        assertEquals(setOf("flowGraph", "serviceGraph", "variants"), json.keys)
+        assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), json.getValue("variants").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
         val flowGraph = json.getValue("flowGraph").jsonObject
         assertEquals("zfl.eventflow.view@1", flowGraph.getValue("schema").jsonPrimitive.content)
         assertEquals("zfl.services.view@1", json.getValue("serviceGraph").jsonObject.getValue("schema").jsonPrimitive.content)

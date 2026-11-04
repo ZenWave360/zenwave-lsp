@@ -31,6 +31,14 @@ object VisualizationJson {
         buildJsonObject {
             put("flowGraph", viewModelJson.encodeToJsonElement(FlowViewModel.serializer(), views.flowGraph))
             put("serviceGraph", viewModelJson.encodeToJsonElement(ServiceViewModel.serializer(), views.serviceGraph))
+            put("variants", buildJsonArray {
+                views.variants.forEach { variant ->
+                    add(buildJsonObject {
+                        put("id", variant.id)
+                        put("title", variant.title)
+                    })
+                }
+            })
         }.toString()
 
     fun preview(result: PreviewResult): String =

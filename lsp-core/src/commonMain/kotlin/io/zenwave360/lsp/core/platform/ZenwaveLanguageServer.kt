@@ -233,8 +233,8 @@ class ZenwaveLanguageServer(
      *
      * @throws DocumentRequestException when the document is not open, not ZFL, or cannot be read
      */
-    suspend fun eventFlowViews(uri: String): EventFlowViews =
-        visualizations.eventFlowViews(visualizedDocument(uri))
+    suspend fun eventFlowViews(uri: String, variant: String? = null): EventFlowViews =
+        visualizations.eventFlowViews(visualizedDocument(uri), variant)
 
     private fun visualizedDocument(uri: String): VisualizedDocument {
         val snapshot = sessionStore.get(uri)

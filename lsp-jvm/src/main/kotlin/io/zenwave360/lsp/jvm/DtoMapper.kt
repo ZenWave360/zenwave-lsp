@@ -137,7 +137,8 @@ internal fun WorkspaceStatus.toDto(): WorkspaceStatusDto =
 
 /** Params of `zenwave/eventFlowViews`. Nullable: Gson leaves absent properties null, reported as InvalidParams. */
 data class TextDocumentRequest(
-    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val variant: com.google.gson.JsonElement? = null,
 )
 
 /** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
@@ -203,4 +204,11 @@ internal fun modeOrNull(mode: com.google.gson.JsonElement?): String? {
     if (mode == null || mode.isJsonNull) return null
     if (!mode.isJsonPrimitive || !mode.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("mode must be a string")
     return mode.asString
+}
+
+/** The `variant` param as lsp-js reads it: absent or null selects the full flow. */
+internal fun variantOrNull(variant: com.google.gson.JsonElement?): String? {
+    if (variant == null || variant.isJsonNull) return null
+    if (!variant.isJsonPrimitive || !variant.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("variant must be a string")
+    return variant.asString
 }

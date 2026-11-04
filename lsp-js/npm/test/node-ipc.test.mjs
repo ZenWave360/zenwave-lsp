@@ -170,6 +170,7 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.deepEqual(result.capabilities.experimental.customNotifications, ['zenwave/pluginCatalogue']);
     assert.equal(result.capabilities.experimental.previewModes, true);
     assert.equal(result.capabilities.experimental.organizeModes, true);
+    assert.equal(result.capabilities.experimental.flowVariants, true);
     const languageIds = result.capabilities.experimental.moduleSelectors.map((selector) => selector.languageId);
     assert.ok(languageIds.includes('zdl') && languageIds.includes('zfl'), JSON.stringify(languageIds));
     await server.connection.sendNotification('initialized', {});
@@ -249,7 +250,8 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
 
   test('zenwave/eventFlowViews returns the laid-out flow and service view models', async () => {
     const views = await server.connection.sendRequest('zenwave/eventFlowViews', { textDocument: { uri: checkoutUri } });
-    assert.deepEqual(Object.keys(views).sort(), ['flowGraph', 'serviceGraph']);
+    assert.deepEqual(Object.keys(views).sort(), ['flowGraph', 'serviceGraph', 'variants']);
+    assert.deepEqual(views.variants.map((variant) => variant.id), ['sequence:completed:0', 'sequence:rejected:1']);
     assert.equal(views.flowGraph.schema, 'zfl.eventflow.view@1');
     assert.equal(views.serviceGraph.schema, 'zfl.services.view@1');
     assert.ok(views.flowGraph.nodes.length > 0);
@@ -262,6 +264,12 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal(typeof views.flowGraph.layout.engine, 'string');
     assert.ok(views.serviceGraph.nodes.every((node) => typeof node.position?.y === 'number'));
     assert.ok(!JSON.stringify(views).includes('null'), 'null properties are omitted');
+
+    const variant = await server.connection.sendRequest('zenwave/eventFlowViews', {
+      textDocument: { uri: checkoutUri }, variant: 'sequence:completed:0',
+    });
+    assert.ok(variant.flowGraph.nodes.length < views.flowGraph.nodes.length);
+    assert.deepEqual(variant.serviceGraph, views.serviceGraph);
   });
 
   test('zenwave/preview returns ordered representations for ZFL and ZDL', async () => {

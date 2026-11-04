@@ -196,6 +196,7 @@ class ZenwaveLspWireTest {
         assertEquals("zenwave-lsp", result["serverInfo"].asJsonObject["name"].asString)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["previewModes"].asBoolean)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["organizeModes"].asBoolean)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["flowVariants"].asBoolean)
     }
 
     @Test
@@ -273,7 +274,8 @@ class ZenwaveLspWireTest {
 
         val views = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonObject
 
-        assertEquals(setOf("flowGraph", "serviceGraph"), views.keySet())
+        assertEquals(setOf("flowGraph", "serviceGraph", "variants"), views.keySet())
+        assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), views["variants"].asJsonArray.map { it.asJsonObject["id"].asString })
         val flowGraph = views["flowGraph"].asJsonObject
         assertEquals("zfl.eventflow.view@1", flowGraph["schema"].asString)
         assertEquals("zfl.services.view@1", views["serviceGraph"].asJsonObject["schema"].asString)
@@ -286,6 +288,23 @@ class ZenwaveLspWireTest {
         }
         assertTrue(flowGraph["edges"].asJsonArray.size() > 0)
         assertFalse(views.toString().contains("null"), "null properties are omitted")
+    }
+
+    @Test
+    fun eventFlowViewsAcceptsAVariantAndRejectsInvalidVariants() {
+        initialize()
+        open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)
+
+        val full = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonObject
+        val variant = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":"sequence:completed:0"}""").asJsonObject
+        assertTrue(variant["flowGraph"].asJsonObject["nodes"].asJsonArray.size() < full["flowGraph"].asJsonObject["nodes"].asJsonArray.size())
+        assertEquals(full["serviceGraph"], variant["serviceGraph"])
+        val unknown = client.request("zenwave/eventFlowViews", JsonParser.parseString("""{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":"sequence:missing:0"}""))["error"].asJsonObject
+        assertEquals(-32602, unknown["code"].asInt)
+        assertEquals("unknown variant: sequence:missing:0", unknown["message"].asString)
+        val nonString = client.request("zenwave/eventFlowViews", JsonParser.parseString("""{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":42}""))["error"].asJsonObject
+        assertEquals(-32602, nonString["code"].asInt)
+        assertEquals("variant must be a string", nonString["message"].asString)
     }
 
     @Test

@@ -96,7 +96,11 @@ class ZenwaveJsLanguageServer(
         registerCustomRequest(ZenwaveCustomRequests.EVENT_FLOW_VIEWS) { params ->
             answer {
                 val uri = textDocumentUri(params)
-                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri)))
+                val variant = params.variant
+                if (isPresent(variant) && jsTypeOf(variant) != "string") {
+                    throw InvalidRequestParamsException("variant must be a string")
+                }
+                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri, stringOrNull(variant))))
             }
         }
         registerCustomRequest(ZenwaveCustomRequests.PREVIEW) { params ->
@@ -306,6 +310,7 @@ class ZenwaveJsLanguageServer(
                 "customNotifications" to ZenwaveCustomNotifications.ALL.toTypedArray(),
                 "previewModes" to true,
                 "organizeModes" to true,
+                "flowVariants" to true,
             ),
         )
     }

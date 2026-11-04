@@ -4,6 +4,7 @@ import io.zenwave360.language.antlr.ZdlLexer
 import io.zenwave360.language.docs.DslDocs
 import io.zenwave360.lsp.core.catalogue.PluginCatalogues
 import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
+import io.zenwave360.language.eventflow.application.FlowVariantViewResult
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
 import io.zenwave360.language.eventflow.view.MermaidSequenceRenderMode
@@ -53,16 +54,22 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         }
     }
 
-    suspend fun eventFlowViews(document: VisualizedDocument): EventFlowViews {
+    suspend fun eventFlowViews(document: VisualizedDocument, variant: String? = null): EventFlowViews {
         if (document.languageId != ZFL) {
             throw unsupported(document, "zenwave/eventFlowViews covers ZFL documents")
         }
         requireReadable(document)
         val text = document.snapshot.text
         return generating(document) {
+            val generator = GenerateFlowViewFromZfl()
             EventFlowViews(
-                flowGraph = GenerateFlowViewFromZfl().execute(text),
+                flowGraph = when (val result = variant?.let { generator.variant(text, it) }) {
+                    null -> generator.execute(text)
+                    is FlowVariantViewResult.Found -> result.view
+                    is FlowVariantViewResult.UnknownVariant -> throw InvalidRequestParamsException("unknown variant: ${result.id}")
+                },
                 serviceGraph = GenerateServiceViewFromZfl().execute(text),
+                variants = generator.variants(text),
             )
         }
     }
@@ -181,6 +188,8 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         } catch (e: CancellationException) {
             throw e
         } catch (e: DocumentRequestException) {
+            throw e
+        } catch (e: InvalidRequestParamsException) {
             throw e
         } catch (e: Exception) {
             val uri = document.snapshot.ref.uri
