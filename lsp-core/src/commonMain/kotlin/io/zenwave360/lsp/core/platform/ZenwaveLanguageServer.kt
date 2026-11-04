@@ -16,6 +16,7 @@ import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.Range
 import kotlinx.coroutines.CancellationException
+import io.zenwave360.lsp.core.visualization.SavedPoint
 import io.zenwave360.lsp.core.visualization.DocumentFailureKind
 import io.zenwave360.lsp.core.visualization.DocumentRequestException
 import io.zenwave360.lsp.core.visualization.EventFlowViews
@@ -234,8 +235,8 @@ class ZenwaveLanguageServer(
      *
      * @throws DocumentRequestException when the document is not open, not ZFL, or cannot be read
      */
-    suspend fun eventFlowViews(uri: String, variant: String? = null): EventFlowViews =
-        visualizations.eventFlowViews(visualizedDocument(uri), variant)
+    suspend fun eventFlowViews(uri: String, variant: String? = null, positions: Map<String, SavedPoint>? = null): EventFlowViews =
+        visualizations.eventFlowViews(visualizedDocument(uri), variant, positions)
 
     private fun visualizedDocument(uri: String): VisualizedDocument {
         val snapshot = sessionStore.get(uri)

@@ -203,6 +203,7 @@ class ZenwaveLspWireTest {
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["previewModes"].asBoolean)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["organizeModes"].asBoolean)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["flowVariants"].asBoolean)
+        assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["savedPositions"].asBoolean)
     }
 
     @Test
@@ -311,6 +312,36 @@ class ZenwaveLspWireTest {
         val nonString = errorOf("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":42}""")
         assertEquals(-32602, nonString["code"].asInt)
         assertEquals("variant must be a string", nonString["message"].asString)
+    }
+
+    @Test
+    fun eventFlowViewsAppliesSavedPositionsAndReportsWhyNot() {
+        initialize()
+        open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)
+        val params = """{"textDocument":{"uri":"$CHECKOUT_URI"}"""
+
+        val full = request("zenwave/eventFlowViews", "$params}").asJsonObject
+        assertFalse(full.has("savedPositions"))
+        val ids = full["flowGraph"].asJsonObject["nodes"].asJsonArray.map { it.asJsonObject["id"].asString }
+        val all = ids.joinToString(",") { """"$it":{"x":7,"y":9}""" }
+
+        val applied = request("zenwave/eventFlowViews", "$params,\"positions\":{$all}}").asJsonObject
+        assertEquals(true, applied["savedPositions"].asJsonObject["applied"].asBoolean)
+        assertTrue(applied["flowGraph"].asJsonObject["nodes"].asJsonArray.all { it.asJsonObject["position"].asJsonObject["x"].asDouble == 7.0 })
+
+        val partial = ids.drop(1).joinToString(",") { """"$it":{"x":7,"y":9}""" }
+        val missing = request("zenwave/eventFlowViews", "$params,\"positions\":{$partial}}").asJsonObject["savedPositions"].asJsonObject
+        assertEquals(false, missing["applied"].asBoolean)
+        assertEquals("missing-nodes", missing["reason"].asString)
+        assertEquals(listOf(ids.first()), missing["missing"].asJsonArray.map { it.asString })
+
+        val bad = ids.joinToString(",") { """"$it":{"x":"7","y":9}""" }
+        val invalid = request("zenwave/eventFlowViews", "$params,\"positions\":{$bad}}").asJsonObject["savedPositions"].asJsonObject
+        assertEquals("invalid", invalid["reason"].asString)
+
+        val nonObject = errorOf("zenwave/eventFlowViews", "$params,\"positions\":[1]}")
+        assertEquals(-32602, nonObject["code"].asInt)
+        assertEquals("positions must be an object", nonObject["message"].asString)
     }
 
     @Test

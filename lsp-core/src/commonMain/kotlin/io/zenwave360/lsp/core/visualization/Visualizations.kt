@@ -66,7 +66,18 @@ data class EventFlowViews(
     val flowGraph: FlowViewModel,
     val serviceGraph: ServiceViewModel,
     val variants: List<FlowVariant>,
+    /** Present only when saved positions were sent for the full diagram. */
+    val savedPositions: SavedPositions? = null,
 )
+
+/** A position a client saved for a node of the flow diagram; non-finite coordinates are reported as `invalid`. */
+data class SavedPoint(val x: Double, val y: Double)
+
+/** Whether the positions a client sent were used for the flow graph; [reason] and [missing] explain when not. */
+sealed interface SavedPositions {
+    data object Applied : SavedPositions
+    data class NotApplied(val reason: String, val missing: List<String>) : SavedPositions
+}
 
 /** Why a document could not answer a request; [wireName] is the `data.kind` sent to the client. */
 enum class DocumentFailureKind(val wireName: String) {

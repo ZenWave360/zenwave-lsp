@@ -323,6 +323,50 @@ class ModelVisualizationsTest {
     }
 
     @Test
+    fun eventFlowViewsUseSavedPositionsWhenEveryNodeHasOne() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+        val auto = server.eventFlowViews(CHECKOUT_ZFL_URI)
+        assertEquals(null, auto.savedPositions)
+        val saved = auto.flowGraph.nodes.associate { it.id to SavedPoint(it.position!!.x + 1000.0, it.position!!.y + 500.0) }
+
+        val views = server.eventFlowViews(CHECKOUT_ZFL_URI, positions = saved)
+
+        assertEquals(SavedPositions.Applied, views.savedPositions)
+        assertEquals(saved, views.flowGraph.nodes.associate { it.id to SavedPoint(it.position!!.x, it.position!!.y) })
+        assertEquals(auto.serviceGraph, views.serviceGraph)
+        val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject
+        assertEquals("true", json.getValue("savedPositions").jsonObject.getValue("applied").jsonPrimitive.content)
+    }
+
+    @Test
+    fun eventFlowViewsKeepAutomaticLayoutAndNameTheNodesWithoutAPosition() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+        val auto = server.eventFlowViews(CHECKOUT_ZFL_URI)
+        val ids = auto.flowGraph.nodes.map { it.id }
+
+        val missing = server.eventFlowViews(CHECKOUT_ZFL_URI, positions = ids.drop(1).associateWith { SavedPoint(1.0, 2.0) })
+        assertEquals(SavedPositions.NotApplied("missing-nodes", listOf(ids.first())), missing.savedPositions)
+        assertEquals(auto.flowGraph, missing.flowGraph)
+
+        val invalid = server.eventFlowViews(CHECKOUT_ZFL_URI, positions = ids.associateWith { SavedPoint(Double.NaN, 2.0) })
+        assertEquals("invalid", (invalid.savedPositions as SavedPositions.NotApplied).reason)
+        val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(missing)).jsonObject.getValue("savedPositions").jsonObject
+        assertEquals("missing-nodes", json.getValue("reason").jsonPrimitive.content)
+        assertEquals(listOf(ids.first()), json.getValue("missing").jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test
+    fun eventFlowViewsIgnoreSavedPositionsForAVariant() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+        val variant = server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:completed:0")
+
+        val withPositions = server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:completed:0", mapOf("nope" to SavedPoint(1.0, 1.0)))
+
+        assertEquals(variant, withPositions)
+        assertEquals(null, withPositions.savedPositions)
+    }
+
+    @Test
     fun eventFlowViewsCanSelectALaidOutVariantWithoutChangingTheServiceGraph() = runTest {
         val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
 

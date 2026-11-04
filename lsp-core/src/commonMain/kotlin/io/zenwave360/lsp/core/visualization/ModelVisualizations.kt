@@ -4,7 +4,10 @@ import io.zenwave360.language.antlr.ZdlLexer
 import io.zenwave360.language.docs.DslDocs
 import io.zenwave360.lsp.core.catalogue.PluginCatalogues
 import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
+import io.zenwave360.language.eventflow.application.FlowPositionsReason
+import io.zenwave360.language.eventflow.application.FlowPositionsResult
 import io.zenwave360.language.eventflow.application.FlowVariantViewResult
+import io.zenwave360.language.eventflow.view.Point
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
 import io.zenwave360.language.eventflow.view.MermaidSequenceRenderMode
@@ -54,7 +57,11 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         }
     }
 
-    suspend fun eventFlowViews(document: VisualizedDocument, variant: String? = null): EventFlowViews {
+    suspend fun eventFlowViews(
+        document: VisualizedDocument,
+        variant: String? = null,
+        positions: Map<String, SavedPoint>? = null,
+    ): EventFlowViews {
         if (document.languageId != ZFL) {
             throw unsupported(document, "zenwave/eventFlowViews covers ZFL documents")
         }
@@ -62,14 +69,22 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         val text = document.snapshot.text
         return generating(document) {
             val generator = GenerateFlowViewFromZfl()
+            var savedPositions: SavedPositions? = null
+            val flowGraph = when (val result = variant?.let { generator.variant(text, it) }) {
+                null -> if (positions == null) generator.execute(text) else when (val placed = generator.withPositions(text, positions.mapValues { (_, p) -> Point(p.x, p.y) })) {
+                    is FlowPositionsResult.Applied -> placed.view.also { savedPositions = SavedPositions.Applied }
+                    is FlowPositionsResult.NotApplied -> placed.view.also {
+                        savedPositions = SavedPositions.NotApplied(placed.reason.wireName(), placed.missing)
+                    }
+                }
+                is FlowVariantViewResult.Found -> result.view
+                is FlowVariantViewResult.UnknownVariant -> throw InvalidRequestParamsException("unknown variant: ${result.id}")
+            }
             EventFlowViews(
-                flowGraph = when (val result = variant?.let { generator.variant(text, it) }) {
-                    null -> generator.execute(text)
-                    is FlowVariantViewResult.Found -> result.view
-                    is FlowVariantViewResult.UnknownVariant -> throw InvalidRequestParamsException("unknown variant: ${result.id}")
-                },
+                flowGraph = flowGraph,
                 serviceGraph = GenerateServiceViewFromZfl().execute(text),
                 variants = generator.variants(text),
+                savedPositions = savedPositions,
             )
         }
     }
@@ -301,3 +316,9 @@ data class VisualizedDocument(
     val languageId: String?,
     val diagnostics: List<Diagnostic>,
 )
+
+private fun FlowPositionsReason.wireName(): String =
+    when (this) {
+        FlowPositionsReason.MISSING_NODES -> "missing-nodes"
+        FlowPositionsReason.INVALID -> "invalid"
+    }
