@@ -159,6 +159,12 @@ class ZenwaveLspWireTest {
         return error["code"].asInt to error["data"]
     }
 
+    /** The whole JSON-RPC error object, for a test that checks its message too. */
+    private fun errorOf(method: String, params: String): JsonObject {
+        val response = client.request(method, JsonParser.parseString(params))
+        return response["error"]?.asJsonObject ?: fail("$method answered ${response["result"]} instead of an error")
+    }
+
     private fun notify(method: String, params: String) {
         client.notify(method, JsonParser.parseString(params))
     }
@@ -299,10 +305,10 @@ class ZenwaveLspWireTest {
         val variant = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":"sequence:completed:0"}""").asJsonObject
         assertTrue(variant["flowGraph"].asJsonObject["nodes"].asJsonArray.size() < full["flowGraph"].asJsonObject["nodes"].asJsonArray.size())
         assertEquals(full["serviceGraph"], variant["serviceGraph"])
-        val unknown = client.request("zenwave/eventFlowViews", JsonParser.parseString("""{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":"sequence:missing:0"}""))["error"].asJsonObject
+        val unknown = errorOf("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":"sequence:missing:0"}""")
         assertEquals(-32602, unknown["code"].asInt)
         assertEquals("unknown variant: sequence:missing:0", unknown["message"].asString)
-        val nonString = client.request("zenwave/eventFlowViews", JsonParser.parseString("""{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":42}""))["error"].asJsonObject
+        val nonString = errorOf("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"},"variant":42}""")
         assertEquals(-32602, nonString["code"].asInt)
         assertEquals("variant must be a string", nonString["message"].asString)
     }
