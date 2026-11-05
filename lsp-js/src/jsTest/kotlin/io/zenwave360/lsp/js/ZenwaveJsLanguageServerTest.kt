@@ -308,6 +308,55 @@ flow CheckoutFlow {
     }
 
     @Test
+    fun answersEventFlowViewsInLanesAndRejectsInvalidLanes(): Promise<Unit> {
+        val created = mutableListOf<String>()
+        val recording = RecordingConnection()
+        ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test") { code, message, _ ->
+            created += "$code $message"
+            jsonObject("responseError" to code)
+        }.listen()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = "systems {\n  Orders { service OrderService { commands: createOrder } }\n  Payments { service PaymentService { commands: authorizePayment } }\n}\n\n" +
+            "flow CheckoutFlow {\n    start CheckoutStarted {\n    }\n    when CheckoutStarted do createOrder {\n" +
+            "        service Orders.OrderService\n        emits OrderCreated\n    }\n    when OrderCreated do authorizePayment {\n" +
+            "        service Payments.PaymentService\n        emits PaymentAuthorized\n    }\n    end {\n        completed: PaymentAuthorized\n    }\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+        fun views(extra: dynamic): Promise<dynamic> {
+            val params = jsonObject("textDocument" to jsonObject("uri" to uri))
+            js("Object.assign")(params, extra)
+            return recording.call("zenwave/eventFlowViews", params) as Promise<dynamic>
+        }
+        fun rejection(promise: Promise<dynamic>): Promise<dynamic> =
+            promise.then<dynamic>({ _: dynamic -> fail("expected a rejection") }, { error: Throwable -> error.asDynamic() })
+
+        return views(js("({})")).then { plain: dynamic ->
+            assertTrue(!isPresent(plain.lanes))
+            assertTrue(!isPresent(plain.flowGraph.lanes))
+            views(js("({lanes: 'systems'})"))
+        }.then { systems: dynamic ->
+            assertEquals("systems", systems.lanes)
+            assertEquals(2, (systems.flowGraph.lanes as Array<dynamic>).size)
+            assertTrue((systems.flowGraph.nodes as Array<dynamic>).all { isPresent(it.lane) })
+            val positions = js("({})")
+            (systems.flowGraph.nodes as Array<dynamic>).forEach { positions[it.id] = js("({x: 7, y: 9})") }
+            views(jsonObject("lanes" to "services", "positions" to positions))
+        }.then { services: dynamic ->
+            assertEquals("services", services.lanes)
+            assertTrue((services.flowGraph.lanes as Array<dynamic>).all { it.kind == "service" })
+            assertEquals(false, services.savedPositions.applied)
+            assertEquals("lanes", services.savedPositions.reason)
+            views(js("({variant: 'sequence:completed:0', lanes: 'services'})"))
+        }.then { variant: dynamic ->
+            assertTrue((variant.flowGraph.lanes as Array<dynamic>).isNotEmpty())
+            rejection(views(js("({lanes: 'teams'})")))
+        }.then { _: dynamic ->
+            rejection(views(js("({lanes: 3})")))
+        }.then { _: dynamic ->
+            assertEquals(listOf("-32602 unknown lanes: teams", "-32602 lanes must be a string"), created)
+        }
+    }
+
+    @Test
     fun rejectsWithTheResponseErrorBuiltByTheEntryPoint(): Promise<Unit> {
         val recording = RecordingConnection()
         val created = mutableListOf<Triple<Int, String, dynamic>>()

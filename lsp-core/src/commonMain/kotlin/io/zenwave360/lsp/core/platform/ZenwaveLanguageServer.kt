@@ -19,7 +19,9 @@ import kotlinx.coroutines.CancellationException
 import io.zenwave360.lsp.core.visualization.SavedPoint
 import io.zenwave360.lsp.core.visualization.DocumentFailureKind
 import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.language.eventflow.view.FlowLanes
 import io.zenwave360.lsp.core.visualization.EventFlowViews
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.visualization.PreviewResult
 import io.zenwave360.lsp.core.visualization.VisualizedDocument
@@ -235,8 +237,10 @@ class ZenwaveLanguageServer(
      *
      * @throws DocumentRequestException when the document is not open, not ZFL, or cannot be read
      */
-    suspend fun eventFlowViews(uri: String, variant: String? = null, positions: Map<String, SavedPoint>? = null): EventFlowViews =
-        visualizations.eventFlowViews(visualizedDocument(uri), variant, positions)
+    suspend fun eventFlowViews(uri: String, variant: String? = null, positions: Map<String, SavedPoint>? = null, lanes: String? = null): EventFlowViews =
+        visualizations.eventFlowViews(visualizedDocument(uri), variant, positions, lanes?.let {
+            FlowLanes.fromWire(it) ?: throw InvalidRequestParamsException("unknown lanes: $it")
+        })
 
     private fun visualizedDocument(uri: String): VisualizedDocument {
         val snapshot = sessionStore.get(uri)
