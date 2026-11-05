@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.visualization
 
+import io.zenwave360.language.eventflow.view.FlowLanes
 import io.zenwave360.language.eventflow.view.FlowViewModel
 import io.zenwave360.language.eventflow.view.FlowVariant
 import io.zenwave360.language.eventflow.view.ServiceViewModel
@@ -68,6 +69,8 @@ data class EventFlowViews(
     val variants: List<FlowVariant>,
     /** Present only when saved positions were sent for the full diagram. */
     val savedPositions: SavedPositions? = null,
+    /** The lanes the flow graph is drawn in, echoed only when the request named them. */
+    val lanes: FlowLanes? = null,
 )
 
 /** A position a client saved for a node of the flow diagram; non-finite coordinates are reported as `invalid`. */

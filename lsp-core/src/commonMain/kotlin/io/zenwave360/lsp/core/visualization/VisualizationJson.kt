@@ -32,6 +32,7 @@ object VisualizationJson {
         buildJsonObject {
             put("flowGraph", viewModelJson.encodeToJsonElement(FlowViewModel.serializer(), views.flowGraph))
             put("serviceGraph", viewModelJson.encodeToJsonElement(ServiceViewModel.serializer(), views.serviceGraph))
+            views.lanes?.let { put("lanes", it.wire) }
             views.savedPositions?.let { saved ->
                 put("savedPositions", buildJsonObject {
                     when (saved) {

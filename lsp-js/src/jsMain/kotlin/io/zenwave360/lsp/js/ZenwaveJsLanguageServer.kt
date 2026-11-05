@@ -100,8 +100,13 @@ class ZenwaveJsLanguageServer(
                 if (isPresent(variant) && jsTypeOf(variant) != "string") {
                     throw InvalidRequestParamsException("variant must be a string")
                 }
+                val lanesParam = params.lanes
+                if (isPresent(lanesParam) && jsTypeOf(lanesParam) != "string") {
+                    throw InvalidRequestParamsException("lanes must be a string")
+                }
+                val lanes = stringOrNull(lanesParam)
                 val positions = positionsOrNull(params.positions)
-                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri, stringOrNull(variant), positions)))
+                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri, stringOrNull(variant), positions, lanes)))
             }
         }
         registerCustomRequest(ZenwaveCustomRequests.PREVIEW) { params ->
@@ -313,6 +318,7 @@ class ZenwaveJsLanguageServer(
                 "organizeModes" to true,
                 "flowVariants" to true,
                 "savedPositions" to true,
+                "flowLanes" to arrayOf("none", "systems", "services"),
             ),
         )
     }

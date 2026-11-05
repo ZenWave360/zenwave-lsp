@@ -140,6 +140,7 @@ data class TextDocumentRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
     val variant: com.google.gson.JsonElement? = null,
     val positions: com.google.gson.JsonElement? = null,
+    val lanes: com.google.gson.JsonElement? = null,
 )
 
 /** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
@@ -212,6 +213,13 @@ internal fun variantOrNull(variant: com.google.gson.JsonElement?): String? {
     if (variant == null || variant.isJsonNull) return null
     if (!variant.isJsonPrimitive || !variant.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("variant must be a string")
     return variant.asString
+}
+
+/** The `lanes` param as lsp-js reads it: absent or null is not named (answered as `none`); an unknown value is rejected by the server as invalid params. */
+internal fun lanesOrNull(lanes: com.google.gson.JsonElement?): String? {
+    if (lanes == null || lanes.isJsonNull) return null
+    if (!lanes.isJsonPrimitive || !lanes.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("lanes must be a string")
+    return lanes.asString
 }
 
 /**

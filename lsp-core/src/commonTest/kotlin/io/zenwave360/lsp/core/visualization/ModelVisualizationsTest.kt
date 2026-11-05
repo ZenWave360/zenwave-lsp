@@ -11,6 +11,8 @@ import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
+import io.zenwave360.language.eventflow.view.FlowLaneKind
+import io.zenwave360.language.eventflow.view.FlowLanes
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -52,6 +54,14 @@ internal val CHECKOUT_ZFL = """
         }
     }
 """.trimIndent()
+
+internal val CHECKOUT_SYSTEMS_ZFL = """
+    systems {
+        Orders { service OrderService { commands: createOrder } }
+        Payments { service PaymentService { commands: authorizePayment } }
+    }
+
+""".trimIndent() + "\n" + CHECKOUT_ZFL
 
 internal const val ORDERS_ZDL_URI = "file:///workspace/orders.zdl"
 internal const val ORDERS_ZW_URI = "file:///workspace/orders.zw"
@@ -383,6 +393,80 @@ class ModelVisualizationsTest {
                 server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:missing:0")
             }.message,
         )
+    }
+
+    @Test
+    fun eventFlowViewsWithoutLanesAreThePreviousOutput() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+        val full = server.eventFlowViews(CHECKOUT_ZFL_URI)
+
+        val none = server.eventFlowViews(CHECKOUT_ZFL_URI, lanes = "none")
+
+        assertEquals(full.flowGraph, none.flowGraph)
+        assertEquals(null, full.flowGraph.lanes)
+        assertEquals(null, full.lanes)
+        assertEquals(FlowLanes.NONE, none.lanes)
+        assertFalse(VisualizationJson.eventFlowViews(full).contains("\"lanes\""))
+        assertEquals("none", Json.parseToJsonElement(VisualizationJson.eventFlowViews(none)).jsonObject.getValue("lanes").jsonPrimitive.content)
+    }
+
+    @Test
+    fun eventFlowViewsDrawSystemsAndServicesInBands() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_SYSTEMS_ZFL))
+
+        val systems = server.eventFlowViews(CHECKOUT_ZFL_URI, lanes = "systems")
+        val services = server.eventFlowViews(CHECKOUT_ZFL_URI, lanes = "services")
+
+        assertEquals(FlowLanes.SYSTEMS, systems.lanes)
+        assertEquals(FlowLanes.SERVICES, services.lanes)
+        val systemBands = assertNotNull(systems.flowGraph.lanes)
+        assertTrue(systemBands.size >= 2)
+        assertTrue(systemBands.all { it.kind == FlowLaneKind.SYSTEM })
+        assertTrue(systems.flowGraph.nodes.all { it.lane != null })
+        val serviceBands = assertNotNull(services.flowGraph.lanes)
+        assertTrue(serviceBands.all { it.kind == FlowLaneKind.SERVICE })
+        assertEquals(systems.serviceGraph, services.serviceGraph)
+        val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(services)).jsonObject
+        assertEquals("services", json.getValue("lanes").jsonPrimitive.content)
+        assertTrue(json.getValue("flowGraph").jsonObject.getValue("lanes").jsonArray.isNotEmpty())
+        assertTrue(json.getValue("flowGraph").jsonObject.getValue("nodes").jsonArray.all { it.jsonObject.containsKey("lane") })
+    }
+
+    @Test
+    fun eventFlowViewsDrawAVariantInLanes() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_SYSTEMS_ZFL))
+
+        val variant = server.eventFlowViews(CHECKOUT_ZFL_URI, "sequence:completed:0", lanes = "services")
+
+        assertTrue(assertNotNull(variant.flowGraph.lanes).isNotEmpty())
+        assertTrue(variant.flowGraph.nodes.all { it.lane != null })
+        assertEquals(null, variant.savedPositions)
+        assertEquals(FlowLanes.SERVICES, variant.lanes)
+    }
+
+    @Test
+    fun eventFlowViewsIgnoreSavedPositionsWithLanesAndSayTheyWereNotUsed() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_SYSTEMS_ZFL))
+        val auto = server.eventFlowViews(CHECKOUT_ZFL_URI, lanes = "systems")
+        val saved = auto.flowGraph.nodes.associate { it.id to SavedPoint(7.0, 9.0) }
+
+        val views = server.eventFlowViews(CHECKOUT_ZFL_URI, positions = saved, lanes = "systems")
+
+        assertEquals(auto.flowGraph, views.flowGraph)
+        assertEquals(SavedPositions.NotApplied("lanes", emptyList()), views.savedPositions)
+        val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject.getValue("savedPositions").jsonObject
+        assertEquals("lanes", json.getValue("reason").jsonPrimitive.content)
+        assertEquals("false", json.getValue("applied").jsonPrimitive.content)
+        assertEquals(SavedPositions.Applied, server.eventFlowViews(CHECKOUT_ZFL_URI, positions = saved.mapValues { SavedPoint(1.0, 2.0) }, lanes = "none").savedPositions)
+    }
+
+    @Test
+    fun eventFlowViewsRejectUnknownLanes() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
+
+        assertEquals("unknown lanes: teams", assertFailsWith<InvalidRequestParamsException> {
+            server.eventFlowViews(CHECKOUT_ZFL_URI, lanes = "teams")
+        }.message)
     }
 
     @Test

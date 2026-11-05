@@ -204,6 +204,7 @@ class ZenwaveLspWireTest {
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["organizeModes"].asBoolean)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["flowVariants"].asBoolean)
         assertEquals(true, result["capabilities"].asJsonObject["experimental"].asJsonObject["savedPositions"].asBoolean)
+        assertEquals(listOf("none", "systems", "services"), result["capabilities"].asJsonObject["experimental"].asJsonObject["flowLanes"].asJsonArray.map { it.asString })
     }
 
     @Test
@@ -342,6 +343,50 @@ class ZenwaveLspWireTest {
         val nonObject = errorOf("zenwave/eventFlowViews", "$params,\"positions\":[1]}")
         assertEquals(-32602, nonObject["code"].asInt)
         assertEquals("positions must be an object", nonObject["message"].asString)
+    }
+
+    @Test
+    fun eventFlowViewsDrawsInLanesAndIgnoresSavedPositionsWithThem() {
+        initialize()
+        open(CHECKOUT_URI, "zfl", LANES_ZFL)
+        val params = """{"textDocument":{"uri":"$CHECKOUT_URI"}"""
+
+        val plain = request("zenwave/eventFlowViews", "$params}").asJsonObject
+        assertFalse(plain.has("lanes"))
+        assertFalse(plain["flowGraph"].asJsonObject.has("lanes"))
+        val none = request("zenwave/eventFlowViews", "$params,\"lanes\":\"none\"}").asJsonObject
+        assertEquals("none", none["lanes"].asString)
+        none.remove("lanes")
+        assertEquals(plain, none)
+
+        val systems = request("zenwave/eventFlowViews", "$params,\"lanes\":\"systems\"}").asJsonObject
+        assertEquals("systems", systems["lanes"].asString)
+        val bands = systems["flowGraph"].asJsonObject["lanes"].asJsonArray
+        assertTrue(bands.size() >= 2)
+        assertTrue(bands.all { it.asJsonObject["kind"].asString == "system" })
+        assertTrue(systems["flowGraph"].asJsonObject["nodes"].asJsonArray.all { it.asJsonObject.has("lane") })
+        val services = request("zenwave/eventFlowViews", "$params,\"lanes\":\"services\"}").asJsonObject
+        assertTrue(services["flowGraph"].asJsonObject["lanes"].asJsonArray.all { it.asJsonObject["kind"].asString == "service" })
+
+        val variant = request("zenwave/eventFlowViews", "$params,\"variant\":\"sequence:completed:0\",\"lanes\":\"services\"}").asJsonObject
+        assertTrue(variant["flowGraph"].asJsonObject["lanes"].asJsonArray.size() > 0)
+        assertEquals("services", variant["lanes"].asString)
+
+        val ids = systems["flowGraph"].asJsonObject["nodes"].asJsonArray.map { it.asJsonObject["id"].asString }
+        val all = ids.joinToString(",") { """"$it":{"x":7,"y":9}""" }
+        val withPositions = request("zenwave/eventFlowViews", "$params,\"lanes\":\"systems\",\"positions\":{$all}}").asJsonObject
+        assertEquals(systems["flowGraph"], withPositions["flowGraph"])
+        val saved = withPositions["savedPositions"].asJsonObject
+        assertEquals(false, saved["applied"].asBoolean)
+        assertEquals("lanes", saved["reason"].asString)
+        assertEquals(0, saved["missing"].asJsonArray.size())
+
+        val unknown = errorOf("zenwave/eventFlowViews", "$params,\"lanes\":\"teams\"}")
+        assertEquals(-32602, unknown["code"].asInt)
+        assertEquals("unknown lanes: teams", unknown["message"].asString)
+        val nonString = errorOf("zenwave/eventFlowViews", "$params,\"lanes\":3}")
+        assertEquals(-32602, nonString["code"].asInt)
+        assertEquals("lanes must be a string", nonString["message"].asString)
     }
 
     @Test
@@ -680,6 +725,34 @@ class ZenwaveLspWireTest {
                 end {
                     completed: OrderCreated
                     rejected: OrderRejected
+                }
+            }
+        """.trimIndent()
+
+        val LANES_ZFL = """
+            systems {
+                Orders { service OrderService { commands: createOrder } }
+                Payments { service PaymentService { commands: authorizePayment } }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                when OrderCreated do authorizePayment {
+                    service Payments.PaymentService
+                    emits PaymentAuthorized
+                    emits PaymentDeclined
+                }
+
+                end {
+                    completed: PaymentAuthorized
+                    cancelled: PaymentDeclined
                 }
             }
         """.trimIndent()
