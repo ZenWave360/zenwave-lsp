@@ -129,7 +129,7 @@ class ModelVisualizationsTest {
         )
         assertEquals("sequence:completed:0", preview.defaultRepresentationId)
         assertEquals("Flowchart", preview.representations[0].title)
-        assertTrue(preview.representations[1].title.startsWith("Sequence: completed"), preview.representations[1].title)
+        assertEquals("Sequence: from CheckoutStarted → PaymentAuthorized to completed", preview.representations[1].title)
         assertTrue(preview.representations.all { it.format == PreviewFormat.MERMAID })
         assertTrue(preview.representations[0].content.startsWith("flowchart"))
         assertTrue(preview.representations.drop(1).all { it.content.startsWith("sequenceDiagram") })
@@ -319,7 +319,7 @@ class ModelVisualizationsTest {
         assertTrue(views.serviceGraph.nodes.all { it.position != null && it.dimensions != null })
         assertTrue(views.flowGraph.nodes.all { it.sourceRef.line > 0 }, "nodes point back at the source")
         assertEquals(listOf("sequence:completed:0", "sequence:cancelled:1"), views.variants.map { it.id })
-        assertEquals(listOf("completed: from CheckoutStarted via PaymentAuthorized", "cancelled: from CheckoutStarted via PaymentDeclined"), views.variants.map { it.title })
+        assertEquals(listOf("from CheckoutStarted → PaymentAuthorized to completed", "from CheckoutStarted → PaymentDeclined to cancelled"), views.variants.map { it.title })
     }
 
     @Test
