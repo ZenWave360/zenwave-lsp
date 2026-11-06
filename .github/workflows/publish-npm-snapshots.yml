@@ -25,7 +25,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # dsl-kotlin and zenwave-lsp are often pushed together. The lsp build resolves the dsl-kotlin SNAPSHOT
+  # from maven-snapshots, so wait for any dsl-kotlin snapshot publish on this branch to finish first.
+  wait-for-dsl-snapshot:
+    if: vars.PUBLISH_MAVEN == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DSL_REPO: ZenWave360/dsl-kotlin
+      DSL_WORKFLOW: publish-maven-snapshots.yml
+      DSL_BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Wait for the dsl-kotlin snapshot publish
+        run: |
+          set -u
+          # Leave time for a dsl-kotlin run started by the same push to be registered.
+          sleep 60
+          deadline=$((SECONDS + 30 * 60))
+          while true; do
+            active=0
+            for status in queued in_progress waiting pending requested; do
+              if ! count=$(gh run list -R "$DSL_REPO" --workflow "$DSL_WORKFLOW" --branch "$DSL_BRANCH"                   --status "$status" --json databaseId --jq 'length'); then
+                echo "Could not list $status runs of $DSL_REPO, will retry"
+                count=1
+              fi
+              active=$((active + count))
+            done
+            if [ "$active" -eq 0 ]; then
+              echo "No $DSL_WORKFLOW run active on $DSL_BRANCH: the dsl-kotlin snapshot is up to date."
+              exit 0
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::$DSL_REPO still has $active active $DSL_WORKFLOW run(s) on $DSL_BRANCH after 30 minutes"
+              exit 1
+            fi
+            echo "$active $DSL_WORKFLOW run(s) active on $DSL_BRANCH, waiting 30s"
+            sleep 30
+          done
+
   publish-snapshot:
+    needs: wait-for-dsl-snapshot
     if: vars.PUBLISH_MAVEN == 'true'
     # Pilot for git-maven-publisher snapshots (zenwave360/maven-snapshots, branch main); back to @main once merged there.
     uses: ZenWave360/release-workflows/.github/workflows/publish-snapshots-gradle.yml@feature/git-snapshots
