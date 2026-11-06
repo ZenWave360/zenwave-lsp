@@ -82,17 +82,21 @@ class ZenwaveLanguageServer(
     fun canHandle(uri: String): Boolean =
         sessionStore.get(uri)?.let(::getOrBuildCacheEntry)?.module != null
 
+    /** The reason the latest version of an open document could not be processed, if any. */
+    fun processingFailure(uri: String): String? =
+        withEntry(uri) { entry, _ -> entry.processingFailure }
+
     fun diagnostics(uri: String): List<Diagnostic> =
         withEntry(uri) { entry, _ -> entry.diagnostics } ?: emptyList()
 
     fun hover(uri: String, position: Position): HoverResult? =
         withEntry(uri) { entry, snapshot ->
-            entry.module?.hover(snapshot, position, entry.parsedArtifact)
+            entry.module?.takeUnless { entry.processingFailure != null }?.hover(snapshot, position, entry.parsedArtifact)
         }
 
     fun definition(uri: String, position: Position): List<NavigationTarget> =
         withEntry(uri) { entry, snapshot ->
-            entry.module?.definition(snapshot, position, entry.parsedArtifact)
+            entry.module?.takeUnless { entry.processingFailure != null }?.definition(snapshot, position, entry.parsedArtifact)
         } ?: emptyList()
 
     fun hierarchy(uri: String): List<HierarchyNode> =
@@ -126,7 +130,7 @@ class ZenwaveLanguageServer(
             snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
             entry = buildCacheEntry(snapshot)
         }
-        val module = entry.module ?: return emptyList()
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return emptyList()
         if (!module.capabilities.supportsHierarchy) return emptyList()
         val dependencies = module.hierarchyDependencies(snapshot, entry.parsedArtifact).distinct().filter { it != uri }
         if (dependencies.isEmpty()) {
@@ -156,7 +160,7 @@ class ZenwaveLanguageServer(
         val snapshot = sessionStore.get(uri)
             ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open")
         val entry = getOrBuildCacheEntry(snapshot)
-        val hover = entry.module?.hover(snapshot, position, entry.parsedArtifact)
+        val hover = entry.module?.takeUnless { entry.processingFailure != null }?.hover(snapshot, position, entry.parsedArtifact)
         val indexed = getOrComputeCrossReferenceContributions(entry, snapshot)
             .filter { it.sourceUri == uri && it.sourceRange?.contains(position) == true }
             .minByOrNull { it.sourceRange!!.size() }
@@ -194,7 +198,7 @@ class ZenwaveLanguageServer(
         }
 
     fun format(uri: String): String? =
-        withEntry(uri) { entry, snapshot -> entry.module?.format(snapshot) }
+        withEntry(uri) { entry, snapshot -> entry.module?.takeUnless { entry.processingFailure != null }?.format(snapshot) }
 
     /**
      * Rewrites the systems block of an open ZFL document (`zenwave/organizeZflServices`).
@@ -207,7 +211,7 @@ class ZenwaveLanguageServer(
     fun organizeZflServices(uri: String, mode: String? = null): String? {
         val organizationMode = parseOrganizeMode(mode)
         return withEntry(uri) { entry, snapshot ->
-            (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)
+            (entry.module.takeUnless { entry.processingFailure != null } as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)
                 ?.organizeServices(snapshot, entry.parsedArtifact, organizationMode)
         }
     }
@@ -246,6 +250,13 @@ class ZenwaveLanguageServer(
         val snapshot = sessionStore.get(uri)
             ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open")
         val entry = getOrBuildCacheEntry(snapshot)
+        entry.processingFailure?.let { failure ->
+            throw DocumentRequestException(
+                DocumentFailureKind.DOCUMENT_UNREADABLE,
+                "$uri could not be processed: $failure",
+                entry.diagnostics,
+            )
+        }
         return VisualizedDocument(snapshot, entry.module?.languageId, entry.diagnostics)
     }
 
@@ -265,7 +276,7 @@ class ZenwaveLanguageServer(
         val semanticId = contribution.targetSemanticId ?: return null
         val target = sessionStore.get(contribution.targetUri) ?: return null
         val entry = getOrBuildCacheEntry(target)
-        return entry.module?.declarationRange(target, entry.parsedArtifact, semanticId)
+        return entry.module?.takeUnless { entry.processingFailure != null }?.declarationRange(target, entry.parsedArtifact, semanticId)
     }
 
     fun reverseReferences(uri: String, semanticId: String): List<NavigationTarget> =
@@ -361,14 +372,42 @@ class ZenwaveLanguageServer(
         }
 
     private fun buildCacheEntry(snapshot: DocumentSnapshot): DocumentCacheEntry {
-        val module = resolveModule(snapshot)
-        val parsed = module?.parse(snapshot)
+        val module = try {
+            resolveModule(snapshot)
+        } catch (error: Throwable) {
+            return failedCacheEntry(snapshot, null, error)
+        }
+        val parsed = try {
+            module?.parse(snapshot)
+        } catch (error: Throwable) {
+            return failedCacheEntry(snapshot, module, error)
+        }
+        return DocumentCacheEntry(snapshot.ref.uri, snapshot.ref.version, module, parsed?.diagnostics.orEmpty(), parsed?.model)
+    }
+
+    private fun failedCacheEntry(
+        snapshot: DocumentSnapshot,
+        module: LanguageModule?,
+        error: Throwable,
+    ): DocumentCacheEntry {
+        if (error is CancellationException) throw error
+        val reason = error.message ?: "unexpected processing error"
         return DocumentCacheEntry(
             uri = snapshot.ref.uri,
             version = snapshot.ref.version,
             module = module,
-            diagnostics = parsed?.diagnostics.orEmpty(),
-            parsedArtifact = parsed?.model
+            diagnostics = listOf(
+                Diagnostic(
+                    uri = snapshot.ref.uri,
+                    range = Range(Position(0, 0), Position(0, 0)),
+                    severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.ERROR,
+                    message = "Could not process this document: $reason",
+                    code = "document-processing-failed",
+                    data = mapOf("language" to snapshot.ref.languageId),
+                )
+            ),
+            parsedArtifact = null,
+            processingFailure = reason,
         )
     }
 
@@ -380,7 +419,7 @@ class ZenwaveLanguageServer(
         run {
             lock.read { entry.hierarchy }?.let { return it }
             lock.write {
-                entry.hierarchy ?: entry.module?.hierarchy(snapshot, entry.parsedArtifact).orEmpty().also {
+                entry.hierarchy ?: entry.module?.takeUnless { entry.processingFailure != null }?.hierarchy(snapshot, entry.parsedArtifact).orEmpty().also {
                     entry.hierarchy = it
                 }
             }
@@ -393,7 +432,7 @@ class ZenwaveLanguageServer(
         run {
             lock.read { entry.xrefContributions }?.let { return it }
             lock.write {
-                entry.xrefContributions ?: entry.module?.crossReferenceContributions(snapshot, entry.parsedArtifact).orEmpty().also {
+                entry.xrefContributions ?: entry.module?.takeUnless { entry.processingFailure != null }?.crossReferenceContributions(snapshot, entry.parsedArtifact).orEmpty().also {
                     entry.xrefContributions = it
                 }
             }
@@ -433,6 +472,7 @@ private class DocumentCacheEntry(
     val module: LanguageModule?,
     val diagnostics: List<Diagnostic>,
     val parsedArtifact: Any?,
+    val processingFailure: String? = null,
     var hierarchy: List<HierarchyNode>? = null,
     var xrefContributions: List<CrossReferenceContribution>? = null,
 )

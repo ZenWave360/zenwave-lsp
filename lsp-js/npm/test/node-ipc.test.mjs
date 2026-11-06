@@ -55,6 +55,8 @@ const checkoutText = [
 ].join('\n');
 const brokenZflUri = 'file:///workspace/broken.zfl';
 const brokenZflText = 'flow Broken {\n    when {{ do\n';
+const recursiveOpenApiUri = 'file:///workspace/orders-openapi.yml';
+const recursiveOpenApiText = readFileSync(new URL('./fixtures/orders-openapi.yml', import.meta.url), 'utf8');
 const REQUEST_FAILED = -32803;
 const INVALID_PARAMS = -32602;
 
@@ -78,6 +80,16 @@ function requestFailure(server, method, params) {
     (result) => assert.fail(`${method} answered ${JSON.stringify(result)} instead of an error`),
     (error) => error,
   );
+}
+
+function within(seconds, promise, description) {
+  let timeout;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(`${description} did not answer within ${seconds}s`)), seconds * 1_000);
+    }),
+  ]).finally(() => clearTimeout(timeout));
 }
 
 const ordersUri = 'file:///workspace/orders.zdl';
@@ -208,6 +220,23 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     for (const key of ['id', 'label', 'kind', 'language', 'sourceUri', 'sourceRange', 'children', 'relatedResources', 'uiHints']) {
       assert.ok(key in hierarchy[0], `hierarchy node has ${key}`);
     }
+  });
+
+  test('opening OpenAPI with recursive schemas still serves this and other documents', async () => {
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: recursiveOpenApiUri, languageId: 'yaml', version: 1, text: recursiveOpenApiText },
+    });
+    assert.deepEqual(await within(10, server.diagnosticsFor(recursiveOpenApiUri), 'OpenAPI diagnostics'), []);
+
+    const openApiHover = await within(10, server.connection.sendRequest('textDocument/hover', {
+      textDocument: { uri: recursiveOpenApiUri }, position: { line: 33, character: 16 },
+    }), 'OpenAPI hover');
+    assert.equal(openApiHover?.contents?.kind, 'markdown');
+
+    const zdlHover = await within(10, server.connection.sendRequest('textDocument/hover', {
+      textDocument: { uri: ordersUri }, position: { line: 5, character: 15 },
+    }), 'already open ZDL hover');
+    assert.equal(zdlHover?.contents?.kind, 'markdown');
   });
 
   test('incremental changes are applied', async () => {

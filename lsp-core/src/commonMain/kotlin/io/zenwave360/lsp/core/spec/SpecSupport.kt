@@ -243,8 +243,17 @@ private fun describeSpecNode(path: String, node: Any?): String? {
     }
 }
 
-private fun findUnresolvedRefs(node: Any?, path: String = "$"): Map<String, String> {
+private fun findUnresolvedRefs(
+    node: Any?,
+    path: String = "$",
+    ancestors: MutableList<Any> = mutableListOf(),
+): Map<String, String> {
     val results = linkedMapOf<String, String>()
+    if (node !is Map<*, *> && node !is List<*>) return results
+    if (ancestors.any { it === node }) return results
+    ancestors += node
+
+    try {
     when (node) {
         is Map<*, *> -> {
             val ref = node["\$ref"] as? String
@@ -253,14 +262,17 @@ private fun findUnresolvedRefs(node: Any?, path: String = "$"): Map<String, Stri
             }
             node.forEach { (key, value) ->
                 val childKey = key as? String ?: return@forEach
-                results.putAll(findUnresolvedRefs(value, SemanticPointerEvaluator.appendProperty(path, childKey)))
+                results.putAll(findUnresolvedRefs(value, SemanticPointerEvaluator.appendProperty(path, childKey), ancestors))
             }
         }
         is List<*> -> {
             node.forEachIndexed { index, child ->
-                results.putAll(findUnresolvedRefs(child, SemanticPointerEvaluator.appendIndex(path, index)))
+                results.putAll(findUnresolvedRefs(child, SemanticPointerEvaluator.appendIndex(path, index), ancestors))
             }
         }
+    }
+    } finally {
+        ancestors.removeAt(ancestors.lastIndex)
     }
     return results
 }

@@ -184,6 +184,27 @@ class PlatformContractsTest {
         assertEquals(2, module.parseCalls)
     }
 
+    @Test
+    fun processingFailurePublishesADiagnosticAndDoesNotPreventOtherDocumentsBeingServed() {
+        val server = ZenwaveLanguageServer(
+            modules = listOf(FakeLanguageModule("bad", parsingFailure = true), FakeLanguageModule()),
+            sessionStore = InMemoryDocumentSessionStore(),
+            crossReferenceIndex = InMemoryCrossReferenceIndex()
+        )
+        val bad = DocumentSnapshot(DocumentRef("file:///workspace/bad.bad", "bad", 1), "bad")
+        val good = DocumentSnapshot(DocumentRef("file:///workspace/orders.zdl", "zdl", 1), "entity Order {}")
+
+        server.open(bad)
+
+        assertEquals("document-processing-failed", server.diagnostics(bad.ref.uri).single().code)
+        assertNotNull(server.processingFailure(bad.ref.uri))
+        assertNull(server.hover(bad.ref.uri, Position(0, 0)))
+
+        server.open(good)
+
+        assertNotNull(server.hover(good.ref.uri, Position(0, 0)))
+    }
+
     private fun sampleRange() =
         Range(
             start = Position(0, 0),
@@ -191,15 +212,16 @@ class PlatformContractsTest {
         )
 }
 
-private class FakeLanguageModule : LanguageModule {
+private class FakeLanguageModule(
+    override val languageId: String = "zdl",
+    private val parsingFailure: Boolean = false,
+) : LanguageModule {
     var parseCalls: Int = 0
-
-    override val languageId: String = "zdl"
 
     override val capabilities: LanguageCapabilities =
         LanguageCapabilities(
             languageId = languageId,
-            extensions = listOf(".zdl"),
+            extensions = listOf(".$languageId"),
             supportsHover = true,
             supportsDefinition = true,
             supportsCompletion = false,
@@ -209,14 +231,16 @@ private class FakeLanguageModule : LanguageModule {
             supportsFormatting = true
         )
 
-    override fun parse(snapshot: DocumentSnapshot): ParseResult =
-        ParseResult(
+    override fun parse(snapshot: DocumentSnapshot): ParseResult {
+        if (parsingFailure) throw IllegalStateException("test processing failure")
+        return ParseResult(
             documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "entities.Order"),
             model = mapOf("name" to "Order"),
             diagnostics = diagnostics(snapshot)
         ).also {
             parseCalls += 1
         }
+    }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
         listOf(
