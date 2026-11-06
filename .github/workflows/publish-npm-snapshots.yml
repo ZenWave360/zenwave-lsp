@@ -48,7 +48,7 @@ jobs:
           while true; do
             active=0
             for status in queued in_progress waiting pending requested; do
-              if ! count=$(gh run list -R "$DSL_REPO" --workflow "$DSL_WORKFLOW" --branch "$DSL_BRANCH"                   --status "$status" --json databaseId --jq 'length'); then
+              if ! count=$(gh run list -R "$DSL_REPO" --workflow "$DSL_WORKFLOW" --branch "$DSL_BRANCH" --status "$status" --json databaseId --jq 'length'); then
                 echo "Could not list $status runs of $DSL_REPO, will retry"
                 count=1
               fi
