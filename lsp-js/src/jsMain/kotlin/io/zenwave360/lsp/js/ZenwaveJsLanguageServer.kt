@@ -240,6 +240,7 @@ class ZenwaveJsLanguageServer(
         )
         documentTexts[uri] = text
         server.open(snapshot)
+        logProcessingFailure(uri)
         publishDiagnosticsIfHandled(snapshot)
     }
 
@@ -252,6 +253,7 @@ class ZenwaveJsLanguageServer(
             .fold(current) { text, change -> applyContentChange(text, change) }
         documentTexts[uri] = nextText
         server.change(uri, nextText, version)
+        logProcessingFailure(uri)
         publishDiagnosticsIfHandled(DocumentSnapshot(DocumentRef(uri, "", version), nextText))
     }
 
@@ -328,6 +330,12 @@ class ZenwaveJsLanguageServer(
                 "diagnostics" to server.diagnostics(uri).map(::diagnosticToJson).toTypedArray(),
             )
         )
+    }
+
+    private fun logProcessingFailure(uri: String) {
+        val failure = server.processingFailure(uri) ?: return
+        val console = connection.console
+        if (isPresent(console)) console.warn("Could not process $uri: $failure")
     }
 
     private fun applyContentChange(current: String, change: dynamic): String {

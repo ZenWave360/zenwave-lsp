@@ -181,6 +181,7 @@ class ZenwaveLspServer(
         )
         documentTexts[document.uri] = document.text
         server.open(snapshot)
+        logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
     }
 
@@ -198,6 +199,7 @@ class ZenwaveLspServer(
             ),
             text = nextText
         )
+        logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
     }
 
@@ -395,6 +397,11 @@ class ZenwaveLspServer(
             }
         }
         client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(snapshot.ref.uri, diagnostics))
+    }
+
+    private fun logProcessingFailure(uri: String) {
+        val failure = server.processingFailure(uri) ?: return
+        client?.logMessage(MessageParams(MessageType.Warning, "Could not process $uri: $failure"))
     }
 
     private fun applyContentChanges(current: String, changes: List<TextDocumentContentChangeEvent>): String =
