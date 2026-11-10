@@ -277,6 +277,23 @@ class HierarchyRequestTest {
     }
 
     @Test
+    fun theStoredPositionOfASystemResolvesToTheSymbolOfItsName() = runTest {
+        val server = server()
+        val flowUri = "file:///workspace/stored/checkout.zfl"
+        val zdlUri = "file:///workspace/stored/orders/model.zdl"
+        server.open(DocumentSnapshot(DocumentRef(flowUri, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        server.open(DocumentSnapshot(DocumentRef(zdlUri, "zdl", 1), ORDERS_MODEL_ZDL.replace("\n", "\r\n")))
+        val system = server.conceptualHierarchy(flowUri).flatten().single { it.kind == "system" }
+        val nameLine = lineOf(CHECKOUT_FLOW_ZFL, "Orders {")
+
+        val byName = assertNotNull(server.symbolAt(flowUri, Position(nameLine, CHECKOUT_FLOW_ZFL.lines()[nameLine].indexOf("Orders"))))
+        val stored = server.symbolAt(system.source.uri, system.source.range.start)
+
+        assertEquals(system.id, byName.semanticId)
+        assertNotNull(stored, "no symbol at the stored position ${system.source}")
+    }
+
+    @Test
     fun aReferenceSaysWhereItsTargetIsDeclared() {
         val server = server()
         val flowUri = "file:///workspace/uses/checkout.zfl"
