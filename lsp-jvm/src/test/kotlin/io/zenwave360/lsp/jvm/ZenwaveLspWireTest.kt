@@ -208,6 +208,17 @@ class ZenwaveLspWireTest {
     }
 
     @Test
+    fun initializeOpensTheManifestNamedInInitializationOptions() {
+        val manifestUri = "file:///workspace/missing/zenwave-architecture.yml"
+
+        initialize("""{"zenwave":{"configUri":"file:///workspace/.zenwave/config.yml","projectManifestUri":"$manifestUri"}}""")
+
+        val status = request("zenwave/workspaceStatus", "{}").asJsonObject
+        assertEquals(manifestUri, status["manifestUri"].asString, "the manifest named by the client is the one opened: $status")
+        assertTrue(status["state"].asString != "none", "the workspace was attempted, not left unopened: $status")
+    }
+
+    @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()
         open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)
