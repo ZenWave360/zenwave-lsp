@@ -25,6 +25,18 @@ class ZenwaveInitializationOptionsTest {
     }
 
     @Test
+    fun parsesZenwaveInitializationOptionsFromTheJsonLsp4jReadsOffTheWire() {
+        val options = parseZenwaveInitializationOptions(
+            com.google.gson.JsonParser.parseString(
+                """{"zenwave":{"configUri":"file:///workspace/.zenwave/config.yml","projectManifestUri":"file:///workspace/zenwave-architecture.yml"}}"""
+            )
+        )
+
+        assertEquals("file:///workspace/.zenwave/config.yml", options?.configUri)
+        assertEquals("file:///workspace/zenwave-architecture.yml", options?.projectManifestUri)
+    }
+
+    @Test
     fun returnsNullWhenZenwaveInitializationOptionsAreAbsent() {
         assertNull(parseZenwaveInitializationOptions(emptyMap<String, Any?>()))
     }
