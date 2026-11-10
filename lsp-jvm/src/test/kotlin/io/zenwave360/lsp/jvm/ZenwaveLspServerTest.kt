@@ -292,7 +292,7 @@ class ZenwaveLspServerTest {
             """
             systems {
                 Orders {
-                    service OrdersService for(Order) {
+                    service OrdersService for (Order) {
                         commands: createOrder
                     }
                 }
