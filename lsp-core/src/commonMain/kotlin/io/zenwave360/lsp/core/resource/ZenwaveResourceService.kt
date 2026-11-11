@@ -102,6 +102,9 @@ class ZenwaveResourceService(
 
     private suspend fun serve(uri: String, preAuthorized: ResourceCheck.Allowed? = null): Served {
         val key = keyOf(uri)
+        // A cached entry is served only to a request the check still allows: what the server read for a reference
+        // (an import) does not become readable by itself.
+        if (preAuthorized == null && !ZenwaveResources.isRemoteManifestAddress(key)) authorize(key)
         while (true) {
             val mine = CompletableDeferred<Served>()
             val other: CompletableDeferred<Served>? = mutex.withLock {

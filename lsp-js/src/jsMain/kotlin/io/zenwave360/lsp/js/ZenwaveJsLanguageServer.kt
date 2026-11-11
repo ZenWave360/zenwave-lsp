@@ -323,7 +323,9 @@ class ZenwaveJsLanguageServer(
         val uri = params.textDocument.uri as String
         documentTexts.remove(uri)
         server.close(uri)
-        connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to emptyArray<Any>()))
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        val kept = server.importedDiagnosticsFor(uri)
+        connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to (kept?.map(::diagnosticToJson) ?: emptyList()).toTypedArray()))
         server.releaseImports(uri).forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
     }
 
@@ -390,13 +392,15 @@ class ZenwaveJsLanguageServer(
     private fun publishImportDiagnostics(uri: String) {
         if (!uri.startsWith("zenwave:")) return
         val publishing: Promise<Unit> = GlobalScope.promise {
-            val result = server.importDiagnostics(uri)
-            result.documents.forEach { (documentUri, diagnostics) ->
-                connection.sendDiagnostics(
-                    jsonObject("uri" to documentUri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray())
-                )
+            // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+            server.publishImportDiagnostics(uri) { result ->
+                result.documents.forEach { (documentUri, diagnostics) ->
+                    connection.sendDiagnostics(
+                        jsonObject("uri" to documentUri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray())
+                    )
+                }
+                result.cleared.forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
             }
-            result.cleared.forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
         }
         importsPublishing = publishing
         publishing.catch { error: dynamic ->

@@ -219,7 +219,8 @@ class ZenwaveLspServer(
         val uri = params.textDocument.uri
         documentTexts.remove(uri)
         server.close(uri)
-        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, emptyList()))
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, server.importedDiagnosticsFor(uri) ?: emptyList()))
         server.releaseImports(uri).forEach { client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(it, emptyList())) }
     }
 
@@ -440,14 +441,18 @@ class ZenwaveLspServer(
         if (!uri.startsWith("zenwave:")) return
         CompletableFuture.runAsync {
             try {
-                val result = runBlocking { server.importDiagnostics(uri) }
-                result.documents.forEach { (documentUri, diagnostics) ->
-                    client?.publishDiagnostics(
-                        org.eclipse.lsp4j.PublishDiagnosticsParams(documentUri, DtoMapper.toPublishDiagnostics(documentUri, diagnostics).diagnostics)
-                    )
-                }
-                result.cleared.forEach {
-                    client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(it, emptyList()))
+                // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+                runBlocking {
+                    server.publishImportDiagnostics(uri) { result ->
+                        result.documents.forEach { (documentUri, diagnostics) ->
+                            client?.publishDiagnostics(
+                                org.eclipse.lsp4j.PublishDiagnosticsParams(documentUri, DtoMapper.toPublishDiagnostics(documentUri, diagnostics).diagnostics)
+                            )
+                        }
+                        result.cleared.forEach {
+                            client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(it, emptyList()))
+                        }
+                    }
                 }
             } catch (failure: Exception) {
                 client?.logMessage(MessageParams(MessageType.Warning, "Could not read the imports of $uri: ${failure.message}"))

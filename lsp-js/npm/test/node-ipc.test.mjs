@@ -841,7 +841,7 @@ describe('The server reads the imports of a zenwave: document itself (AR-R9, AR-
     assert.deepEqual(hierarchy, []);
     const flowHierarchy = await within(10, server.connection.sendRequest('zenwave/hierarchy', { uri: flowUri }), 'hierarchy of the flow');
     assert.ok(flowHierarchy.length > 0);
-    assert.equal(requests.length, before, 'opening it requested nothing');
+    assert.equal(requests.length, before, 'opening it requested nothing: ' + requests.slice(before));
   });
 });
 

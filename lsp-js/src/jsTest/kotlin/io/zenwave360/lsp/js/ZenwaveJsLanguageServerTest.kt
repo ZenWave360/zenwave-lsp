@@ -560,7 +560,7 @@ flow CheckoutFlow {
             val published = recording.diagnostics.associate { (it.uri as String) to (it.diagnostics as Array<dynamic>) }
             assertTrue(published.getValue(zdlUri).any { it.severity == 1 }, "the imported ZDL's diagnostics: ${JSON.stringify(recording.diagnostics.toTypedArray())}")
             assertEquals(1, published.getValue(flowUri).count { it.code == "import-not-declared" })
-            assertEquals(listOf("$raw/orders/model.zdl"), loaded, "read once by the server; nothing outside the owner")
+            assertEquals(listOf("$raw/checkout.zfl", "$raw/orders/model.zdl"), loaded, "the document and its import, once each, by the server; nothing outside the owner")
 
             val hierarchy = (recording.call("zenwave/hierarchy", jsonObject("uri" to flowUri)) as Promise<dynamic>).await()
             assertTrue(JSON.stringify(hierarchy).contains("\"sourceUri\":\"$zdlUri\""), "the hierarchy draws on the imported ZDL")

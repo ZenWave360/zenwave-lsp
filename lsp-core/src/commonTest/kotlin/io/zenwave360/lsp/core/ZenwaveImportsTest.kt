@@ -17,7 +17,10 @@ import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -31,10 +34,12 @@ import kotlin.test.assertTrue
 class ZenwaveImportsTest {
     private class Recording(val documents: MutableMap<String, String> = mutableMapOf()) : DocumentLoader {
         val loaded = mutableListOf<String>()
+        var gate: CompletableDeferred<Unit>? = null
         override fun canLoad(uri: String) = true
         override suspend fun load(uri: String): String {
             loaded += uri
-            return documents[uri] ?: error("HTTP 404 for $uri")
+            if (uri.endsWith("/orders/model.zdl")) gate?.await()
+            return documents[uri] ?: documents[uri.replace("%20", " ")] ?: error("HTTP 404 for $uri")
         }
     }
 
@@ -55,6 +60,7 @@ class ZenwaveImportsTest {
                 version: 1.0.0
                 artifacts:
                   - { type: zfl, path: checkout.zfl, version: 0.1.0 }
+                  - { type: zfl, path: other.zfl, version: 0.1.0 }
                   - { type: openapi, path: openapi.yml, version: 0.1.0 }
     """.trimIndent()
 
@@ -147,7 +153,7 @@ class ZenwaveImportsTest {
         assertEquals(DiagnosticSeverity.ERROR, escaping.severity)
         assertEquals(1, own.single { it.code == "import-unreadable" }.range.start.line)
         assertEquals(2, own.single { it.code == "import-not-declared" && it.range.start.line == 2 }.range.start.line, "another scheme is refused")
-        assertEquals(listOf("$raw/missing.zdl"), io.loaded.filter { !it.endsWith("model.zdl") }, "only the allowed import was tried")
+        assertEquals(listOf("$raw/missing.zdl"), io.loaded.filter { !it.endsWith("model.zdl") && !it.endsWith("checkout.zfl") }, "only the allowed import was tried")
     }
 
     @Test
@@ -189,17 +195,118 @@ class ZenwaveImportsTest {
     }
 
     @Test
-    fun changingAnImportClearsTheDocumentsThatNoLongerAre() = runTest {
+    fun closingTheRootClearsWhatItImported() = runTest {
         val (server, _) = fixture(mapOf("checkout.zfl" to CHECKOUT_FLOW_ZFL, "orders/model.zdl" to brokenZdl))
         val flow = "$base/checkout.zfl"
         server.openDocument(flow, "zfl", CHECKOUT_FLOW_ZFL)
         val zdl = "$base/orders/model.zdl"
         assertTrue(zdl in server.importDiagnostics(flow).documents)
 
-        server.change(flow, CHECKOUT_FLOW_ZFL.replace("@zdl(\"orders/model.zdl\")", ""), 2)
-        val after = server.importDiagnostics(flow)
-        assertEquals(setOf(zdl), after.cleared)
-        assertFalse(zdl in after.documents)
-        assertEquals(emptySet(), server.releaseImports(flow))
+        server.close(flow)
+        assertEquals(setOf(zdl), server.releaseImports(flow))
+        assertEquals(emptySet(), server.releaseImports(flow), "nothing leaks")
+        assertTrue(server.importDiagnostics(flow).documents.isEmpty(), "a closed document is not read")
+    }
+
+    @Test
+    fun manyOrRepeatedImportsAreReadWithinTheCapsAndOneDiagnosticSaysTheRestWasNotFollowed() = runTest {
+        val many = (1..300).joinToString("\n") { "@import(\"m$it.zdl\")" } + "\n" + "@import(\"same.zdl\")\n".repeat(1000)
+        val (server, io) = fixture(mapOf("checkout.zfl" to many + CHECKOUT_FLOW_ZFL))
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", many)
+        io.loaded.clear()
+
+        val own = server.importDiagnostics(flow).documents.getValue(flow)
+
+        assertTrue(io.loaded.size <= 21, "reads are capped per document: ${io.loaded.size}")
+        assertEquals(1, io.loaded.count { it.endsWith("/m1.zdl") })
+        assertEquals(1, own.count { it.code == "import-limit" && it.severity == DiagnosticSeverity.WARNING })
+        assertEquals(20, own.count { it.code == "import-unreadable" })
+
+        io.loaded.clear()
+        server.change(flow, many + CHECKOUT_FLOW_ZFL, 2)
+        server.conceptualHierarchy(flow)
+        assertTrue(io.loaded.size <= 21, "the hierarchy path is capped too: ${io.loaded.size}")
+    }
+
+    @Test
+    fun importsComeFromTheContentTheServerReadAndNotFromTheEditorsText() = runTest {
+        val (server, io) = fixture(mapOf("checkout.zfl" to CHECKOUT_FLOW_ZFL, "orders/model.zdl" to ORDERS_MODEL_ZDL, "internal/secrets.zdl" to "secret"))
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", "@import(\"internal/secrets.zdl\")\n$CHECKOUT_FLOW_ZFL")
+        io.loaded.clear()
+
+        val own = server.importDiagnostics(flow).documents.getValue(flow)
+
+        assertFalse(io.loaded.any { it.endsWith("secrets.zdl") }, "editor text opens no door: ${io.loaded}")
+        assertTrue(own.none { it.code?.startsWith("import-") == true })
+        val refused = runCatching { server.readResource("$base/internal/secrets.zdl") }.exceptionOrNull()
+        assertTrue(refused is io.zenwave360.lsp.core.resource.ResourceRequestException, "$refused")
+        assertEquals(1, io.loaded.count { it.endsWith("/orders/model.zdl") })
+        assertTrue(server.readResource("$base/orders/model.zdl").content.isNotEmpty(), "an import in the content read is served")
+    }
+
+    @Test
+    fun aDocumentTwoRootsImportKeepsItsDiagnosticsUntilTheLastRootLeaves() = runTest {
+        val (server, _) = fixture(mapOf("checkout.zfl" to CHECKOUT_FLOW_ZFL, "other.zfl" to CHECKOUT_FLOW_ZFL, "orders/model.zdl" to brokenZdl))
+        val a = "$base/checkout.zfl"
+        val b = "$base/other.zfl"
+        val zdl = "$base/orders/model.zdl"
+        server.openDocument(a, "zfl", CHECKOUT_FLOW_ZFL)
+        server.openDocument(b, "zfl", CHECKOUT_FLOW_ZFL)
+        assertTrue(zdl in server.importDiagnostics(a).documents)
+        assertTrue(zdl in server.importDiagnostics(b).documents)
+
+        server.close(a)
+        assertEquals(emptySet(), server.releaseImports(a), "the other root still imports it")
+        assertTrue(server.importedDiagnosticsFor(zdl)!!.isNotEmpty())
+
+        server.close(b)
+        assertEquals(setOf(zdl), server.releaseImports(b))
+        assertNull(server.importedDiagnosticsFor(zdl))
+    }
+
+    @Test
+    fun aSupersededOrClosedReadingPublishesNothing() = runTest {
+        val (server, io) = fixture(mapOf("checkout.zfl" to CHECKOUT_FLOW_ZFL, "orders/model.zdl" to brokenZdl))
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", CHECKOUT_FLOW_ZFL)
+        val published = mutableListOf<io.zenwave360.lsp.core.platform.ImportDiagnostics>()
+
+        io.gate = CompletableDeferred()
+        val superseded = launch { server.publishImportDiagnostics(flow) { published += it } }
+        yield()
+        server.change(flow, CHECKOUT_FLOW_ZFL + "\n", 2)
+        io.gate!!.complete(Unit)
+        superseded.join()
+        assertEquals(emptyList(), published, "a newer version supersedes the reading")
+
+        server.publishImportDiagnostics(flow) { published += it }
+        assertEquals(1, published.size)
+        server.close(flow)
+        assertEquals(setOf("$base/orders/model.zdl"), server.releaseImports(flow))
+        server.publishImportDiagnostics(flow) { published += it }
+        assertEquals(1, published.size, "a closed document publishes nothing")
+        assertEquals(emptySet(), server.releaseImports(flow), "nothing leaks")
+    }
+
+    @Test
+    fun aDependencyWithASpaceMatchesTheAddressTheServerRead() = runTest {
+        val flowText = CHECKOUT_FLOW_ZFL.replace("orders/model.zdl", "my model.zdl")
+        val (server, _) = fixture(mapOf("checkout.zfl" to flowText, "my model.zdl" to ORDERS_MODEL_ZDL))
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", flowText)
+
+        val service = server.conceptualHierarchy(flow).flatten().single { it.kind == "service" && it.label == "OrderService" }
+
+        assertTrue(service.source.uri.endsWith("my model.zdl") || service.source.uri.endsWith("my%20model.zdl"), service.source.uri)
+        assertTrue(service.children.any { it.label == "createOrder" && it.source.uri == service.source.uri }, "the ZDL was read")
+    }
+
+    @Test
+    fun aNonModelZenwaveDocumentIsNotFetchedForAHierarchy() = runTest {
+        val (server, io) = fixture(mapOf("openapi.yml" to "openapi: 3.0.0\n"))
+        assertEquals(emptyList(), server.conceptualHierarchy("$base/openapi.yml"))
+        assertEquals(emptyList(), io.loaded)
     }
 }
