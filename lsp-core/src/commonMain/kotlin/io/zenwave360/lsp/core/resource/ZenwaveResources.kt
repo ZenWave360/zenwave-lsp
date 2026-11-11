@@ -241,6 +241,7 @@ object ZenwaveResources {
                 errorMessage = error.message,
                 candidates = error.candidates,
                 finalError = error.finalError,
+                candidateErrors = error.candidateErrors,
             )
         } catch (error: ManifestResolutionException) {
             ManifestResourceLoadResult(path = path, errorMessage = error.message)

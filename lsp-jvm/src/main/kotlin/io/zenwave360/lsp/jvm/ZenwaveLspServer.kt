@@ -301,9 +301,14 @@ class ZenwaveLspServer(
             JsonParser.parseString(ResourceJson.content(runBlocking { server.readResource(uri) }))
         }
 
-    @Suppress("SENSELESS_COMPARISON") // Gson leaves an absent uri null
-    private fun requireResourceUri(request: ResourceRequest?): String =
-        request?.uri.takeIf { it != null } ?: throw InvalidRequestParamsException("uri is required")
+    /** The uri must be a JSON string: Gson would otherwise coerce a number to "3". */
+    private fun requireResourceUri(request: ResourceRequest?): String {
+        val uri = request?.uri
+        if (uri == null || !uri.isJsonPrimitive || !uri.asJsonPrimitive.isString) {
+            throw InvalidRequestParamsException("uri is required")
+        }
+        return uri.asString
+    }
 
     override fun forwardReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>> =
         CompletableFuture.completedFuture(

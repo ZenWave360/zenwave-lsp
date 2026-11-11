@@ -213,6 +213,63 @@ class ZenwaveResourceServiceTest {
         assertFalse(io.loaded.any { it.endsWith("/other.yml") })
     }
 
+    private val NL = "\n"
+
+    private suspend fun refService(io: Recording, reference: String): ZenwaveResourceService {
+        io.serve(openapiUrl, "components:" + NL + "  schemas:" + NL + "    A:" + NL + "      ${'$'}ref: '$reference'" + NL)
+        return service(io)
+    }
+
+    @Test
+    fun aReferenceThatLeavesTheOwnerOrIsAnotherSchemeOpensNothing() = runTest {
+        val escaping = refService(Recording(), "../../internal/secrets.yml")
+        escaping.read(openapi)
+        assertEquals(ResourceFailureKind.NOT_DECLARED, failure { escaping.read("zenwave:/$orders/0.1.0/internal/secrets.yml") }.kind)
+
+        val external = refService(Recording(), "https://external.invalid/?file=hidden.yml")
+        external.read(openapi)
+        assertEquals(ResourceFailureKind.NOT_DECLARED, failure { external.read("zenwave:/$orders/0.1.0/hidden.yml") }.kind)
+        assertEquals(ResourceFailureKind.NOT_DECLARED, failure { external.read("zenwave:/$orders/0.1.0/external.invalid/hidden.yml") }.kind)
+    }
+
+    @Test
+    fun anEncodedReferenceIsServedUnderItsEncodedAddress() = runTest {
+        val io = Recording()
+        io.serve("https://git.example.org/$orders/raw/schemas/a b.yml", "spaced")
+        io.serve("https://git.example.org/$orders/raw/schemas/a%20b.yml", "spaced")
+        val service = refService(io, "schemas/a%20b.yml")
+        service.read(openapi)
+        assertEquals("spaced", service.read("zenwave:/$orders/0.1.0/schemas/a%20b.yml").content)
+    }
+
+    @Test
+    fun theRemoteManifestIsServedFromTheTextItWasOpenedWithAndNotFetchedAgain() = runTest {
+        val io = Recording()
+        val loader = ZenWaveManifestLoader(listOf(io), null)
+        val service = ZenwaveResourceService(remoteManifestUri, loader.parse(remoteManifestUri, manifestText), loader, manifestText)
+        assertEquals(manifestText, service.read(ZENWAVE_REMOTE_MANIFEST_ADDRESS).content)
+        assertEquals(emptyList(), io.loaded)
+    }
+
+    @Test
+    fun everyCandidateCarriesWhatHappenedToIt() = runTest {
+        val io = object : DocumentLoader {
+            override fun canLoad(uri: String) = true
+            override suspend fun load(uri: String): String = error(if (uri.startsWith("file:")) "HTTP 403" else "HTTP 404")
+        }
+        val loader = ZenWaveManifestLoader(listOf(io), null)
+        val service = ZenwaveResourceService(localManifestUri, loader.parse(localManifestUri, manifestText), loader)
+        val error = failure { service.read(openapi) }
+        assertEquals(listOf("HTTP 403", "HTTP 404"), error.candidates.map { it.message })
+    }
+
+    @Test
+    fun redactRemovesEveryUserInfoSegmentUpToTheLastAt() {
+        val text = ZenwaveResourceService.redact("GET http://alice:prefix@SECRETTAIL@127.0.0.1:80/x failed")
+        assertFalse("SECRETTAIL" in text || "alice" in text || "prefix" in text, text)
+        assertTrue("@127.0.0.1:80/x" in text, text)
+    }
+
     @Test
     fun redactRemovesUserInfoQueryValuesAndAuthorizationText() {
         val text = ZenwaveResourceService.redact(

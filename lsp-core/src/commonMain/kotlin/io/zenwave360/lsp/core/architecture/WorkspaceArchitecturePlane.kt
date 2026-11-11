@@ -43,13 +43,14 @@ class WorkspaceArchitecturePlane(
         ): WorkspaceArchitecturePlane {
             if (runtime != null) return WorkspaceArchitecturePlane(runtime.open(manifestUri))
             val manifestLoader = guardedLoader(manifestUri, followManifestOrigin = true)
-            val manifest = manifestLoader.load(manifestUri)
+            val manifestText = manifestLoader.loadResourceText(manifestUri)
+            val manifest = manifestLoader.parse(manifestUri, manifestText)
             val workspace = WorkspaceRuntime(manifestLoader, ArchitectureGraphBuilder(guardedLoader(manifestUri, false)))
                 .build(manifest)
             // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),
             // so this loader is not the guard above: it reads the candidates the manifest's sources produce.
             val resourceLoader = ZenWaveManifestLoader(defaultLoaders(), archiveEntryLoader = null)
-            return WorkspaceArchitecturePlane(workspace, ZenwaveResourceService(manifestUri, manifest, resourceLoader))
+            return WorkspaceArchitecturePlane(workspace, ZenwaveResourceService(manifestUri, manifest, resourceLoader, manifestText))
         }
 
         private fun guardedLoader(manifestUri: String, followManifestOrigin: Boolean) = ZenWaveManifestLoader(

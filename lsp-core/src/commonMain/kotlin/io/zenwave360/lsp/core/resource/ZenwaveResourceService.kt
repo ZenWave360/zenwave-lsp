@@ -52,6 +52,8 @@ class ZenwaveResourceService(
     private val manifestUri: String,
     private val manifest: ZenWaveManifest,
     private val loader: ZenWaveManifestLoader,
+    /** The text the manifest was opened with; served as is, and read again only if absent (AR-R11). */
+    private val manifestText: String? = null,
 ) {
     private class Served(val address: String, val content: String, val source: ResourceSource)
 
@@ -124,7 +126,10 @@ class ZenwaveResourceService(
                 ResourceCandidate(
                     source = candidate.source,
                     url = redact(candidate.referenceUri()),
-                    message = if (index == result.candidates.lastIndex) result.finalError?.let(::redact) else null,
+                    message = (
+                        result.candidateErrors.getOrNull(index)
+                            ?: if (index == result.candidates.lastIndex) result.finalError else null
+                        )?.let(::redact),
                 )
             }
             throw ResourceRequestException(
@@ -144,7 +149,7 @@ class ZenwaveResourceService(
     }
 
     private suspend fun fetchManifest(key: String): Served {
-        val text = try {
+        val text = manifestText ?: try {
             loader.loadResourceText(manifestUri)
         } catch (error: CancellationException) {
             throw error
@@ -168,10 +173,12 @@ class ZenwaveResourceService(
         for (base in bases) {
             val origin = ZenwaveResources.parse(base.address) ?: continue
             if (origin.ownerId != target.ownerId || origin.version != target.version) continue
-            val relative = relativePath(origin.path, target.path) ?: continue
-            if (!mentions(base.content, relative)) continue
-            val check = ZenwaveResources.checkReference(manifest, base.address, relative, known)
-            if (check is ResourceCheck.Allowed) return check
+            // Only references actually written in the content are tried, each resolved by the library's own function;
+            // the request is allowed only when one of them resolves exactly to the requested address.
+            for (reference in referencesIn(base.content)) {
+                val check = ZenwaveResources.checkReference(manifest, base.address, reference, known)
+                if (check is ResourceCheck.Allowed && check.address.address == target.address) return check
+            }
         }
         throw notDeclared((declared as ResourceCheck.NotDeclared).reason)
     }
@@ -180,32 +187,15 @@ class ZenwaveResourceService(
         ResourceRequestException(ResourceFailureKind.NOT_DECLARED, "The address is not served: $reason")
 
     internal companion object {
-        /** The path of [target] as a reference written in the file at [base]; null when it cannot be written. */
-        fun relativePath(base: String, target: String): String? {
-            val from = base.split('/').dropLast(1)
-            val to = target.split('/')
-            var common = 0
-            while (common < from.size && common < to.size - 1 && from[common] == to[common]) common++
-            val up = from.size - common
-            val relative = List(up) { ".." } + to.drop(common)
-            return relative.joinToString("/").takeIf { it.isNotEmpty() }
-        }
+        private val REF_VALUE = Regex("""\${'$'}ref["']?\s*:\s*(?:"([^"]*)"|'([^']*)'|([^\s,}"']+))""")
+        private val LINK_TARGET = Regex("""\]\(\s*<?([^)\s>]+)""")
 
-        /** True when [content] holds [reference] as a whole token, as a `$ref` value or a link target is written. */
-        fun mentions(content: String, reference: String): Boolean {
-            var from = 0
-            while (true) {
-                val at = content.indexOf(reference, from)
-                if (at < 0) return false
-                val before = if (at == 0) ' ' else content[at - 1]
-                val after = content.getOrElse(at + reference.length) { ' ' }
-                val beforeOk = !(before.isLetterOrDigit() || before in "_-.%") &&
-                    (before != '/' || (at >= 2 && content.startsWith("./", at - 2)))
-                val afterOk = !(after.isLetterOrDigit() || after in "_-.%/")
-                if (beforeOk && afterOk) return true
-                from = at + 1
-            }
-        }
+        /** The reference strings written in [content]: `$ref` values and Markdown link or image targets. */
+        fun referencesIn(content: String): List<String> =
+            (
+                REF_VALUE.findAll(content).map { it.groupValues[1].ifEmpty { it.groupValues[2] }.ifEmpty { it.groupValues[3] } } +
+                    LINK_TARGET.findAll(content).map { it.groupValues[1] }
+                ).filter { it.isNotEmpty() }.distinct().toList()
 
         /** The `file:` URI of a workspace candidate, whether the library wrote it as a URI or as a path. */
         fun fileUriOf(uri: String): String? = when {
@@ -215,7 +205,7 @@ class ZenwaveResourceService(
             else -> null
         }
 
-        private val USERINFO = Regex("(://)[^/@\\s]+@")
+        private val USERINFO = Regex("(://)[^/?#\\s]*@")
         private val QUERY_VALUE = Regex("([?&][^=&#\\s]+)=([^&#\\s]*)")
         private val SCHEME_CREDENTIAL = Regex("\\b(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{6,}", RegexOption.IGNORE_CASE)
         private val HEADER_CREDENTIAL =

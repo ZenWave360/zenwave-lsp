@@ -340,12 +340,16 @@ class ZenwaveLspWireTest {
         }
         assertEquals(total, requests.size)
 
-        // The remote manifest is served under its own address.
+        // The remote manifest is served under its own address, from the text the workspace opened with.
+        val manifestFetches = requests.count { it.startsWith("/arch/") }
         val manifest = request("zenwave/readResource", resourceParams("zenwave:/.zenwave-manifest.yml")).asJsonObject
         assertTrue("contentResolution" in manifest["content"].asString)
         assertEquals("manifest", request("zenwave/statResource", resourceParams("zenwave:/.zenwave-manifest.yml")).asJsonObject["source"].asJsonObject["kind"].asString)
+        assertEquals(manifestFetches, requests.count { it.startsWith("/arch/") }, "serving the manifest does not fetch it again")
 
         assertEquals(-32602, requestError("zenwave/statResource", "{}").first)
+        assertEquals(-32602, requestError("zenwave/statResource", """{"uri":3}""").first, "a number is not coerced to a string")
+        assertEquals(-32602, requestError("zenwave/readResource", """{"uri":null}""").first)
     }
 
     @Test
