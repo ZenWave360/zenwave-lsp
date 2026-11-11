@@ -30,6 +30,7 @@ class ZenwaveResourcesTest {
             docs:
               handbook: "docs/Hand book.md"
               adrs: "adrs/"
+              decisions: "adrs/*.md"
               external: "https://example.org/x.md"
             subdomains:
               checkout:
@@ -56,11 +57,17 @@ class ZenwaveResourcesTest {
 
     private val orders = "sales.checkout.orders"
 
-    private fun ZenWaveManifest.allowed(address: String, readThrough: String? = null) =
-        assertIs<ResourceCheck.Allowed>(ZenwaveResources.check(this, address, readThrough), address)
+    private fun ZenWaveManifest.allowed(address: String) =
+        assertIs<ResourceCheck.Allowed>(ZenwaveResources.check(this, address), address)
 
-    private fun ZenWaveManifest.refused(address: String, readThrough: String? = null) =
-        assertIs<ResourceCheck.NotDeclared>(ZenwaveResources.check(this, address, readThrough), address)
+    private fun ZenWaveManifest.refused(address: String) =
+        assertIs<ResourceCheck.NotDeclared>(ZenwaveResources.check(this, address), address)
+
+    private fun ZenWaveManifest.referenceAllowed(base: String, reference: String, known: Collection<String> = emptyList()) =
+        assertIs<ResourceCheck.Allowed>(ZenwaveResources.checkReference(this, base, reference, known), "$base -> $reference")
+
+    private fun ZenWaveManifest.referenceRefused(base: String, reference: String, known: Collection<String> = emptyList()) =
+        assertIs<ResourceCheck.NotDeclared>(ZenwaveResources.checkReference(this, base, reference, known), "$base -> $reference")
 
     @Test
     fun anArtifactOfAServiceHasTheServiceIdItsOwnVersionAndItsPath() = runTest {
@@ -170,31 +177,80 @@ class ZenwaveResourcesTest {
     fun aRelativeReferenceInsideADeclaredArtifactKeepsOwnerAndVersion() = runTest {
         val manifest = manifest()
         val base = "zenwave:/$orders/0.1.0/openapi.yml"
-        val reference = ZenwaveResources.resolveReference(base, "schemas/common.yml")
-        assertEquals("zenwave:/$orders/0.1.0/schemas/common.yml", reference)
+        assertEquals("zenwave:/$orders/0.1.0/schemas/common.yml", ZenwaveResources.resolveReference(base, "schemas/common.yml"))
 
-        val allowed = manifest.allowed(reference!!, readThrough = base)
+        val allowed = manifest.referenceAllowed(base, "schemas/common.yml#/Order")
         assertNull(allowed.declared, "a reference is not an entry of the manifest")
         assertEquals(orders, allowed.owner.id)
         assertEquals("0.1.0", allowed.address.version)
+        assertEquals("schemas/common.yml", allowed.address.path)
         assertFalse(ZenwaveResources.declaredResources(manifest).any { it.path == "schemas/common.yml" })
     }
 
     @Test
     fun theSamePathAskedForFromNowhereIsRefused() = runTest {
+        manifest().refused("zenwave:/$orders/0.1.0/schemas/common.yml")
+    }
+
+    @Test
+    fun onlyTheReferenceActuallyFoundIsOpenedNotEveryPathOfTheOwner() = runTest {
         val manifest = manifest()
-        manifest.refused("zenwave:/$orders/0.1.0/schemas/common.yml")
-        manifest.refused("zenwave:/$orders/0.1.0/schemas/common.yml", readThrough = null)
+        val base = "zenwave:/$orders/0.1.0/openapi.yml"
+        manifest.referenceAllowed(base, "schemas/common.yml")
+        manifest.refused("zenwave:/$orders/0.1.0/internal/secrets.yml")
+        manifest.referenceRefused(base, "../../secrets.yml")
+        manifest.referenceRefused(base, "/internal/secrets.yml")
+    }
+
+    @Test
+    fun theContentTheReferenceWasFoundInMustItselfBeAllowed() = runTest {
+        val manifest = manifest()
+        manifest.referenceRefused("zenwave:/$orders/0.1.0/undeclared.yml", "schemas/common.yml")
+        manifest.referenceRefused("zenwave:/$orders/9.9.9/openapi.yml", "schemas/common.yml")
+        manifest.referenceRefused("not an address", "schemas/common.yml")
+        // a reference inside a reference works only for an address the server itself allowed and read
+        val nested = "zenwave:/$orders/0.1.0/schemas/common.yml"
+        manifest.referenceRefused(nested, "other.yml")
+        assertEquals("schemas/other.yml", manifest.referenceAllowed(nested, "other.yml", known = listOf(nested)).address.path)
+        val wrongVersion = "zenwave:/$orders/9.9.9/schemas/common.yml"
+        manifest.referenceRefused(wrongVersion, "other.yml", known = listOf(wrongVersion))
     }
 
     @Test
     fun aReferenceCannotChangeOwnerOrVersion() = runTest {
         val manifest = manifest()
         val base = "zenwave:/$orders/0.1.0/openapi.yml"
-        manifest.refused("zenwave:/$orders/0.2.0/schemas/common.yml", readThrough = base)
-        manifest.refused("zenwave:/sales/2.0.0/schemas/common.yml", readThrough = base)
-        manifest.refused("zenwave:/$orders/0.1.0/schemas/common.yml", readThrough = "zenwave:/$orders/9.9.9/openapi.yml")
-        manifest.refused("zenwave:/$orders/0.1.0/schemas/common.yml", readThrough = "not an address")
+        manifest.referenceRefused(base, "zenwave:/$orders/0.2.0/schemas/common.yml")
+        manifest.referenceRefused(base, "https://evil.example/x.yml")
+    }
+
+    @Test
+    fun aDoublyEncodedReferenceIsRefusedSoNoFileUriDecodesItAgain() = runTest {
+        val manifest = manifest()
+        val base = "zenwave:/$orders/0.1.0/openapi.yml"
+        assertNull(ZenwaveResources.resolveReference(base, "%252e%252e/%252e%252e/secret.yml"))
+        assertNull(ZenwaveResources.resolveReference(base, "a%2520b.yml"))
+        manifest.referenceRefused(base, "%252e%252e/%252e%252e/secret.yml")
+        manifest.refused("zenwave:/$orders/0.1.0/%252e%252e/secret.yml")
+        // a single level of encoding still works, and what it decodes to contains no percent sign
+        assertEquals("zenwave:/$orders/0.1.0/a%20b.yml", ZenwaveResources.resolveReference(base, "a%20b.yml"))
+    }
+
+    @Test
+    fun theWorkspaceCandidatesOfAReferenceHoldNoEncodedDotsOrDotDotSegments() = runTest {
+        val loader = ZenWaveManifestLoader(emptyList(), null)
+        val local = loader.parse(
+            "file:///work/architecture/zenwave-architecture.yml",
+            manifestText.replace("contentResolution: [git]", "contentResolution: [workspace, git]"),
+        )
+        val base = "zenwave:/$orders/0.1.0/openapi.yml"
+        val allowed = local.referenceAllowed(base, "a%20b/c.yml")
+        val candidates = loader.buildOwnedDocumentCandidates(local, allowed.owner, allowed.address.version, allowed.address.path)
+        assertTrue(candidates.any { it.source == "workspace" }, candidates.toString())
+        candidates.forEach {
+            assertFalse("%2e" in it.uri.lowercase() || "/../" in it.uri.substringAfter("//"), it.uri)
+        }
+        assertEquals("a b/c.yml", allowed.address.path)
     }
 
     @Test
@@ -216,13 +272,15 @@ class ZenwaveResourcesTest {
         val manifest = manifest()
         val flagged = ZenwaveResources.declaredResources(manifest).filter { it.flag != null }
         assertEquals(
-            mapOf<String?, DeclaredFlag?>("adrs" to DeclaredFlag.FOLDER, "external" to DeclaredFlag.ABSOLUTE_URI),
+            mapOf<String?, DeclaredFlag?>("adrs" to DeclaredFlag.FOLDER, "decisions" to DeclaredFlag.FOLDER, "external" to DeclaredFlag.ABSOLUTE_URI),
             flagged.associate { it.docKey to it.flag },
         )
         assertTrue(flagged.all { it.address == null })
         // never served, whichever way it is asked for
         manifest.refused("zenwave:/sales/2.0.0/adrs/")
         manifest.refused("zenwave:/sales/2.0.0/adrs")
+        manifest.refused("zenwave:/sales/2.0.0/adrs/*.md")
+        manifest.refused("zenwave:/sales/2.0.0/adrs/%2A.md")
         manifest.refused("zenwave:/sales/2.0.0/https:/example.org/x.md")
     }
 
@@ -245,7 +303,7 @@ class ZenwaveResourcesTest {
         val document = ZenwaveResources.load(loader, manifest, manifest.allowed("zenwave:/$orders/1.0.0/CHANGELOG.md"))
         assertEquals("content of https://git.example.org/$orders/raw/CHANGELOG.md", document.content)
         val reference = ZenwaveResources.load(
-            loader, manifest, manifest.allowed("zenwave:/$orders/0.1.0/schemas/common.yml", readThrough = base),
+            loader, manifest, manifest.referenceAllowed(base, "schemas/common.yml"),
         )
         assertEquals("content of https://git.example.org/$orders/raw/schemas/common.yml", reference.content)
         assertEquals(3, reads.size)

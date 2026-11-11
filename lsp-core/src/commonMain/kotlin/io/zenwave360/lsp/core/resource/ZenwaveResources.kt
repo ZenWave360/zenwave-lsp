@@ -137,7 +137,8 @@ object ZenwaveResources {
     ): DeclaredResource {
         val flag = when {
             ResourceReferenceResolver.hasScheme(path) -> DeclaredFlag.ABSOLUTE_URI
-            path.endsWith("/") -> DeclaredFlag.FOLDER
+            // AR-R12 reserves folders and globs (`adrs/`, `adrs/*.md`) for phase 2: no address yet.
+            path.endsWith("/") || path.any { it in "*?[{" } -> DeclaredFlag.FOLDER
             owner.id.isEmpty() || owner.id.startsWith(".") || !isAddressable(path) -> DeclaredFlag.UNADDRESSABLE
             else -> null
         }
@@ -146,28 +147,45 @@ object ZenwaveResources {
 
     private fun isAddressable(path: String): Boolean =
         path.split('/').none { it.isEmpty() || it == "." || it == ".." } &&
-            path.none { it == '\\' || it.code < 0x20 || it.code == 0x7f }
+            path.none { it == '\\' || it == '%' || it.code < 0x20 || it.code == 0x7f }
 
     /**
-     * AR-R2 and AR-R3. [address] is served when its owner id, version and path are a declared entry, or when
-     * [readThrough] is an address of content the server already read for the same owner and version and the
-     * declared pair exists: a relative reference of a declared artifact never changes owner or version. The caller
-     * only passes [readThrough] for content it actually read through a declared artifact; asking for the same
-     * path without it is refused. A refusal never makes a network request.
+     * AR-R2. [address] is served only when its owner id, version and path are a declared entry of the manifest.
+     * A refusal never makes a network request.
      */
-    fun check(manifest: ZenWaveManifest, address: String, readThrough: String? = null): ResourceCheck {
+    fun check(manifest: ZenWaveManifest, address: String): ResourceCheck {
         val parsed = parse(address) ?: return ResourceCheck.NotDeclared("not a valid zenwave: address")
-        val entries = declaredResources(manifest).filter { it.flag == null && it.owner.id == parsed.ownerId && it.version == parsed.version }
+        val entries = declaredFor(manifest, parsed)
         if (entries.isEmpty()) return ResourceCheck.NotDeclared("no declared owner and version match the address")
-        entries.firstOrNull { it.path == parsed.path }?.let {
-            return ResourceCheck.Allowed(parsed, it.owner, it)
-        }
-        val origin = readThrough?.let(::parse)
-        if (origin != null && origin.ownerId == parsed.ownerId && origin.version == parsed.version) {
-            return ResourceCheck.Allowed(parsed, entries.first().owner, null)
-        }
+        entries.firstOrNull { it.path == parsed.path }?.let { return ResourceCheck.Allowed(parsed, it.owner, it) }
         return ResourceCheck.NotDeclared("the path is not declared and no declared content refers to it")
     }
+
+    /**
+     * AR-R3. The reference [reference] found in the content at [base] is allowed when [base] is itself allowed
+     * and [resolveReference] gives its address: nothing else under the same owner and version is opened. [base] is
+     * allowed when [check] allows it as a declared entry, or when it is one of [readReferences], the addresses of
+     * references this function allowed earlier and the server read (a reference inside a reference). The caller
+     * must only put there addresses this function returned as allowed.
+     */
+    fun checkReference(
+        manifest: ZenWaveManifest,
+        base: String,
+        reference: String,
+        readReferences: Collection<String> = emptyList(),
+    ): ResourceCheck {
+        val origin = parse(base) ?: return ResourceCheck.NotDeclared("not a valid zenwave: address")
+        val baseAllowed = check(manifest, base) is ResourceCheck.Allowed ||
+            (base in readReferences && declaredFor(manifest, origin).isNotEmpty())
+        if (!baseAllowed) return ResourceCheck.NotDeclared("the content the reference was found in is not allowed")
+        val target = resolveReference(base, reference)
+            ?: return ResourceCheck.NotDeclared("the reference leaves the owner's content")
+        val parsed = parse(target) ?: return ResourceCheck.NotDeclared("not a valid zenwave: address")
+        return ResourceCheck.Allowed(parsed, declaredFor(manifest, origin).first().owner, null)
+    }
+
+    private fun declaredFor(manifest: ZenWaveManifest, address: ZenwaveAddress): List<DeclaredResource> =
+        declaredResources(manifest).filter { it.flag == null && it.owner.id == address.ownerId && it.version == address.version }
 
     /**
      * AR-R3: the address a relative [reference] found in the content at [base] has, with the same owner and
@@ -260,7 +278,8 @@ object ZenwaveResources {
         } catch (error: Exception) {
             return null
         }
-        if (decoded.any { it == '/' || it == '\\' || it.code < 0x20 || it.code == 0x7f }) return null
+        // A segment is decoded exactly once: "%" is refused, so `%252e` cannot survive as `%2e` for a file: URI to decode again.
+        if (decoded.any { it == '/' || it == '\\' || it == '%' || it.code < 0x20 || it.code == 0x7f }) return null
         return decoded
     }
 }
