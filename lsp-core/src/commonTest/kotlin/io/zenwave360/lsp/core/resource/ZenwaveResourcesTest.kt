@@ -31,6 +31,7 @@ class ZenwaveResourcesTest {
               handbook: "docs/Hand book.md"
               adrs: "adrs/"
               decisions: "adrs/*.md"
+              percent: "docs/100%.md"
               external: "https://example.org/x.md"
             subdomains:
               checkout:
@@ -44,6 +45,7 @@ class ZenwaveResourcesTest {
                     artifacts:
                       - { type: openapi, path: openapi.yml, version: 0.1.0 }
                       - { type: asyncapi, path: "api/événements.yml", version: 0.2.0 }
+                      - { type: avro, path: "schemas/order.avsc", version: 0.1.0 }
                   billing:
                     docs:
                       readme: README.md
@@ -77,6 +79,7 @@ class ZenwaveResourcesTest {
             listOf(
                 "zenwave:/$orders/0.1.0/openapi.yml",
                 "zenwave:/$orders/0.2.0/api/%C3%A9v%C3%A9nements.yml",
+                "zenwave:/$orders/0.1.0/schemas/order.avsc",
                 "zenwave:/$orders/1.0.0/CHANGELOG.md",
             ),
             entries.map { it.address },
@@ -228,9 +231,8 @@ class ZenwaveResourcesTest {
     fun aDoublyEncodedReferenceIsRefusedSoNoFileUriDecodesItAgain() = runTest {
         val manifest = manifest()
         val base = "zenwave:/$orders/0.1.0/openapi.yml"
-        assertNull(ZenwaveResources.resolveReference(base, "%252e%252e/%252e%252e/secret.yml"))
-        assertNull(ZenwaveResources.resolveReference(base, "a%2520b.yml"))
         manifest.referenceRefused(base, "%252e%252e/%252e%252e/secret.yml")
+        manifest.referenceRefused(base, "a%2520b.yml")
         manifest.refused("zenwave:/$orders/0.1.0/%252e%252e/secret.yml")
         // a single level of encoding still works, and what it decodes to contains no percent sign
         assertEquals("zenwave:/$orders/0.1.0/a%20b.yml", ZenwaveResources.resolveReference(base, "a%20b.yml"))
@@ -251,6 +253,49 @@ class ZenwaveResourcesTest {
             assertFalse("%2e" in it.uri.lowercase() || "/../" in it.uri.substringAfter("//"), it.uri)
         }
         assertEquals("a b/c.yml", allowed.address.path)
+    }
+
+    @Test
+    fun aReferenceThatLandsOnADeclaredEntryIsThatEntryAndKeepsItsArtifactResolution() = runTest {
+        val manifest = manifest()
+        val base = "zenwave:/$orders/0.1.0/openapi.yml"
+        val self = manifest.referenceAllowed(base, "#/components/schemas/Order")
+        assertNotNull(self.declared)
+        assertEquals("openapi", self.declared?.artifact?.type)
+        val sibling = manifest.referenceAllowed(base, "schemas/order.avsc#/x")
+        assertEquals("avro", sibling.declared?.artifact?.type)
+        assertEquals(DeclaredKind.ARTIFACT, sibling.declared?.kind)
+        // not declared: still a plain reference
+        assertNull(manifest.referenceAllowed(base, "schemas/other.avsc").declared)
+    }
+
+    @Test
+    fun aLiteralPercentInADeclaredPathIsAddressedEncodedOnceAndServed() = runTest {
+        val manifest = manifest()
+        val address = "zenwave:/sales/2.0.0/docs/100%25.md"
+        assertTrue(address in ZenwaveResources.declaredResources(manifest).mapNotNull { it.address })
+        val allowed = manifest.allowed(address)
+        assertEquals("docs/100%.md", allowed.address.path)
+        assertEquals("percent", allowed.declared?.docKey)
+        // a client cannot reach other paths with a percent sign
+        manifest.refused("zenwave:/sales/2.0.0/docs/100%2525.md")
+        manifest.refused("zenwave:/sales/2.0.0/docs/200%25.md")
+        // the library puts the path into the URI as it is, so load hands it over with the sign escaped once
+        val reads = mutableListOf<String>()
+        val io = object : DocumentLoader {
+            override fun canLoad(uri: String) = true
+            override suspend fun load(uri: String): String {
+                reads += uri
+                return "ok"
+            }
+        }
+        val local = ZenWaveManifestLoader(listOf(io), null)
+        val localManifest = local.parse(
+            "file:///work/architecture/zenwave-architecture.yml",
+            manifestText.replace("contentResolution: [git]", "contentResolution: [workspace]"),
+        )
+        ZenwaveResources.load(local, localManifest, localManifest.allowed(address))
+        assertEquals(listOf("file:///work/architecture/sales/docs/100%25.md"), reads)
     }
 
     @Test

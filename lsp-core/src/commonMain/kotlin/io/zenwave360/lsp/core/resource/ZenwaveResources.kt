@@ -147,7 +147,7 @@ object ZenwaveResources {
 
     private fun isAddressable(path: String): Boolean =
         path.split('/').none { it.isEmpty() || it == "." || it == ".." } &&
-            path.none { it == '\\' || it == '%' || it.code < 0x20 || it.code == 0x7f }
+            path.none { it == '\\' || it.code < 0x20 || it.code == 0x7f }
 
     /**
      * AR-R2. [address] is served only when its owner id, version and path are a declared entry of the manifest.
@@ -181,7 +181,11 @@ object ZenwaveResources {
         val target = resolveReference(base, reference)
             ?: return ResourceCheck.NotDeclared("the reference leaves the owner's content")
         val parsed = parse(target) ?: return ResourceCheck.NotDeclared("not a valid zenwave: address")
-        return ResourceCheck.Allowed(parsed, declaredFor(manifest, origin).first().owner, null)
+        val entries = declaredFor(manifest, origin)
+        // A reference that lands on a declared entry is that entry, so an artifact keeps its artifact resolution.
+        entries.firstOrNull { it.path == parsed.path }?.let { return ResourceCheck.Allowed(parsed, it.owner, it) }
+        if ('%' in parsed.path) return ResourceCheck.NotDeclared("a reference with a percent sign that no declared entry has")
+        return ResourceCheck.Allowed(parsed, entries.first().owner, null)
     }
 
     private fun declaredFor(manifest: ZenWaveManifest, address: ZenwaveAddress): List<DeclaredResource> =
@@ -221,9 +225,11 @@ object ZenwaveResources {
         allowed: ResourceCheck.Allowed,
         options: ManifestLoadOptions = ManifestLoadOptions(),
     ): ManifestResourceLoadResult {
-        val artifact = allowed.declared?.artifact
+        // The library puts a path into a URI as it is, without escaping `%`, and the loader beneath decodes the URI
+        // once. A declared `100%.md` is therefore handed over as `100%25.md`, which reads back as the file it names.
+        val artifact = allowed.declared?.artifact?.let { it.copy(path = it.path.replace("%", "%25")) }
         if (artifact != null) return loader.loadArtifactResult(manifest, allowed.owner, artifact, options)
-        val path = allowed.address.path
+        val path = allowed.address.path.replace("%", "%25")
         return try {
             loader.loadOwnedDocument(manifest, allowed.owner, allowed.address.version, path, options)
         } catch (error: ManifestResourceLoadException) {
@@ -278,8 +284,9 @@ object ZenwaveResources {
         } catch (error: Exception) {
             return null
         }
-        // A segment is decoded exactly once: "%" is refused, so `%252e` cannot survive as `%2e` for a file: URI to decode again.
-        if (decoded.any { it == '/' || it == '\\' || it == '%' || it.code < 0x20 || it.code == 0x7f }) return null
+        // Decoded exactly once. A `%` in the result is legitimate only for a declared path (`100%.md`); a client address
+        // or a reference with one is refused unless it equals a declared entry, so `%252e` never travels on as `%2e`.
+        if (decoded.any { it == '/' || it == '\\' || it.code < 0x20 || it.code == 0x7f }) return null
         return decoded
     }
 }
