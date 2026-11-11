@@ -236,7 +236,12 @@ object ZenwaveResources {
         return try {
             loader.loadOwnedDocument(manifest, allowed.owner, allowed.address.version, path, options)
         } catch (error: ManifestResourceLoadException) {
-            ManifestResourceLoadResult(path = path, errorMessage = error.message)
+            ManifestResourceLoadResult(
+                path = path,
+                errorMessage = error.message,
+                candidates = error.candidates,
+                finalError = error.finalError,
+            )
         } catch (error: ManifestResolutionException) {
             ManifestResourceLoadResult(path = path, errorMessage = error.message)
         }

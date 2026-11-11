@@ -79,7 +79,7 @@ class ZenwaveJsLanguageServerTest {
         assertEquals(
             listOf(
                 "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
-                "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt",
+                "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
             ),
             advertised,
         )

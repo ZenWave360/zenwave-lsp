@@ -541,6 +541,8 @@ class ModelVisualizationsTest {
                 "zenwave/eventFlowViews",
                 "zenwave/preview",
                 "zenwave/symbolAt",
+                "zenwave/statResource",
+                "zenwave/readResource",
             ),
             ZenwaveCustomRequests.ALL,
         )

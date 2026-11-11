@@ -156,6 +156,9 @@ data class SymbolAtRequest(
     val position: org.eclipse.lsp4j.Position?
 )
 
+/** Params of `zenwave/statResource` and `zenwave/readResource`. Nullable, reported as InvalidParams when absent. */
+data class ResourceRequest(val uri: String?)
+
 /** Result of `zenwave/symbolAt`: what `forwardReferences` and `reverseReferences` take, and where the symbol is. */
 data class SymbolAtResult(
     val uri: String,

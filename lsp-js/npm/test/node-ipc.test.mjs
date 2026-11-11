@@ -23,6 +23,8 @@ const EXPECTED_CUSTOM_REQUESTS = [
   'zenwave/eventFlowViews',
   'zenwave/preview',
   'zenwave/symbolAt',
+  'zenwave/statResource',
+  'zenwave/readResource',
 ];
 
 const checkoutUri = 'file:///workspace/checkout.zfl';
@@ -508,6 +510,210 @@ describe('A manifest served over http (AR-R11)', { timeout: 120_000 }, () => {
     assert.deepEqual(requests, ['/architecture/.zenwave-manifest.yml']);
     assert.equal(server.logs.filter((log) => /manifest/i.test(log.message)).length, 0, JSON.stringify(server.logs));
     assert.equal(server.child.exitCode, null, server.stderr());
+  });
+});
+
+describe('zenwave/statResource and zenwave/readResource (AR-R4, AR-R5, AR-R6, AR-R10)', { timeout: 120_000 }, () => {
+  let http;
+  let server;
+  let origin;
+  let manifestUri;
+  const requests = [];
+  const manifest = (base) => [
+    'config:',
+    '  contentResolution: [git]',
+    '  sources:',
+    '    git:',
+    '      provider: generic',
+    `      server: ${base}`,
+    '      contentUrlExpression: "${server}/${owner.id}/raw/${content.path}?token=abc123"',
+    'domains:',
+    '  sales:',
+    '    services:',
+    '      orders:',
+    '        id: orders',
+    '        version: 1.0.0',
+    '        docs: { changelog: CHANGELOG.md }',
+    '        artifacts:',
+    '          - { type: openapi, path: openapi.yml, version: 0.1.0 }',
+    '          - { type: openapi, path: missing.yml, version: 0.1.0 }',
+    '',
+  ].join('\n');
+
+  before(async () => {
+    http = createServer((request, response) => {
+      requests.push(request.url);
+      const path = request.url.split('?')[0];
+      const bodies = {
+        '/arch/.zenwave-manifest.yml': manifest(origin),
+        '/orders/raw/openapi.yml': "components:\n  schemas:\n    A:\n      $ref: 'schemas/common.yml#/A'\n",
+        '/orders/raw/schemas/common.yml': 'A: {}\n',
+        '/orders/raw/CHANGELOG.md': '# é\n',
+      };
+      if (path in bodies) {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end(bodies[path]);
+      } else {
+        response.writeHead(404);
+        response.end('nope');
+      }
+    });
+    await new Promise((resolve) => http.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${http.address().port}`;
+    manifestUri = `${origin}/arch/.zenwave-manifest.yml`;
+    server = startServer(['--node-ipc']);
+    await server.connection.sendRequest('initialize', {
+      processId: process.pid,
+      rootUri: null,
+      capabilities: {},
+      initializationOptions: { zenwave: { projectManifestUri: manifestUri } },
+    });
+    await server.connection.sendNotification('initialized', {});
+  });
+
+  after(() => {
+    if (server.child.exitCode === null) server.child.kill();
+    http.close();
+  });
+
+  const contentRequests = () => requests.filter((url) => !url.startsWith('/arch/'));
+  const stat = (uri) => server.connection.sendRequest('zenwave/statResource', { uri });
+  const read = (uri) => server.connection.sendRequest('zenwave/readResource', { uri });
+
+  test('the tree data makes no content request, then stat and read make one', async () => {
+    await server.connection.sendRequest('zenwave/hierarchy', { uri: manifestUri });
+    assert.deepEqual(contentRequests(), []);
+
+    const address = 'zenwave:/orders/0.1.0/openapi.yml';
+    const info = await stat(address);
+    assert.deepEqual(info.source, { kind: 'git' });
+    assert.equal(info.type, 'file');
+    assert.equal(info.readonly, true);
+    assert.equal(info.uri, address);
+    const content = await read(address);
+    assert.equal(content.encoding, 'utf8');
+    assert.equal(info.size, Buffer.byteLength(content.content));
+    assert.deepEqual(contentRequests(), ['/orders/raw/openapi.yml?token=abc123']);
+    await read(address);
+    assert.equal(contentRequests().length, 1);
+  });
+
+  test('a document is served with its size in bytes', async () => {
+    assert.equal((await stat('zenwave:/orders/1.0.0/CHANGELOG.md')).size, 5);
+  });
+
+  test('a reference found in content already read is served, and the same path from nowhere is not', async () => {
+    const reference = 'zenwave:/orders/0.1.0/schemas/common.yml';
+    assert.equal((await read(reference)).content, 'A: {}\n');
+    await assert.rejects(read('zenwave:/orders/0.1.0/other.yml'), (error) => error.data.kind === 'resourceNotDeclared');
+  });
+
+  test('a failure lists the candidates tried, hides the token, and is not cached', async () => {
+    const address = 'zenwave:/orders/0.1.0/missing.yml';
+    const before = contentRequests().length;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await assert.rejects(read(address), (error) => {
+        assert.equal(error.code, REQUEST_FAILED);
+        assert.equal(error.data.kind, 'resourceUnresolved');
+        assert.deepEqual(error.data.candidates.map((candidate) => candidate.source), ['git']);
+        assert.equal(error.data.candidates[0].url, `${origin}/orders/raw/missing.yml?token=<redacted>`);
+        assert.ok(!JSON.stringify(error).includes('abc123'), JSON.stringify(error));
+        return true;
+      });
+    }
+    assert.equal(contentRequests().length - before, 2);
+  });
+
+  test('an address the manifest does not declare is refused with no request', async () => {
+    const before = requests.length;
+    for (const address of [
+      'zenwave:/orders/9.9.9/openapi.yml',
+      'zenwave:/orders/0.1.0/internal/secrets.yml',
+      'zenwave:/orders/0.1.0/../x.yml',
+      'zenwave:/nobody/0.1.0/openapi.yml',
+      'file:///etc/passwd',
+    ]) {
+      await assert.rejects(stat(address), (error) => error.code === REQUEST_FAILED && error.data.kind === 'resourceNotDeclared', address);
+      await assert.rejects(read(address), (error) => error.data.kind === 'resourceNotDeclared', address);
+    }
+    assert.equal(requests.length, before);
+  });
+
+  test('the remote manifest is served under its own address', async () => {
+    const served = await read('zenwave:/.zenwave-manifest.yml');
+    assert.equal(served.content, manifest(origin));
+    assert.deepEqual((await stat('zenwave:/.zenwave-manifest.yml')).source, { kind: 'manifest' });
+  });
+
+  test('malformed params are InvalidParams', async () => {
+    await assert.rejects(server.connection.sendRequest('zenwave/statResource', {}), (error) => error.code === INVALID_PARAMS);
+    await assert.rejects(server.connection.sendRequest('zenwave/readResource', { uri: 3 }), (error) => error.code === INVALID_PARAMS);
+  });
+});
+
+describe('A workspace-resolved entry answers with its file: URI (AR-R4)', { timeout: 120_000 }, () => {
+  let server;
+  let dir;
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'zenwave-resources-'));
+    mkdirSync(join(dir, 'orders'));
+    writeFileSync(join(dir, 'orders', 'openapi.yml'), 'openapi: 3.0.0\n');
+    writeFileSync(join(dir, 'zenwave-architecture.yml'), [
+      'config:',
+      '  contentResolution: [workspace]',
+      '  sources:',
+      '    workspace:',
+      '      basePathExpression: "${service.id}"',
+      'domains:',
+      '  sales:',
+      '    services:',
+      '      orders:',
+      '        id: orders',
+      '        artifacts:',
+      '          - { type: openapi, path: openapi.yml, version: 0.1.0 }',
+      '          - { type: openapi, path: absent.yml, version: 0.1.0 }',
+      '',
+    ].join('\n'));
+    server = startServer(['--node-ipc']);
+    await server.connection.sendRequest('initialize', {
+      processId: process.pid,
+      rootUri: null,
+      capabilities: {},
+      initializationOptions: { zenwave: { projectManifestUri: pathToFileURL(join(dir, 'zenwave-architecture.yml')).href } },
+    });
+    await server.connection.sendNotification('initialized', {});
+  });
+
+  after(() => {
+    if (server.child.exitCode === null) server.child.kill();
+  });
+
+  test('stat names the workspace source and the file', async () => {
+    const info = await server.connection.sendRequest('zenwave/statResource', { uri: 'zenwave:/orders/0.1.0/openapi.yml' });
+    assert.equal(info.source.kind, 'workspace');
+    assert.equal(info.source.fileUri, pathToFileURL(join(dir, 'orders', 'openapi.yml')).href);
+    const content = await server.connection.sendRequest('zenwave/readResource', { uri: 'zenwave:/orders/0.1.0/openapi.yml' });
+    assert.equal(content.content, 'openapi: 3.0.0\n');
+  });
+
+  test('a file that is not there lists the file URL tried', async () => {
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/readResource', { uri: 'zenwave:/orders/0.1.0/absent.yml' }),
+      (error) => {
+        assert.equal(error.data.kind, 'resourceUnresolved');
+        assert.deepEqual(error.data.candidates.map((candidate) => candidate.source), ['workspace']);
+        assert.ok(error.data.candidates[0].url.endsWith('/orders/absent.yml'), JSON.stringify(error.data));
+        return true;
+      },
+    );
+  });
+
+  test('the local manifest is not served under the scheme', async () => {
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/readResource', { uri: 'zenwave:/.zenwave-manifest.yml' }),
+      (error) => error.data.kind === 'resourceNotDeclared',
+    );
   });
 });
 

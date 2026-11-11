@@ -7,6 +7,8 @@ import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
 import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import io.zenwave360.lsp.core.resource.ResourceJson
+import io.zenwave360.lsp.core.resource.ResourceRequestException
 import io.zenwave360.lsp.core.visualization.DocumentRequestException
 import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.visualization.VisualizationJson
@@ -92,6 +94,14 @@ interface ZenwaveCustomRequests {
      */
     @JsonRequest("zenwave/symbolAt")
     fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?>
+
+    /** `{uri, type: "file", size, readonly, source: {kind, fileUri?}}`, or a -32803 `resourceNotDeclared` or `resourceUnresolved` error. */
+    @JsonRequest("zenwave/statResource")
+    fun statResource(request: ResourceRequest): CompletableFuture<JsonElement>
+
+    /** `{uri, encoding, content}`, or a -32803 `resourceNotDeclared` or `resourceUnresolved` error. */
+    @JsonRequest("zenwave/readResource")
+    fun readResource(request: ResourceRequest): CompletableFuture<JsonElement>
 
     /**
      * Replaces the plugin catalogue `.zw` previews use (MP-R16). Params `{catalogue: <catalogue JSON object>}`; one that is
@@ -279,6 +289,22 @@ class ZenwaveLspServer(
             server.symbolAt(uri, DtoMapper.toPosition(position))?.let { SymbolAtResult(it.uri, it.semanticId, it.range) }
         }
 
+    override fun statResource(request: ResourceRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireResourceUri(request)
+            JsonParser.parseString(ResourceJson.stat(runBlocking { server.statResource(uri) }))
+        }
+
+    override fun readResource(request: ResourceRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireResourceUri(request)
+            JsonParser.parseString(ResourceJson.content(runBlocking { server.readResource(uri) }))
+        }
+
+    @Suppress("SENSELESS_COMPARISON") // Gson leaves an absent uri null
+    private fun requireResourceUri(request: ResourceRequest?): String =
+        request?.uri.takeIf { it != null } ?: throw InvalidRequestParamsException("uri is required")
+
     override fun forwardReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>> =
         CompletableFuture.completedFuture(
             server.forwardReferences(request.uri, request.semanticId)
@@ -342,6 +368,14 @@ class ZenwaveLspServer(
                         ZenwaveErrorCodes.REQUEST_FAILED,
                         failure.message ?: failure.kind.wireName,
                         JsonParser.parseString(VisualizationJson.failureData(failure))
+                    )
+                )
+            } catch (failure: ResourceRequestException) {
+                throw ResponseErrorException(
+                    ResponseError(
+                        ZenwaveErrorCodes.REQUEST_FAILED,
+                        failure.message ?: failure.kind.wireName,
+                        JsonParser.parseString(ResourceJson.failureData(failure))
                     )
                 )
             } catch (invalid: InvalidRequestParamsException) {
