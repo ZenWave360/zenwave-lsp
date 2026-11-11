@@ -16,7 +16,10 @@ import io.zenwave360.lsp.core.resource.ResourceContent
 import io.zenwave360.lsp.core.resource.ResourceFailureKind
 import io.zenwave360.lsp.core.resource.ResourceRequestException
 import io.zenwave360.lsp.core.resource.ResourceStat
+import io.zenwave360.lsp.core.resource.DocumentImport
+import io.zenwave360.lsp.core.resource.DocumentImports
 import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import io.zenwave360.lsp.core.resource.ZenwaveResources
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.Range
@@ -55,6 +58,11 @@ class ZenwaveLanguageServer(
     } else {
         WorkspaceStatus(WorkspaceState.READY)
     }
+    /** The documents each open `zenwave:` document imports, and the diagnostics last found for them (AR-R9). */
+    private val importedBy = mutableMapOf<String, Set<String>>()
+    private val importedDiagnostics = mutableMapOf<String, List<Diagnostic>>()
+    private val importRuns = mutableMapOf<String, Int>()
+    private var importRunCounter = 0
     private val pluginCatalogues = PluginCatalogues()
     private val visualizations = ModelVisualizations(pluginCatalogues)
 
@@ -77,6 +85,7 @@ class ZenwaveLanguageServer(
         sessionStore.close(uri)
         lock.write {
             parsedCache.remove(uri)
+            importRuns.remove(uri)
         }
         crossReferenceIndex.remove(uri)
     }
@@ -141,9 +150,13 @@ class ZenwaveLanguageServer(
         if (dependencies.isEmpty()) {
             return if (open != null) getOrComputeHierarchy(entry, snapshot) else module.hierarchy(snapshot, entry.parsedArtifact)
         }
+        // A `zenwave:` document draws only on what it imports (AR-R9); the others are read as any unopened document.
+        val fromZenwave = uri.startsWith(ZENWAVE_SCHEME)
+        val imported = if (fromZenwave) readImports(snapshot) else emptyMap()
         val related = dependencies.mapNotNull { dependency ->
             val document = sessionStore.get(dependency)
-                ?: readUnopened(dependency)?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+                ?: (if (fromZenwave) imported[ZenwaveResources.parse(dependency)?.address ?: dependency] else readUnopened(dependency))
+                    ?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
             document?.let { dependency to it }
         }.toMap()
         // Not cached: the result depends on documents whose changes this entry does not track.
@@ -182,6 +195,7 @@ class ZenwaveLanguageServer(
     }
 
     private fun mayHaveHierarchy(uri: String): Boolean {
+        if (uri.startsWith(ZENWAVE_SCHEME) && !DocumentImports.isModelDocument(uri)) return false
         val path = uri.substringBefore('#').substringBefore('?')
         return modules.any { module ->
             module.capabilities.supportsHierarchy && module.capabilities.extensions.any { path.endsWith(it) }
@@ -191,7 +205,8 @@ class ZenwaveLanguageServer(
     /** The content of a document that is not open, or null when it cannot be reached. */
     private suspend fun readUnopened(uri: String): String? =
         try {
-            documentReader.read(uri)
+            // AR-R9: a `zenwave:` address is read by the server itself, through the declared-only check and the cache.
+            if (uri.startsWith(ZENWAVE_SCHEME)) resources().read(uri).content else documentReader.read(uri)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -201,6 +216,205 @@ class ZenwaveLanguageServer(
             if (e is Error && e !is NotImplementedError) throw e
             null
         }
+
+    private class ImportRun {
+        var reads = 0
+        val visited = mutableSetOf<String>()
+
+        /** The documents read or about to be read, counted against the cap before anything is read. */
+        val reserved = mutableSetOf<String>()
+        val failures = mutableMapOf<String, Throwable>()
+    }
+
+    private class Followed(val import: DocumentImport, val content: ResourceContent?, val failure: Throwable?)
+
+    private class Followings(val followed: List<Followed>, val skipped: DocumentImport?)
+
+    private suspend fun <T> orNull(block: suspend () -> T): T? =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Kotlin/JS: a JavaScript error thrown by a loader is not an Exception.
+            if (e is Error && e !is NotImplementedError) throw e
+            null
+        }
+
+    /**
+     * Reads the imports written in [text], the content the server itself read for [base] (never the editor's text:
+     * AR-R3 opens its door only for content already read). A reference is read once per document, and no more than
+     * [MAX_IMPORTS_PER_DOCUMENT] per document, [MAX_IMPORT_READS] per [run] and [MAX_IMPORTED_DOCUMENTS] documents:
+     * the caps are checked before anything is read, and the first import left alone is reported in `skipped`. A
+     * failure is remembered for the run, so a target that failed is not asked for again by another document.
+     */
+    private suspend fun follow(base: String, text: String, run: ImportRun): Followings {
+        run.reserved += base
+        val seen = mutableSetOf<String>()
+        val followed = mutableListOf<Followed>()
+        var skipped: DocumentImport? = null
+        var perDocument = 0
+        for (import in DocumentImports.inText(text)) {
+            if (!DocumentImports.isModelDocument(import.reference) || !seen.add(import.reference)) continue
+            val target = ZenwaveResources.resolveReference(base, import.reference)
+            if (target != null && target in run.visited) continue
+            if (perDocument >= MAX_IMPORTS_PER_DOCUMENT || run.reads >= MAX_IMPORT_READS || run.reserved.size >= MAX_IMPORTED_DOCUMENTS) {
+                if (skipped == null) skipped = import
+                continue
+            }
+            val key = target ?: "$base ${import.reference}"
+            run.failures[key]?.let {
+                followed += Followed(import, null, it)
+                continue
+            }
+            perDocument += 1
+            run.reads += 1
+            if (target != null) run.reserved += target
+            try {
+                followed += Followed(import, resources().readImport(base, import.reference), null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e is Error && e !is NotImplementedError) throw e
+                run.failures[key] = e
+                followed += Followed(import, null, e)
+            }
+        }
+        return Followings(followed, skipped)
+    }
+
+    /** The texts of the documents [snapshot] imports, by normalised address; one that cannot be read is left out. */
+    private suspend fun readImports(snapshot: DocumentSnapshot): Map<String, String> {
+        val base = snapshot.ref.uri
+        val text = orNull { resources().read(base).content } ?: return emptyMap()
+        return follow(base, text, ImportRun()).followed.mapNotNull { followed ->
+            followed.content?.let { (ZenwaveResources.parse(it.uri)?.address ?: it.uri) to it.content }
+        }.toMap()
+    }
+
+    /**
+     * The diagnostics of a `zenwave:` document with the documents it imports, directly or not (AR-R9).
+     *
+     * The imports are those of the content the server read for the document, not of the editor's text. Each is read
+     * by the server itself through [ZenwaveResourceService.readImport]: the importing document is the base of the
+     * reference, and the declared-only check and the cache are those of `zenwave/readResource`. An import that is
+     * not allowed, or cannot be read, is a diagnostic on the import; so is the first import left unread by a limit.
+     * Only `zdl`, `zfl` and `zw` imports are read and processed (AR-R8).
+     *
+     * The result holds the full list for [uri] (its own diagnostics and the import problems), and the list of each
+     * imported document the client has not opened, which the client shows as the documents' own.
+     * [ImportDiagnostics.cleared] holds the documents an earlier result listed that no open document imports any more.
+     * Empty for another scheme, for a document that is not open, and when a newer run or change superseded this one.
+     */
+    suspend fun importDiagnostics(uri: String): ImportDiagnostics = computeImportDiagnostics(uri, null)
+
+    /**
+     * As [importDiagnostics], handing the result to [publish] while it is still the latest for [uri], so that two
+     * runs never publish out of order. [publish] must not call back into the server.
+     */
+    suspend fun publishImportDiagnostics(uri: String, publish: (ImportDiagnostics) -> Unit) {
+        computeImportDiagnostics(uri, publish)
+    }
+
+    private suspend fun computeImportDiagnostics(uri: String, publish: ((ImportDiagnostics) -> Unit)?): ImportDiagnostics {
+        // A document that is not a model document is neither read nor processed (AR-R8).
+        if (!uri.startsWith(ZENWAVE_SCHEME) || !DocumentImports.isModelDocument(uri)) return ImportDiagnostics()
+        val root = sessionStore.get(uri) ?: return ImportDiagnostics()
+        val version = root.ref.version
+        val token = lock.write {
+            importRunCounter += 1
+            importRuns[uri] = importRunCounter
+            importRunCounter
+        }
+        fun current() = lock.read { importRuns[uri] == token } && sessionStore.get(uri)?.ref?.version == version
+
+        val run = ImportRun().also { it.visited += uri }
+        val all = linkedMapOf<String, List<Diagnostic>>()
+        val queue = ArrayDeque<Triple<DocumentSnapshot, DocumentCacheEntry, String?>>()
+        queue.add(Triple(root, getOrBuildCacheEntry(root), orNull { resources().read(uri).content }))
+        while (queue.isNotEmpty()) {
+            if (!current()) return ImportDiagnostics()
+            val (snapshot, entry, text) = queue.removeFirst()
+            val problems = mutableListOf<Diagnostic>()
+            if (text != null && entry.module != null && entry.processingFailure == null) {
+                val followings = follow(snapshot.ref.uri, text, run)
+                for (item in followings.followed) {
+                    val content = item.content
+                    if (content == null) {
+                        problems += importProblem(snapshot.ref.uri, item.import, item.failure!!)
+                        continue
+                    }
+                    if (!run.visited.add(content.uri)) continue
+                    val open = sessionStore.get(content.uri)
+                    val imported = open ?: DocumentSnapshot(DocumentRef(content.uri, "", UNOPENED_VERSION), content.content)
+                    queue.add(Triple(imported, if (open != null) getOrBuildCacheEntry(open) else buildCacheEntry(imported), content.content))
+                }
+                followings.skipped?.let { problems += limitProblem(snapshot.ref.uri, it) }
+            }
+            all[snapshot.ref.uri] = entry.diagnostics + problems
+        }
+        return lock.write {
+            if (importRuns[uri] != token || sessionStore.get(uri)?.ref?.version != version) return@write ImportDiagnostics()
+            val now = all.keys - uri
+            val before = importedBy[uri].orEmpty()
+            importedBy[uri] = now
+            now.forEach { importedDiagnostics[it] = all.getValue(it) }
+            // Another root's retained copy of this document is refreshed by this document's own reading.
+            if (importedBy.values.any { uri in it }) importedDiagnostics[uri] = all.getValue(uri)
+            val cleared = (before - now).filterTo(linkedSetOf()) { releasable(it) }
+            val published = linkedMapOf<String, List<Diagnostic>>()
+            all.forEach { (address, diagnostics) -> if (address == uri || sessionStore.get(address) == null) published[address] = diagnostics }
+            ImportDiagnostics(published, cleared).also { publish?.invoke(it) }
+        }
+    }
+
+    /** True when no open document imports [address] any more and the client has not opened it: it is forgotten. Under the lock. */
+    private fun releasable(address: String): Boolean {
+        if (importedBy.values.any { address in it } || sessionStore.get(address) != null) return false
+        importedDiagnostics.remove(address)
+        return true
+    }
+
+    /**
+     * Ends the imports of [uri] when it closes, so that nothing leaks and a run still in flight is dropped. Returns the
+     * imported documents to clear: those no other open document imports and the client has not opened.
+     */
+    fun releaseImports(uri: String): Set<String> =
+        lock.write {
+            importRuns.remove(uri)
+            importedBy.remove(uri).orEmpty().filterTo(linkedSetOf()) { releasable(it) }
+        }
+
+    /**
+     * What an open document still imports of [uri] says about it: the diagnostics to show for [uri] when the client
+     * closes it, instead of clearing them. Null when no open document imports it.
+     */
+    fun importedDiagnosticsFor(uri: String): List<Diagnostic>? =
+        lock.read { if (importedBy.values.any { uri in it }) importedDiagnostics[uri] else null }
+
+    private fun limitProblem(uri: String, import: DocumentImport) = Diagnostic(
+        uri = uri,
+        range = Range(Position(import.line, import.start), Position(import.line, import.end)),
+        severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.WARNING,
+        message = "Further imports were not followed: at most $MAX_IMPORTS_PER_DOCUMENT per document, " +
+            "$MAX_IMPORT_READS per reading and $MAX_IMPORTED_DOCUMENTS documents",
+        code = "import-limit",
+    )
+
+    private fun importProblem(uri: String, import: DocumentImport, error: Throwable): Diagnostic {
+        val denied = (error as? ResourceRequestException)?.kind == ResourceFailureKind.NOT_DECLARED
+        val reason = error.message ?: error::class.simpleName.orEmpty()
+        return Diagnostic(
+            uri = uri,
+            range = Range(Position(import.line, import.start), Position(import.line, import.end)),
+            severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.ERROR,
+            // The reference is client-written text and may carry user info or a token: redact the whole message.
+            message = ZenwaveResourceService.redact(
+                if (denied) "Import ${import.reference} is not allowed: $reason" else "Import ${import.reference} cannot be read: $reason",
+            ),
+            code = if (denied) "import-not-declared" else "import-unreadable",
+        )
+    }
 
     fun format(uri: String): String? =
         withEntry(uri) { entry, snapshot -> entry.module?.takeUnless { entry.processingFailure != null }?.format(snapshot) }
@@ -390,6 +604,11 @@ class ZenwaveLanguageServer(
         }
 
     private fun buildCacheEntry(snapshot: DocumentSnapshot): DocumentCacheEntry {
+        // AR-R8: only zdl, zfl and zw documents under the scheme are model documents; OpenAPI, AsyncAPI and Markdown
+        // are never parsed (LVR-R15: an OpenAPI file once stalled lsp-js).
+        if (snapshot.ref.uri.startsWith(ZENWAVE_SCHEME) && !DocumentImports.isModelDocument(snapshot.ref.uri)) {
+            return DocumentCacheEntry(snapshot.ref.uri, snapshot.ref.version, null, emptyList(), null)
+        }
         val module = try {
             resolveModule(snapshot)
         } catch (error: Throwable) {
@@ -431,6 +650,10 @@ class ZenwaveLanguageServer(
 
     private companion object {
         const val UNOPENED_VERSION = 0
+        const val ZENWAVE_SCHEME = "zenwave:"
+        const val MAX_IMPORTED_DOCUMENTS = 50
+        const val MAX_IMPORTS_PER_DOCUMENT = 20
+        const val MAX_IMPORT_READS = 100
     }
 
     private fun getOrComputeHierarchy(entry: DocumentCacheEntry, snapshot: DocumentSnapshot): List<HierarchyNode> =
@@ -456,6 +679,12 @@ class ZenwaveLanguageServer(
             }
         }
 }
+
+/** What [ZenwaveLanguageServer.importDiagnostics] found: diagnostics by document address, and documents to clear. */
+data class ImportDiagnostics(
+    val documents: Map<String, List<Diagnostic>> = emptyMap(),
+    val cleared: Set<String> = emptySet(),
+)
 
 enum class WorkspaceState { NONE, BUILDING, READY, STALE, FAILED }
 

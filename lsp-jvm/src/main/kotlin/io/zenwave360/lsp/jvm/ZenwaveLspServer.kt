@@ -193,6 +193,7 @@ class ZenwaveLspServer(
         server.open(snapshot)
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(document.uri)
     }
 
     override fun didChange(params: DidChangeTextDocumentParams) {
@@ -211,13 +212,16 @@ class ZenwaveLspServer(
         )
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(document.uri)
     }
 
     override fun didClose(params: DidCloseTextDocumentParams) {
         val uri = params.textDocument.uri
         documentTexts.remove(uri)
         server.close(uri)
-        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, emptyList()))
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, server.importedDiagnosticsFor(uri) ?: emptyList()))
+        server.releaseImports(uri).forEach { client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(it, emptyList())) }
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
@@ -426,6 +430,33 @@ class ZenwaveLspServer(
                 "savedPositions" to true,
                 "flowLanes" to listOf("none", "systems", "services"),
             )
+        }
+    }
+
+    /**
+     * AR-R9: the server reads what a `zenwave:` document imports itself, then publishes the document's diagnostics with
+     * the import problems, and the imported documents' own. Off the message thread; a failure is logged.
+     */
+    private fun publishImportDiagnostics(uri: String) {
+        if (!uri.startsWith("zenwave:")) return
+        CompletableFuture.runAsync {
+            try {
+                // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+                runBlocking {
+                    server.publishImportDiagnostics(uri) { result ->
+                        result.documents.forEach { (documentUri, diagnostics) ->
+                            client?.publishDiagnostics(
+                                org.eclipse.lsp4j.PublishDiagnosticsParams(documentUri, DtoMapper.toPublishDiagnostics(documentUri, diagnostics).diagnostics)
+                            )
+                        }
+                        result.cleared.forEach {
+                            client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(it, emptyList()))
+                        }
+                    }
+                }
+            } catch (failure: Exception) {
+                client?.logMessage(MessageParams(MessageType.Warning, "Could not read the imports of $uri: ${failure.message}"))
+            }
         }
     }
 

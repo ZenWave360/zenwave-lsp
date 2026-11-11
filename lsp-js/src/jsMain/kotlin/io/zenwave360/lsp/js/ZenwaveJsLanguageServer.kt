@@ -81,6 +81,10 @@ class ZenwaveJsLanguageServer(
 
     internal fun workspaceStatus() = server.workspaceStatus()
 
+    /** The latest reading of the imports of a `zenwave:` document, for tests to await. */
+    internal var importsPublishing: Promise<Unit>? = null
+        private set
+
     init {
         registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
             answer {
@@ -298,6 +302,7 @@ class ZenwaveJsLanguageServer(
         server.open(snapshot)
         logProcessingFailure(uri)
         publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(uri)
     }
 
     fun didChange(params: dynamic) {
@@ -311,13 +316,17 @@ class ZenwaveJsLanguageServer(
         server.change(uri, nextText, version)
         logProcessingFailure(uri)
         publishDiagnosticsIfHandled(DocumentSnapshot(DocumentRef(uri, "", version), nextText))
+        publishImportDiagnostics(uri)
     }
 
     fun didClose(params: dynamic) {
         val uri = params.textDocument.uri as String
         documentTexts.remove(uri)
         server.close(uri)
-        connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to emptyArray<Any>()))
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        val kept = server.importedDiagnosticsFor(uri)
+        connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to (kept?.map(::diagnosticToJson) ?: emptyList()).toTypedArray()))
+        server.releaseImports(uri).forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
     }
 
     fun hover(params: dynamic): dynamic {
@@ -374,6 +383,30 @@ class ZenwaveJsLanguageServer(
                 "flowLanes" to arrayOf("none", "systems", "services"),
             ),
         )
+    }
+
+    /**
+     * AR-R9: the server reads what a `zenwave:` document imports itself, then publishes the document's diagnostics with
+     * the import problems, and the imported documents' own. Not awaited by the notification; a failure is logged.
+     */
+    private fun publishImportDiagnostics(uri: String) {
+        if (!uri.startsWith("zenwave:")) return
+        val publishing: Promise<Unit> = GlobalScope.promise {
+            // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+            server.publishImportDiagnostics(uri) { result ->
+                result.documents.forEach { (documentUri, diagnostics) ->
+                    connection.sendDiagnostics(
+                        jsonObject("uri" to documentUri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray())
+                    )
+                }
+                result.cleared.forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
+            }
+        }
+        importsPublishing = publishing
+        publishing.catch { error: dynamic ->
+            val console = connection.console
+            if (isPresent(console)) console.warn("Could not read the imports of $uri: ${error?.message ?: error}")
+        }
     }
 
     private fun publishDiagnosticsIfHandled(snapshot: DocumentSnapshot) {
