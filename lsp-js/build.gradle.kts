@@ -52,6 +52,9 @@ kotlin {
         val jsTest by getting {
             dependencies {
                 implementation(kotlin("test-js"))
+                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.architecture:architecture-manifest:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.architecture:workspace-runtime:1.0.0-SNAPSHOT")
             }
         }
     }

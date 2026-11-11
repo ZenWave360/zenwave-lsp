@@ -352,6 +352,101 @@ class ZenwaveLspWireTest {
         assertEquals(-32602, requestError("zenwave/readResource", """{"uri":null}""").first)
     }
 
+    /** AN/2.4, AR-R9: the server reads the ZDL a remote ZFL imports itself, with no request to the client. */
+    @Test
+    fun aRemoteFlowImportingARemoteZdlIsReadByTheServerAndAnOpenApiUnderTheSchemeIsNeverProcessed() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val http = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
+        val origin = "http://127.0.0.1:${http.address.port}"
+        val flow = """
+            @import("../../outside.zdl")
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent() + "\n"
+        val manifest = listOf(
+            "config:", "  contentResolution: [git]", "  sources:", "    git:", "      provider: generic", "      server: $origin",
+            "      contentUrlExpression: \"\${server}/\${owner.id}/raw/\${content.path}\"",
+            "domains:", "  sales:", "    services:", "      flows:", "        id: flows", "        version: 1.0.0", "        artifacts:",
+            "          - { type: zfl, path: checkout.zfl, version: 0.1.0 }", "          - { type: openapi, path: openapi.yml, version: 0.1.0 }", "",
+        ).joinToString("\n")
+        val bodies = mapOf(
+            "/arch/.zenwave-manifest.yml" to manifest,
+            "/flows/raw/checkout.zfl" to flow,
+            "/flows/raw/orders/model.zdl" to "entity Order {\n    total Integer\n",
+            "/flows/raw/openapi.yml" to "openapi: 3.0.0\ncomponents:\n  schemas:\n    A:\n      \$ref: '#/components/schemas/A'\n",
+        )
+        http.createContext("/") { exchange ->
+            requests += exchange.requestURI.toString()
+            val body = bodies[exchange.requestURI.path]
+            val bytes = (body ?: "nope").toByteArray()
+            exchange.sendResponseHeaders(if (body != null) 200 else 404, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        http.start()
+        try {
+            initialize("""{"zenwave":{"projectManifestUri":"$origin/arch/.zenwave-manifest.yml"}}""")
+            val flowUri = "zenwave:/flows/0.1.0/checkout.zfl"
+            val zdlUri = "zenwave:/flows/0.1.0/orders/model.zdl"
+            val text = request("zenwave/readResource", resourceParams(flowUri)).asJsonObject["content"].asString
+            assertEquals(flow, text)
+
+            val item = JsonObject().apply {
+                addProperty("uri", flowUri); addProperty("languageId", "zfl"); addProperty("version", 1); addProperty("text", text)
+            }
+            notify("textDocument/didOpen", JsonObject().apply { add("textDocument", item) }.toString())
+            val published = mutableMapOf<String, JsonArray>()
+            fun importsPublished() = zdlUri in published &&
+                published[flowUri]?.any { it.asJsonObject["code"]?.asString == "import-not-declared" } == true
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+            while (System.nanoTime() < deadline && !importsPublished()) {
+                val notification = client.notifications.poll(1, TimeUnit.SECONDS) ?: continue
+                if (notification["method"].asString != "textDocument/publishDiagnostics") continue
+                val params = notification["params"].asJsonObject
+                published[params["uri"].asString] = params["diagnostics"].asJsonArray
+            }
+            assertTrue(published.getValue(zdlUri).any { it.asJsonObject["severity"].asInt == 1 }, "the imported ZDL's diagnostics: $published")
+            assertTrue(published.getValue(flowUri).any { it.asJsonObject["code"]?.asString == "import-not-declared" }, "the import above the root: $published")
+            assertEquals(1, requests.count { it == "/flows/raw/orders/model.zdl" }, "fetched once, by the server: $requests")
+            assertFalse(requests.any { it.contains("outside") }, "nothing outside the owner was requested: $requests")
+
+            val hierarchy = request("zenwave/hierarchy", resourceParams(flowUri)).toString()
+            assertTrue(hierarchy.contains("\"uri\":\"$zdlUri\""), "the hierarchy draws on the imported ZDL: $hierarchy")
+            assertTrue(request("zenwave/preview", """{"textDocument":{"uri":"$flowUri"}}""").asJsonObject.size() > 0, "a preview of the open zenwave: document")
+
+            // An OpenAPI under the scheme is processed by nobody, and the server keeps answering.
+            val openapiUri = "zenwave:/flows/0.1.0/openapi.yml"
+            val openapi = request("zenwave/readResource", resourceParams(openapiUri)).asJsonObject["content"].asString
+            val openItem = JsonObject().apply {
+                addProperty("uri", openapiUri); addProperty("languageId", "yaml"); addProperty("version", 1); addProperty("text", openapi)
+            }
+            notify("textDocument/didOpen", JsonObject().apply { add("textDocument", openItem) }.toString())
+            assertEquals(0, request("zenwave/hierarchy", resourceParams(openapiUri)).asJsonArray.size())
+            assertTrue(request("zenwave/hierarchy", resourceParams(flowUri)).asJsonArray.size() > 0)
+        } finally {
+            http.stop(0)
+        }
+    }
+
     @Test
     fun aWorkspaceResolvedEntryAnswersWithItsFileUri() {
         val dir = java.nio.file.Files.createTempDirectory("zenwave-resources-")

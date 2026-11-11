@@ -1,5 +1,15 @@
 package io.zenwave360.lsp.js
 
+import io.zenwave360.architecture.graph.ArchitectureGraph
+import io.zenwave360.architecture.graph.ArchitectureGraphResult
+import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.architecture.workspace.DefaultWorkspaceQueryApi
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
+import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
+import kotlinx.coroutines.promise
 import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
 import kotlin.js.Promise
 import kotlin.test.Test
@@ -464,6 +474,101 @@ flow CheckoutFlow {
             )
         }.then { error: dynamic ->
             assertEquals(-32602, error.code)
+        }
+    }
+
+    /** AN/2.4, AR-R9: the same server reads the import of a `zenwave:` document itself, in Node and in the browser. */
+    @Test
+    fun readsTheImportsOfAZenwaveDocumentItselfAndNeverProcessesAnOpenApiUnderTheScheme(): Promise<Unit> {
+        val manifestUri = "https://git.example.org/arcadia/raw/.zenwave-manifest.yml"
+        val manifestText = """
+            config:
+              contentResolution: [git]
+              sources:
+                git:
+                  provider: generic
+                  server: https://git.example.org
+                  contentUrlExpression: "${'$'}{server}/${'$'}{owner.id}/raw/${'$'}{content.path}"
+            domains:
+              sales:
+                services:
+                  flows:
+                    id: flows
+                    version: 1.0.0
+                    artifacts:
+                      - { type: zfl, path: checkout.zfl, version: 0.1.0 }
+                      - { type: openapi, path: openapi.yml, version: 0.1.0 }
+        """.trimIndent()
+        val flow = """
+            @import("../../outside.zdl")
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent() + "\n"
+        val raw = "https://git.example.org/flows/raw"
+        val openapiText = "openapi: 3.0.0\ncomponents:\n  schemas:\n    A:\n      ${'$'}ref: '#/components/schemas/A'\n"
+        val documents = mapOf(
+            "$raw/checkout.zfl" to flow,
+            "$raw/orders/model.zdl" to "entity Order {\n    total Integer\n",
+            "$raw/openapi.yml" to openapiText,
+        )
+        val loaded = mutableListOf<String>()
+        val loader = ZenWaveManifestLoader(
+            listOf(object : DocumentLoader {
+                override fun canLoad(uri: String) = true
+                override suspend fun load(uri: String): String {
+                    loaded += uri
+                    return documents[uri] ?: error("HTTP 404 for $uri")
+                }
+            }),
+            null,
+        )
+        val flowUri = "zenwave:/flows/0.1.0/checkout.zfl"
+        val zdlUri = "zenwave:/flows/0.1.0/orders/model.zdl"
+        val openapiUri = "zenwave:/flows/0.1.0/openapi.yml"
+
+        return GlobalScope.promise {
+            val service = ZenwaveResourceService(manifestUri, loader.parse(manifestUri, manifestText), loader, manifestText)
+            val plane = WorkspaceArchitecturePlane(DefaultWorkspaceQueryApi(ArchitectureGraphResult(ArchitectureGraph(emptyList(), emptyList()))), service)
+            val core = defaultCoreLanguageServer().also { it.attachWorkspace(plane) }
+            val recording = RecordingConnection()
+            val server = ZenwaveJsLanguageServer(core, recording.connection, "1.2.3-test")
+            server.listen()
+
+            recording.call("onDidOpenTextDocument", textDocumentItem(flowUri, "zfl", 1, flow))
+            (server.importsPublishing as Promise<Unit>).await()
+
+            val published = recording.diagnostics.associate { (it.uri as String) to (it.diagnostics as Array<dynamic>) }
+            assertTrue(published.getValue(zdlUri).any { it.severity == 1 }, "the imported ZDL's diagnostics: ${JSON.stringify(recording.diagnostics.toTypedArray())}")
+            assertEquals(1, published.getValue(flowUri).count { it.code == "import-not-declared" })
+            assertEquals(listOf("$raw/orders/model.zdl"), loaded, "read once by the server; nothing outside the owner")
+
+            val hierarchy = (recording.call("zenwave/hierarchy", jsonObject("uri" to flowUri)) as Promise<dynamic>).await()
+            assertTrue(JSON.stringify(hierarchy).contains("\"sourceUri\":\"$zdlUri\""), "the hierarchy draws on the imported ZDL")
+            assertNotNull((recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to flowUri))) as Promise<dynamic>).await())
+
+            recording.call("onDidOpenTextDocument", textDocumentItem(openapiUri, "yaml", 1, openapiText))
+            assertEquals(0, ((recording.call("zenwave/hierarchy", jsonObject("uri" to openapiUri)) as Promise<dynamic>).await() as Array<dynamic>).size)
+            assertTrue(loaded.none { it.endsWith("openapi.yml") }, "$loaded")
         }
     }
 }

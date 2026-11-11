@@ -75,6 +75,23 @@ class ZenwaveResourceService(
         return ResourceContent(served.address, "utf8", served.content)
     }
 
+    /**
+     * AR-R9: the document the import [reference], written in the document at [base], names. [base] is the importing
+     * document's address and the reference is resolved against it by [ZenwaveResources.checkReference] (AR-R3), so
+     * the same owner, the same version and the same declared-only check as a client's `zenwave/readResource` apply,
+     * and the content is fetched once, through the same cache.
+     */
+    suspend fun readImport(base: String, reference: String): ResourceContent {
+        val origin = ZenwaveResources.parse(base) ?: throw notDeclared("not a valid zenwave: address")
+        val known = mutex.withLock { readReferences.toSet() }
+        val allowed = when (val check = ZenwaveResources.checkReference(manifest, origin.address, reference, known)) {
+            is ResourceCheck.Allowed -> check
+            is ResourceCheck.NotDeclared -> throw notDeclared(check.reason)
+        }
+        val served = serve(allowed.address.address, allowed)
+        return ResourceContent(served.address, "utf8", served.content)
+    }
+
     private fun keyOf(uri: String): String {
         if (ZenwaveResources.isRemoteManifestAddress(uri)) {
             if (!manifestIsRemote) throw notDeclared("the manifest is a local file, which is not served")
@@ -83,7 +100,7 @@ class ZenwaveResourceService(
         return ZenwaveResources.parse(uri)?.address ?: throw notDeclared("not a valid zenwave: address")
     }
 
-    private suspend fun serve(uri: String): Served {
+    private suspend fun serve(uri: String, preAuthorized: ResourceCheck.Allowed? = null): Served {
         val key = keyOf(uri)
         while (true) {
             val mine = CompletableDeferred<Served>()
@@ -100,7 +117,7 @@ class ZenwaveResourceService(
                 }
             }
             try {
-                val served = fetch(key)
+                val served = fetch(key, preAuthorized)
                 mutex.withLock {
                     cache[key] = served
                     inFlight.remove(key)
@@ -116,9 +133,9 @@ class ZenwaveResourceService(
         }
     }
 
-    private suspend fun fetch(key: String): Served {
+    private suspend fun fetch(key: String, preAuthorized: ResourceCheck.Allowed? = null): Served {
         if (ZenwaveResources.isRemoteManifestAddress(key)) return fetchManifest(key)
-        val allowed = authorize(key)
+        val allowed = preAuthorized ?: authorize(key)
         val result = ZenwaveResources.load(loader, manifest, allowed)
         val content = result.content
         if (content == null) {
@@ -194,7 +211,8 @@ class ZenwaveResourceService(
         fun referencesIn(content: String): List<String> =
             (
                 REF_VALUE.findAll(content).map { it.groupValues[1].ifEmpty { it.groupValues[2] }.ifEmpty { it.groupValues[3] } } +
-                    LINK_TARGET.findAll(content).map { it.groupValues[1] }
+                    LINK_TARGET.findAll(content).map { it.groupValues[1] } +
+                    DocumentImports.inText(content).map { it.reference }
                 ).filter { it.isNotEmpty() }.distinct().toList()
 
         /** The `file:` URI of a workspace candidate, whether the library wrote it as a URI or as a path. */

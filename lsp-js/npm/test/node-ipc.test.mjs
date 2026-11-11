@@ -717,6 +717,134 @@ describe('A workspace-resolved entry answers with its file: URI (AR-R4)', { time
   });
 });
 
+describe('The server reads the imports of a zenwave: document itself (AR-R9, AR-R8, LVR-R15)', { timeout: 120_000 }, () => {
+  let http;
+  let server;
+  let origin;
+  const requests = [];
+  const flow = [
+    '@import("../../outside.zdl")',
+    'systems {',
+    '    @zdl("orders/model.zdl")',
+    '    Orders {',
+    '        service OrderService {',
+    '            commands: createOrder',
+    '        }',
+    '    }',
+    '}',
+    '',
+    'flow CheckoutFlow {',
+    '    start CheckoutStarted {',
+    '    }',
+    '',
+    '    when CheckoutStarted do createOrder {',
+    '        service Orders.OrderService',
+    '        emits OrderCreated',
+    '    }',
+    '',
+    '    end {',
+    '        completed: OrderCreated',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const recursiveOpenApi = "openapi: 3.0.0\ncomponents:\n  schemas:\n    A:\n      $ref: '#/components/schemas/A'\n";
+  const flowUri = 'zenwave:/flows/0.1.0/checkout.zfl';
+  const zdlUri = 'zenwave:/flows/0.1.0/orders/model.zdl';
+  const openapiUri = 'zenwave:/flows/0.1.0/openapi.yml';
+
+  before(async () => {
+    http = createServer((request, response) => {
+      requests.push(request.url);
+      const bodies = {
+        '/arch/.zenwave-manifest.yml': [
+          'config:',
+          '  contentResolution: [git]',
+          '  sources:',
+          '    git:',
+          '      provider: generic',
+          `      server: ${origin}`,
+          '      contentUrlExpression: "${server}/${owner.id}/raw/${content.path}"',
+          'domains:',
+          '  sales:',
+          '    services:',
+          '      flows:',
+          '        id: flows',
+          '        version: 1.0.0',
+          '        artifacts:',
+          '          - { type: zfl, path: checkout.zfl, version: 0.1.0 }',
+          '          - { type: openapi, path: openapi.yml, version: 0.1.0 }',
+          '',
+        ].join('\n'),
+        '/flows/raw/checkout.zfl': flow,
+        '/flows/raw/orders/model.zdl': 'entity Order {\n    total Integer\n',
+        '/flows/raw/openapi.yml': recursiveOpenApi,
+      };
+      if (request.url in bodies) {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end(bodies[request.url]);
+      } else {
+        response.writeHead(404);
+        response.end('nope');
+      }
+    });
+    await new Promise((resolve) => http.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${http.address().port}`;
+    server = startServer(['--node-ipc']);
+    await server.connection.sendRequest('initialize', {
+      processId: process.pid,
+      rootUri: null,
+      capabilities: {},
+      initializationOptions: { zenwave: { projectManifestUri: `${origin}/arch/.zenwave-manifest.yml` } },
+    });
+    await server.connection.sendNotification('initialized', {});
+  });
+
+  after(() => {
+    if (server.child.exitCode === null) server.child.kill();
+    http.close();
+  });
+
+  test('a remote flow importing a remote ZDL gives the ZDL diagnostics, read by the server', async () => {
+    const { content } = await server.connection.sendRequest('zenwave/readResource', { uri: flowUri });
+    assert.equal(content, flow);
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: flowUri, languageId: 'zfl', version: 1, text: content },
+    });
+    const zdl = await within(30, server.diagnosticsFor(zdlUri), 'the imported ZDL diagnostics');
+    assert.ok(zdl.some((diagnostic) => diagnostic.severity === 1), JSON.stringify(zdl));
+    // The document's own diagnostics are published first, then again with the problems of its imports.
+    let withImports = await within(30, server.diagnosticsFor(flowUri), 'the flow diagnostics');
+    while (!withImports.some((diagnostic) => diagnostic.code === 'import-not-declared')) {
+      withImports = await within(30, server.diagnosticsFor(flowUri), 'the flow diagnostics with its import problems');
+    }
+    const refused = withImports.filter((diagnostic) => diagnostic.code === 'import-not-declared');
+    assert.equal(refused.length, 1, JSON.stringify(withImports));
+    assert.equal(refused[0].range.start.line, 0, 'the diagnostic is on the import');
+    assert.equal(requests.filter((url) => url === '/flows/raw/orders/model.zdl').length, 1);
+    assert.ok(!requests.some((url) => url.includes('outside')), 'nothing outside the owner was requested');
+  });
+
+  test('hierarchy and preview work for the open zenwave: document, the hierarchy drawing on the imported ZDL', async () => {
+    const hierarchy = await within(30, server.connection.sendRequest('zenwave/hierarchy', { uri: flowUri }), 'hierarchy');
+    assert.ok(JSON.stringify(hierarchy).includes(`"uri":"${zdlUri}"`), JSON.stringify(hierarchy).slice(0, 400));
+    const preview = await within(30, server.connection.sendRequest('zenwave/preview', { textDocument: { uri: flowUri } }), 'preview');
+    assert.ok(Object.keys(preview).length > 0);
+  });
+
+  test('an OpenAPI under the scheme is never processed, and a recursive one does not stall the server', async () => {
+    const before = requests.length;
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: openapiUri, languageId: 'yaml', version: 1, text: recursiveOpenApi },
+    });
+    const hierarchy = await within(10, server.connection.sendRequest('zenwave/hierarchy', { uri: openapiUri }), 'hierarchy of the OpenAPI');
+    assert.deepEqual(hierarchy, []);
+    const flowHierarchy = await within(10, server.connection.sendRequest('zenwave/hierarchy', { uri: flowUri }), 'hierarchy of the flow');
+    assert.ok(flowHierarchy.length > 0);
+    assert.equal(requests.length, before, 'opening it requested nothing');
+  });
+});
+
 describe('Node entry point forked without transport arguments', { timeout: 120_000 }, () => {
   test('defaults to IPC', async () => {
     const server = startServer([]);
