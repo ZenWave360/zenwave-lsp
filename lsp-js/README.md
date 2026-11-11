@@ -68,8 +68,9 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 | `zenwave/preview` | `{ textDocument: { uri }, mode?: "docs" \| "diagrams", sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content, group? }[], defaultRepresentationId }` |
 | `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
 
-Architecture manifests use `artifacts`, `docs`, and `consumers` grouping kinds; resource entries use their artifact type or
-docs key as their kind, and consumer entries use `consumer`.
+Architecture manifests use `artifacts`, `docs`, and `consumers` grouping kinds; resource entries use the non-colliding
+`artifact` or `doc` kind, with the manifest artifact type or docs key in `uiHints.type` or `uiHints.key`. Consumer entries
+use `consumer`.
 
 `zenwave/hierarchy` answers whether or not the document is open. An open document is answered from the
 editor's content; any other document is read by the server: files through Node's `fs` (the Node entry point),

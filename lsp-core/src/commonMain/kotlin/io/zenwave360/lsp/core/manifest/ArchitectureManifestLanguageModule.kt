@@ -282,8 +282,8 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         val artifacts = declared.filter { it.kind == DeclaredKind.ARTIFACT }
         if (artifacts.isNotEmpty()) {
             add(
-                groupNode(uri, document, ownerPath, "artifacts", "Artifacts", artifacts.mapIndexed { index, entry ->
-                    resourceNode(uri, document, "$ownerPath.artifacts[$index]", entry)
+                groupNode(uri, document, ownerPath, "artifacts", "Artifacts", artifactSourcePaths(document, ownerPath, artifacts).map { (sourcePath, entry) ->
+                    resourceNode(uri, document, sourcePath, entry)
                 })
             )
         }
@@ -299,13 +299,13 @@ class ArchitectureManifestLanguageModule : LanguageModule {
 
         if (owner is ManifestService && owner.consumers.isNotEmpty()) {
             add(
-                groupNode(uri, document, ownerPath, "consumers", "Consumers", owner.consumers.mapIndexed { index, consumer ->
+                groupNode(uri, document, ownerPath, "consumers", "Consumers", consumerSourceEntries(document, ownerPath, owner.consumers).map { (sourcePath, label) ->
                     HierarchyNode(
-                        id = "$uri#$ownerPath.consumers[$index]",
-                        label = consumer,
+                        id = "$uri#$sourcePath",
+                        label = label,
                         kind = "consumer",
                         language = languageId,
-                        source = document.locationOf("$ownerPath.consumers[$index]") ?: rootLocation(uri),
+                        source = document.locationOf(sourcePath) ?: rootLocation(uri),
                         children = emptyList(),
                     )
                 })
@@ -337,14 +337,60 @@ class ArchitectureManifestLanguageModule : LanguageModule {
     ) = HierarchyNode(
         id = "$uri#$sourcePath",
         label = entry.artifact?.path ?: requireNotNull(entry.docKey),
-        kind = entry.artifact?.type ?: requireNotNull(entry.docKey),
+        kind = if (entry.artifact != null) "artifact" else "doc",
         language = languageId,
         source = document.locationOf(sourcePath) ?: rootLocation(uri),
         children = emptyList(),
+        uiHints = entry.artifact?.let { mapOf("type" to it.type) } ?: mapOf("key" to requireNotNull(entry.docKey)),
         version = entry.version,
         address = entry.address,
         disabledReason = entry.flag?.reason(),
     )
+
+    /**
+     * The manifest library deliberately drops malformed artifacts.  Keep hierarchy ids and locations attached to
+     * the original YAML sequence rather than to that filtered list.
+     */
+    private fun artifactSourcePaths(
+        document: YamlDocumentModel,
+        ownerPath: String,
+        artifacts: List<DeclaredResource>,
+    ): List<Pair<String, DeclaredResource>> {
+        val rawArtifacts = document.nodeAt("$ownerPath.artifacts") as? List<*> ?: emptyList<Any?>()
+        val declaredRawIndices = rawArtifacts.mapIndexedNotNull { index, value ->
+            index.takeIf { value.isArtifactDeclaration() }
+        }
+        return artifacts.mapIndexed { filteredIndex, entry ->
+            ("$ownerPath.artifacts[${declaredRawIndices.getOrElse(filteredIndex) { filteredIndex }}]") to entry
+        }
+    }
+
+    /**
+     * Consumers are normalized by the manifest library and malformed values are removed.  The hierarchy is a view
+     * of the manifest text, so preserve the raw label and its sequence position.
+     */
+    private fun consumerSourceEntries(
+        document: YamlDocumentModel,
+        ownerPath: String,
+        consumers: List<String>,
+    ): List<Pair<String, String>> {
+        val rawConsumers = (document.nodeAt("$ownerPath.consumers") as? List<*>).orEmpty()
+            .mapIndexedNotNull { index, value -> value.consumerLabel()?.let { "$ownerPath.consumers[$index]" to it } }
+        return consumers.mapIndexed { filteredIndex, normalized ->
+            rawConsumers.getOrNull(filteredIndex) ?: ("$ownerPath.consumers[$filteredIndex]" to normalized)
+        }
+    }
+
+    private fun Any?.isArtifactDeclaration(): Boolean {
+        val values = this as? Map<*, *> ?: return false
+        return (values["type"] as? String)?.isNotBlank() == true && (values["path"] as? String)?.isNotBlank() == true
+    }
+
+    private fun Any?.consumerLabel(): String? = when (this) {
+        is String -> takeIf { it.isNotBlank() }
+        is Map<*, *> -> (this["service"] as? String)?.takeIf { it.isNotBlank() }
+        else -> null
+    }
 
     private fun DeclaredFlag.reason(): String = when (this) {
         DeclaredFlag.FOLDER -> "pending (phase 2)"
@@ -453,7 +499,7 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         )
 }
 
-private data class ParsedArchitectureDocument(
+internal data class ParsedArchitectureDocument(
     val manifest: ArchitectureManifest,
     val document: YamlDocumentModel,
 )
