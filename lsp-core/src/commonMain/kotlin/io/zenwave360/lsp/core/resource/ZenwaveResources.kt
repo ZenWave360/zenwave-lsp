@@ -28,6 +28,8 @@ data class ZenwaveAddress(val ownerId: String, val version: String?, val path: S
 
 enum class DeclaredKind { ARTIFACT, DOCUMENT }
 
+const val UNADDRESSABLE_PERCENT_REASON = "a literal % in a path is not supported yet"
+
 /** Why a declared entry has no `zenwave:` address. */
 enum class DeclaredFlag {
     /** The entry is an absolute URI (AR-Q4): it bypasses `contentResolution` and has no owner-relative name. */
@@ -36,7 +38,10 @@ enum class DeclaredFlag {
     /** The entry names a folder, which is reserved for phase 2 (AR-R12). */
     FOLDER,
 
-    /** The path or the owner id cannot be written as address segments (empty, `.`, `..`, backslash, control). */
+    /**
+     * The path or the owner id cannot be written as address segments (empty, `.`, `..`, backslash, control), or the
+     * path holds a literal `%`: [UNADDRESSABLE_PERCENT_REASON]. Such an entry is never served.
+     */
     UNADDRESSABLE,
 }
 
@@ -147,7 +152,7 @@ object ZenwaveResources {
 
     private fun isAddressable(path: String): Boolean =
         path.split('/').none { it.isEmpty() || it == "." || it == ".." } &&
-            path.none { it == '\\' || it.code < 0x20 || it.code == 0x7f }
+            path.none { it == '\\' || it == '%' || it.code < 0x20 || it.code == 0x7f }
 
     /**
      * AR-R2. [address] is served only when its owner id, version and path are a declared entry of the manifest.
@@ -184,7 +189,7 @@ object ZenwaveResources {
         val entries = declaredFor(manifest, origin)
         // A reference that lands on a declared entry is that entry, so an artifact keeps its artifact resolution.
         entries.firstOrNull { it.path == parsed.path }?.let { return ResourceCheck.Allowed(parsed, it.owner, it) }
-        if ('%' in parsed.path) return ResourceCheck.NotDeclared("a reference with a percent sign that no declared entry has")
+        if ('%' in parsed.path) return ResourceCheck.NotDeclared(UNADDRESSABLE_PERCENT_REASON)
         return ResourceCheck.Allowed(parsed, entries.first().owner, null)
     }
 
@@ -225,11 +230,9 @@ object ZenwaveResources {
         allowed: ResourceCheck.Allowed,
         options: ManifestLoadOptions = ManifestLoadOptions(),
     ): ManifestResourceLoadResult {
-        // The library puts a path into a URI as it is, without escaping `%`, and the loader beneath decodes the URI
-        // once. A declared `100%.md` is therefore handed over as `100%25.md`, which reads back as the file it names.
-        val artifact = allowed.declared?.artifact?.let { it.copy(path = it.path.replace("%", "%25")) }
+        val artifact = allowed.declared?.artifact
         if (artifact != null) return loader.loadArtifactResult(manifest, allowed.owner, artifact, options)
-        val path = allowed.address.path.replace("%", "%25")
+        val path = allowed.address.path
         return try {
             loader.loadOwnedDocument(manifest, allowed.owner, allowed.address.version, path, options)
         } catch (error: ManifestResourceLoadException) {
@@ -284,8 +287,8 @@ object ZenwaveResources {
         } catch (error: Exception) {
             return null
         }
-        // Decoded exactly once. A `%` in the result is legitimate only for a declared path (`100%.md`); a client address
-        // or a reference with one is refused unless it equals a declared entry, so `%252e` never travels on as `%2e`.
+        // Decoded exactly once. A `%` in the result is refused wherever a client or a reference supplies it
+        // (checkReference); a declared path with one is never addressed (UNADDRESSABLE_PERCENT_REASON).
         if (decoded.any { it == '/' || it == '\\' || it.code < 0x20 || it.code == 0x7f }) return null
         return decoded
     }

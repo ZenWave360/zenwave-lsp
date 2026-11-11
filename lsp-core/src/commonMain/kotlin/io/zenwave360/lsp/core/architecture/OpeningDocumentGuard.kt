@@ -10,6 +10,9 @@ import io.zenwave360.jsonrefparser.io.DocumentLoader
  *
  * With [followManifestOrigin] a remote manifest may also read its own origin (a `$ref` to a sibling document of the
  * manifest); the graph's artifact loads do not, so a remote manifest reads only itself there.
+ *
+ * Limit: the loaders underneath follow HTTP redirects, and the target of a redirect is not checked again here (tracked
+ * as AR-Q5 in the spec).
  */
 internal class OpeningDocumentGuard(
     manifestUri: String,
@@ -18,7 +21,7 @@ internal class OpeningDocumentGuard(
 ) : DocumentLoader {
     private val manifestUris = setOf(manifestUri, canonicalFile(manifestUri) ?: manifestUri)
     private val manifestIsLocal: Boolean = canonicalFile(manifestUri) != null
-    private val manifestOrigin: String? = ORIGIN.find(manifestUri)?.groupValues?.get(1)
+    private val manifestOrigin: String? = originOf(manifestUri)
 
     override fun canLoad(uri: String): Boolean = delegates.any { it.canLoad(uri) }
 
@@ -29,8 +32,7 @@ internal class OpeningDocumentGuard(
             return isPlainPath(file)
         }
         if (followManifestOrigin && manifestOrigin != null) {
-            val origin = ORIGIN.find(uri)?.groupValues?.get(1) ?: return false
-            return origin.equals(manifestOrigin, ignoreCase = true)
+            return originOf(uri) == manifestOrigin
         }
         return false
     }
@@ -51,8 +53,16 @@ internal class OpeningDocumentGuard(
     }
 
     private companion object {
-        val ORIGIN = Regex("^(https?://[^/?#@\\\\]+)(?=[/?#]|$)", RegexOption.IGNORE_CASE)
+        val ORIGIN = Regex("^(https?)://([^/?#@\\\\:\\[\\]]+|\\[[0-9a-fA-F:.]+\\])(?::(\\d+))?(?=[/?#]|$)", RegexOption.IGNORE_CASE)
         val DRIVE_PATH = Regex("^[A-Za-z]:[/\\\\]")
+
+        /** `scheme://host:port` with the scheme and host in lower case and the default port made explicit; null for anything else. */
+        fun originOf(uri: String): String? {
+            val match = ORIGIN.find(uri) ?: return null
+            val scheme = match.groupValues[1].lowercase()
+            val port = match.groupValues[3].ifEmpty { if (scheme == "https") "443" else "80" }.trimStart('0').ifEmpty { "0" }
+            return "$scheme://${match.groupValues[2].lowercase()}:$port"
+        }
 
         /**
          * `file:///path` with an empty authority, or a drive path written as `file:///C:/path`; null for a UNC path,

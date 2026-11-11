@@ -124,6 +124,25 @@ class OpeningLoaderTest {
     }
 
     @Test
+    fun originsAreComparedByNormalisedSchemeHostAndEffectivePort() {
+        val guard = guard(manifestUri, follow = true)
+        listOf(
+            "https://allowed.example:443/sales.yml",
+            "HTTPS://Allowed.Example/sales.yml",
+            "https://allowed.example:0443/sales.yml",
+        ).forEach { assertTrue(guard.isReadable(it), it) }
+        listOf(
+            "https://allowed.example:444/sales.yml",
+            "http://allowed.example:80/sales.yml",
+            "https://allowed.example:/x@evil.example",
+            "https://allowed.example.evil.example:443/x.yml",
+        ).forEach { assertFalse(guard.isReadable(it), it) }
+        val port = guard("http://allowed.example:80/m.yml", follow = true)
+        assertTrue(port.isReadable("http://allowed.example/sales.yml"))
+        assertFalse(port.isReadable("https://allowed.example/sales.yml"))
+    }
+
+    @Test
     fun refusedAddressesNeverReachTheDelegate() = runTest {
         val io = Recording(emptyMap())
         val guard = OpeningDocumentGuard(localManifest, listOf(io))

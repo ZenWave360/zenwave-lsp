@@ -270,32 +270,16 @@ class ZenwaveResourcesTest {
     }
 
     @Test
-    fun aLiteralPercentInADeclaredPathIsAddressedEncodedOnceAndServed() = runTest {
+    fun aLiteralPercentInADeclaredPathIsUnaddressableAndNeverServed() = runTest {
         val manifest = manifest()
-        val address = "zenwave:/sales/2.0.0/docs/100%25.md"
-        assertTrue(address in ZenwaveResources.declaredResources(manifest).mapNotNull { it.address })
-        val allowed = manifest.allowed(address)
-        assertEquals("docs/100%.md", allowed.address.path)
-        assertEquals("percent", allowed.declared?.docKey)
-        // a client cannot reach other paths with a percent sign
+        val entry = ZenwaveResources.declaredResources(manifest).single { it.docKey == "percent" }
+        assertEquals(DeclaredFlag.UNADDRESSABLE, entry.flag)
+        assertNull(entry.address)
+        assertTrue("literal %" in UNADDRESSABLE_PERCENT_REASON)
+        manifest.refused("zenwave:/sales/2.0.0/docs/100%25.md")
         manifest.refused("zenwave:/sales/2.0.0/docs/100%2525.md")
-        manifest.refused("zenwave:/sales/2.0.0/docs/200%25.md")
-        // the library puts the path into the URI as it is, so load hands it over with the sign escaped once
-        val reads = mutableListOf<String>()
-        val io = object : DocumentLoader {
-            override fun canLoad(uri: String) = true
-            override suspend fun load(uri: String): String {
-                reads += uri
-                return "ok"
-            }
-        }
-        val local = ZenWaveManifestLoader(listOf(io), null)
-        val localManifest = local.parse(
-            "file:///work/architecture/zenwave-architecture.yml",
-            manifestText.replace("contentResolution: [git]", "contentResolution: [workspace]"),
-        )
-        ZenwaveResources.load(local, localManifest, localManifest.allowed(address))
-        assertEquals(listOf("file:///work/architecture/sales/docs/100%25.md"), reads)
+        // and no reference reaches a path with a percent sign
+        manifest.referenceRefused("zenwave:/$orders/0.1.0/openapi.yml", "docs/100%25.md")
     }
 
     @Test
@@ -317,7 +301,7 @@ class ZenwaveResourcesTest {
         val manifest = manifest()
         val flagged = ZenwaveResources.declaredResources(manifest).filter { it.flag != null }
         assertEquals(
-            mapOf<String?, DeclaredFlag?>("adrs" to DeclaredFlag.FOLDER, "decisions" to DeclaredFlag.FOLDER, "external" to DeclaredFlag.ABSOLUTE_URI),
+            mapOf<String?, DeclaredFlag?>("adrs" to DeclaredFlag.FOLDER, "decisions" to DeclaredFlag.FOLDER, "percent" to DeclaredFlag.UNADDRESSABLE, "external" to DeclaredFlag.ABSOLUTE_URI),
             flagged.associate { it.docKey to it.flag },
         )
         assertTrue(flagged.all { it.address == null })
