@@ -351,4 +351,46 @@ class ZenwaveResourcesTest {
         assertTrue("https://git.example.org/$orders/raw/CHANGELOG.md" in result.errorMessage.orEmpty(), result.errorMessage)
         assertNotNull(result.errorMessage)
     }
+
+    private val subdomainManifestText = """
+        config:
+          contentResolution: [git]
+          sources:
+            git:
+              provider: generic
+              server: https://git.example.org
+              contentUrlExpression: "${'$'}{server}/${'$'}{owner.id}/raw/${'$'}{content.path}"
+        domains:
+          sales:
+            version: 2.0.0
+            subdomains:
+              checkout:
+                id: sales.checkout
+                docs: { guide: GUIDE.md }
+                artifacts:
+                  - { type: openapi, path: api.yml, version: 0.3.0 }
+              billing:
+                id: sales.billing
+                version: 1.5.0
+                docs: { guide: BILLING.md }
+          lonely:
+            subdomains:
+              sub:
+                id: lonely.sub
+                docs: { notes: NOTES.md }
+    """.trimIndent()
+
+    @Test
+    fun aSubdomainOwnsItsDocsAndArtifactsWithTheVersionsTheLibraryDefines() = runTest {
+        val loader = ZenWaveManifestLoader(emptyList(), null)
+        val manifest = loader.parse("https://example.org/.zenwave-manifest.yml", subdomainManifestText)
+        val addresses = ZenwaveResources.declaredResources(manifest).mapNotNull { it.address }
+        // Inherited from the domain, its own, none anywhere (the dash), and an artifact's own version.
+        assertTrue("zenwave:/sales.checkout/2.0.0/GUIDE.md" in addresses, addresses.toString())
+        assertTrue("zenwave:/sales.billing/1.5.0/BILLING.md" in addresses, addresses.toString())
+        assertTrue("zenwave:/lonely.sub/-/NOTES.md" in addresses, addresses.toString())
+        assertTrue("zenwave:/sales.checkout/0.3.0/api.yml" in addresses, addresses.toString())
+        assertIs<ResourceCheck.Allowed>(ZenwaveResources.check(manifest, "zenwave:/sales.checkout/2.0.0/GUIDE.md"))
+        assertIs<ResourceCheck.NotDeclared>(ZenwaveResources.check(manifest, "zenwave:/sales.checkout/0.3.0/GUIDE.md"))
+    }
 }

@@ -18,6 +18,8 @@ object ZenwaveCustomRequests {
     const val EVENT_FLOW_VIEWS = "zenwave/eventFlowViews"
     const val PREVIEW = "zenwave/preview"
     const val SYMBOL_AT = "zenwave/symbolAt"
+    const val STAT_RESOURCE = "zenwave/statResource"
+    const val READ_RESOURCE = "zenwave/readResource"
 
     val ALL: List<String> = listOf(
         HIERARCHY,
@@ -27,6 +29,8 @@ object ZenwaveCustomRequests {
         EVENT_FLOW_VIEWS,
         PREVIEW,
         SYMBOL_AT,
+        STAT_RESOURCE,
+        READ_RESOURCE,
     )
 }
 

@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.architecture
 
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
+import io.zenwave360.lsp.core.resource.ZenwaveResourceService
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.architecture.graph.ArchitectureGraphBuilder
 import io.zenwave360.jsonrefparser.io.defaultLoaders
@@ -11,6 +12,8 @@ import io.zenwave360.architecture.workspace.WorkspaceSourceLocation
 /** Thin LSP facade over the architecture contract owned by zenwave-architecture. */
 class WorkspaceArchitecturePlane(
     private val workspace: WorkspaceQueryApi,
+    /** The `zenwave:` requests of the opened manifest (AR-R4, AR-R5); null when the plane was built without one. */
+    val resources: ZenwaveResourceService? = null,
 ) {
     suspend fun conceptsAt(documentSymbol: DocumentSymbolRef, limit: Int = 20): ArchitectureConceptSearchResult {
         val result = workspace.at(
@@ -36,11 +39,24 @@ class WorkspaceArchitecturePlane(
     companion object {
         suspend fun open(
             manifestUri: String,
-            runtime: WorkspaceRuntime = openingRuntime(manifestUri),
+            runtime: WorkspaceRuntime? = null,
         ): WorkspaceArchitecturePlane {
-            val workspace: WorkspaceQueryApi = runtime.open(manifestUri)
-            return WorkspaceArchitecturePlane(workspace)
+            if (runtime != null) return WorkspaceArchitecturePlane(runtime.open(manifestUri))
+            val manifestLoader = guardedLoader(manifestUri, followManifestOrigin = true)
+            val manifestText = manifestLoader.loadResourceText(manifestUri)
+            val manifest = manifestLoader.parse(manifestUri, manifestText)
+            val workspace = WorkspaceRuntime(manifestLoader, ArchitectureGraphBuilder(guardedLoader(manifestUri, false)))
+                .build(manifest)
+            // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),
+            // so this loader is not the guard above: it reads the candidates the manifest's sources produce.
+            val resourceLoader = ZenWaveManifestLoader(defaultLoaders(), archiveEntryLoader = null)
+            return WorkspaceArchitecturePlane(workspace, ZenwaveResourceService(manifestUri, manifest, resourceLoader, manifestText))
         }
+
+        private fun guardedLoader(manifestUri: String, followManifestOrigin: Boolean) = ZenWaveManifestLoader(
+            listOf(OpeningDocumentGuard(manifestUri, defaultLoaders(), followManifestOrigin)),
+            archiveEntryLoader = null,
+        )
 
         /**
          * The runtime used while a workspace opens. Two loaders, because the two reads differ: the manifest and what it
@@ -50,13 +66,8 @@ class WorkspaceArchitecturePlane(
          * it through the `zenwave:` scheme (AR-R10, AR-Q4), never as a side effect of initialisation, so it shows as a
          * warning in the graph until then.
          */
-        fun openingRuntime(manifestUri: String): WorkspaceRuntime {
-            fun loader(followManifestOrigin: Boolean) = ZenWaveManifestLoader(
-                listOf(OpeningDocumentGuard(manifestUri, defaultLoaders(), followManifestOrigin)),
-                archiveEntryLoader = null,
-            )
-            return WorkspaceRuntime(loader(true), ArchitectureGraphBuilder(loader(false)))
-        }
+        fun openingRuntime(manifestUri: String): WorkspaceRuntime =
+            WorkspaceRuntime(guardedLoader(manifestUri, true), ArchitectureGraphBuilder(guardedLoader(manifestUri, false)))
     }
 }
 

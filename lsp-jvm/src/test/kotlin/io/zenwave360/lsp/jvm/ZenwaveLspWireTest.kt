@@ -243,6 +243,144 @@ class ZenwaveLspWireTest {
         }
     }
 
+    /** A manifest and its content served over local http; every request path is recorded. */
+    private fun withResourceServer(block: (origin: String, manifestUri: String, requests: List<String>) -> Unit) {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val http = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
+        val origin = "http://127.0.0.1:${http.address.port}"
+        val bodies = mapOf(
+            "/arch/.zenwave-manifest.yml" to listOf(
+                "config:",
+                "  contentResolution: [git]",
+                "  sources:",
+                "    git:",
+                "      provider: generic",
+                "      server: $origin",
+                "      contentUrlExpression: \"\${server}/\${owner.id}/raw/\${content.path}?token=abc123\"",
+                "domains:",
+                "  sales:",
+                "    services:",
+                "      orders:",
+                "        id: orders",
+                "        version: 1.0.0",
+                "        docs: { changelog: CHANGELOG.md }",
+                "        artifacts:",
+                "          - { type: openapi, path: openapi.yml, version: 0.1.0 }",
+                "          - { type: openapi, path: missing.yml, version: 0.1.0 }",
+                "",
+            ).joinToString("\n"),
+            "/orders/raw/openapi.yml" to "components:\n  schemas:\n    A:\n      \$ref: 'schemas/common.yml#/A'\n",
+            "/orders/raw/schemas/common.yml" to "A: {}\n",
+            "/orders/raw/CHANGELOG.md" to "# é\n",
+        )
+        http.createContext("/") { exchange ->
+            requests += exchange.requestURI.toString()
+            val body = bodies[exchange.requestURI.path]
+            val bytes = (body ?: "nope").toByteArray()
+            exchange.sendResponseHeaders(if (body != null) 200 else 404, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        http.start()
+        try {
+            block(origin, "$origin/arch/.zenwave-manifest.yml", requests)
+        } finally {
+            http.stop(0)
+        }
+    }
+
+    private fun resourceParams(uri: String) = """{"uri":"$uri"}"""
+
+    @Test
+    fun statAndReadResourceFetchOnceListCandidatesAndRefuseWhatTheManifestDoesNotDeclare() = withResourceServer { origin, manifestUri, requests ->
+        initialize("""{"zenwave":{"projectManifestUri":"$manifestUri"}}""")
+        fun contentRequests() = requests.filter { !it.startsWith("/arch/") }
+        assertEquals(emptyList(), contentRequests(), "opening the workspace requests no content")
+        assertTrue("zenwave/statResource" in CustomRequestMethods.ALL && "zenwave/readResource" in CustomRequestMethods.ALL)
+
+        val address = "zenwave:/orders/0.1.0/openapi.yml"
+        val stat = request("zenwave/statResource", resourceParams(address)).asJsonObject
+        assertEquals(address, stat["uri"].asString)
+        assertEquals("file", stat["type"].asString)
+        assertEquals(true, stat["readonly"].asBoolean)
+        assertEquals("git", stat["source"].asJsonObject["kind"].asString)
+        assertFalse(stat["source"].asJsonObject.has("fileUri"))
+        val content = request("zenwave/readResource", resourceParams(address)).asJsonObject
+        assertEquals("utf8", content["encoding"].asString)
+        assertEquals(content["content"].asString.toByteArray().size, stat["size"].asInt)
+        request("zenwave/readResource", resourceParams(address))
+        assertEquals(listOf("/orders/raw/openapi.yml?token=abc123"), contentRequests(), "a stat and two reads cost one fetch")
+
+        // A reference found in content already read; the same path from nowhere is refused.
+        assertEquals("A: {}\n", request("zenwave/readResource", resourceParams("zenwave:/orders/0.1.0/schemas/common.yml")).asJsonObject["content"].asString)
+        val (refusedCode, refused) = requestError("zenwave/readResource", resourceParams("zenwave:/orders/0.1.0/other.yml"))
+        assertEquals(-32803, refusedCode)
+        assertEquals("resourceNotDeclared", refused!!.asJsonObject["kind"].asString)
+
+        // A failure lists the URLs tried, hides the token, and is not cached.
+        val before = contentRequests().size
+        repeat(2) {
+            val (code, data) = requestError("zenwave/readResource", resourceParams("zenwave:/orders/0.1.0/missing.yml"))
+            assertEquals(-32803, code)
+            val failure = data!!.asJsonObject
+            assertEquals("resourceUnresolved", failure["kind"].asString)
+            val candidates = failure["candidates"].asJsonArray.map { it.asJsonObject }
+            assertEquals(listOf("git"), candidates.map { it["source"].asString })
+            assertEquals("$origin/orders/raw/missing.yml?token=<redacted>", candidates[0]["url"].asString)
+            assertFalse("abc123" in failure.toString(), failure.toString())
+        }
+        assertEquals(2, contentRequests().size - before)
+
+        // Nothing undeclared makes a request.
+        val total = requests.size
+        listOf(
+            "zenwave:/orders/9.9.9/openapi.yml", "zenwave:/orders/0.1.0/internal/secrets.yml", "zenwave:/orders/0.1.0/../x.yml",
+            "zenwave:/nobody/0.1.0/openapi.yml", "file:///etc/passwd",
+        ).forEach { refusedAddress ->
+            assertEquals("resourceNotDeclared", requestError("zenwave/statResource", resourceParams(refusedAddress)).second!!.asJsonObject["kind"].asString, refusedAddress)
+        }
+        assertEquals(total, requests.size)
+
+        // The remote manifest is served under its own address, from the text the workspace opened with.
+        val manifestFetches = requests.count { it.startsWith("/arch/") }
+        val manifest = request("zenwave/readResource", resourceParams("zenwave:/.zenwave-manifest.yml")).asJsonObject
+        assertTrue("contentResolution" in manifest["content"].asString)
+        assertEquals("manifest", request("zenwave/statResource", resourceParams("zenwave:/.zenwave-manifest.yml")).asJsonObject["source"].asJsonObject["kind"].asString)
+        assertEquals(manifestFetches, requests.count { it.startsWith("/arch/") }, "serving the manifest does not fetch it again")
+
+        assertEquals(-32602, requestError("zenwave/statResource", "{}").first)
+        assertEquals(-32602, requestError("zenwave/statResource", """{"uri":3}""").first, "a number is not coerced to a string")
+        assertEquals(-32602, requestError("zenwave/readResource", """{"uri":null}""").first)
+    }
+
+    @Test
+    fun aWorkspaceResolvedEntryAnswersWithItsFileUri() {
+        val dir = java.nio.file.Files.createTempDirectory("zenwave-resources-")
+        java.nio.file.Files.createDirectories(dir.resolve("orders"))
+        java.nio.file.Files.writeString(dir.resolve("orders/openapi.yml"), "openapi: 3.0.0\n")
+        val manifest = dir.resolve("zenwave-architecture.yml")
+        java.nio.file.Files.writeString(
+            manifest,
+            listOf(
+                "config:", "  contentResolution: [workspace]", "  sources:", "    workspace:",
+                "      basePathExpression: \"\${service.id}\"",
+                "domains:", "  sales:", "    services:", "      orders:", "        id: orders", "        artifacts:",
+                "          - { type: openapi, path: openapi.yml, version: 0.1.0 }", "",
+            ).joinToString("\n"),
+        )
+        initialize("""{"zenwave":{"projectManifestUri":"${manifest.toUri()}"}}""")
+
+        val stat = request("zenwave/statResource", resourceParams("zenwave:/orders/0.1.0/openapi.yml")).asJsonObject
+        assertEquals("workspace", stat["source"].asJsonObject["kind"].asString)
+        val fileUri = stat["source"].asJsonObject["fileUri"].asString
+        assertEquals(dir.resolve("orders/openapi.yml").toFile().canonicalFile, java.io.File(java.net.URI(fileUri)).canonicalFile)
+        assertEquals("openapi: 3.0.0\n", request("zenwave/readResource", resourceParams("zenwave:/orders/0.1.0/openapi.yml")).asJsonObject["content"].asString)
+        assertEquals(
+            "resourceNotDeclared",
+            requestError("zenwave/readResource", resourceParams("zenwave:/.zenwave-manifest.yml")).second!!.asJsonObject["kind"].asString,
+            "a local manifest is not served under the scheme",
+        )
+    }
+
     @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()

@@ -16,7 +16,10 @@ import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
 import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
 import kotlinx.coroutines.promise
+import io.zenwave360.lsp.core.resource.ResourceJson
+import io.zenwave360.lsp.core.resource.ResourceRequestException
 import kotlin.js.Promise
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
@@ -146,7 +149,24 @@ class ZenwaveJsLanguageServer(
                 }
             }
         }
+        registerCustomRequest(ZenwaveCustomRequests.STAT_RESOURCE) { params ->
+            answer {
+                val uri = resourceUri(params)
+                workspaceOpening?.await()
+                JSON.parse<dynamic>(ResourceJson.stat(server.statResource(uri)))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.READ_RESOURCE) { params ->
+            answer {
+                val uri = resourceUri(params)
+                workspaceOpening?.await()
+                JSON.parse<dynamic>(ResourceJson.content(server.readResource(uri)))
+            }
+        }
     }
+
+    private fun resourceUri(params: dynamic): String =
+        stringOrNull(if (isPresent(params)) params.uri else null) ?: throw InvalidRequestParamsException("uri is required")
 
     /**
      * Runs a request handler as a Promise. A [DocumentRequestException] or [InvalidRequestParamsException] is
@@ -165,6 +185,11 @@ class ZenwaveJsLanguageServer(
                 ZenwaveErrorCodes.REQUEST_FAILED,
                 throwable.message ?: throwable.kind.wireName,
                 JSON.parse<dynamic>(VisualizationJson.failureData(throwable)),
+            )
+            is ResourceRequestException -> Triple(
+                ZenwaveErrorCodes.REQUEST_FAILED,
+                throwable.message ?: throwable.kind.wireName,
+                JSON.parse<dynamic>(ResourceJson.failureData(throwable)),
             )
             is InvalidRequestParamsException -> Triple(ZenwaveErrorCodes.INVALID_PARAMS, throwable.message ?: "invalid params", null)
             else -> return error

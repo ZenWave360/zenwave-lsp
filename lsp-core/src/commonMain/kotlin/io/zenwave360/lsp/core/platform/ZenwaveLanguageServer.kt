@@ -12,6 +12,11 @@ import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
 import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
+import io.zenwave360.lsp.core.resource.ResourceContent
+import io.zenwave360.lsp.core.resource.ResourceFailureKind
+import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ResourceStat
+import io.zenwave360.lsp.core.resource.ZenwaveResourceService
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.Range
@@ -315,6 +320,16 @@ class ZenwaveLanguageServer(
     }
 
     fun workspaceStatus(): WorkspaceStatus = lock.read { workspaceStatus }
+
+    /** `zenwave/statResource` (AR-R4). With no manifest open, nothing is declared, so every address is refused. */
+    suspend fun statResource(uri: String): ResourceStat = resources().stat(uri)
+
+    /** `zenwave/readResource` (AR-R5). */
+    suspend fun readResource(uri: String): ResourceContent = resources().read(uri)
+
+    private fun resources(): ZenwaveResourceService =
+        lock.read { architecturePlane }?.resources
+            ?: throw ResourceRequestException(ResourceFailureKind.NOT_DECLARED, "The address is not served: no architecture manifest is open")
 
     suspend fun conceptsAt(documentSymbol: DocumentSymbolRef): List<ArchitectureConceptRef> =
         lock.read { architecturePlane }?.conceptsAt(documentSymbol)?.elements.orEmpty()

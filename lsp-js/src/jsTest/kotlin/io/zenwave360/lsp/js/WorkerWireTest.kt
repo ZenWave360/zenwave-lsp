@@ -106,7 +106,7 @@ class WorkerWireTest {
             assertEquals(
                 listOf(
                     "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
-                    "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt",
+                    "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
                 ),
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
