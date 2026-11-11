@@ -61,12 +61,15 @@ hover, definition, references, document symbols and formatting. `capabilities.ex
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints, viewNodeIds }[]` |
+| `zenwave/hierarchy` | `{ uri }` | hierarchy nodes `{ id, label, kind, language, sourceUri, sourceRange, children, relatedResources, uiHints, viewNodeIds, version?, address?, disabledReason? }[]` |
 | `zenwave/forwardReferences`, `zenwave/reverseReferences` | `{ uri, semanticId }` | navigation targets |
 | `zenwave/organizeZflServices` | `{ uri, mode?: "full" \| "additive" }` | the reorganised ZFL text, or `null` |
 | `zenwave/eventFlowViews` | `{ textDocument: { uri }, variant?: string, positions?: { [nodeId]: { x, y } }, lanes?: "none" \| "systems" \| "services" }` | `{ flowGraph, serviceGraph, variants: [{ id, title }], savedPositions?, lanes? }`: dsl-kotlin's laid-out flow and full service view models, each with its `schema` (`zfl.eventflow.view@1`, `zfl.services.view@1`); `variant` selects the flow graph only. `positions` (full diagram only; ignored with `variant`) replaces automatic layout when every node has a finite position, and then `savedPositions` is `{ applied: true }`; otherwise the layout is automatic and it is `{ applied: false, reason: "missing-nodes" \| "invalid", missing: [nodeId] }`. A non-object `positions` is `-32602`. `lanes` (absent is `none`) draws the flow graph, variants included, in full-width bands: `flowGraph.lanes` is `{ id, kind: "system" \| "service", label, system, x, y, width, height, order }[]` and each node has `lane` (a band id); the effective value is echoed as `lanes` when the request named it, and a value other than the three, or a non-string, is `-32602`. With `systems` or `services` the layout is always automatic: `positions` are not used and `savedPositions` is `{ applied: false, reason: "lanes", missing: [] }` |
 | `zenwave/preview` | `{ textDocument: { uri }, mode?: "docs" \| "diagrams", sequenceRenderMode?: "SEPARATE_VARIANTS" \| "ALT_BLOCKS" \| "AUTO" }` | `{ representations: { id, title, format: "MARKDOWN" \| "MERMAID" \| "HTML", content, group? }[], defaultRepresentationId }` |
 | `zenwave/symbolAt` | `{ textDocument: { uri }, position: { line, character } }` | `{ uri, semanticId, range? }`, the input of the two reference requests, or `null` when nothing is declared or referenced there |
+
+Architecture manifests use `artifacts`, `docs`, and `consumers` grouping kinds; resource entries use their artifact type or
+docs key as their kind, and consumer entries use `consumer`.
 
 `zenwave/hierarchy` answers whether or not the document is open. An open document is answered from the
 editor's content; any other document is read by the server: files through Node's `fs` (the Node entry point),

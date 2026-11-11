@@ -20,4 +20,10 @@ data class HierarchyNode(
     val relatedResources: List<NavigationTarget> = emptyList(),
     val uiHints: Map<String, String> = emptyMap(),
     val viewNodeIds: List<String> = emptyList(),
+    /** The declared resource version, when this node represents one. */
+    val version: String? = null,
+    /** The `zenwave:` address of a declared resource, when it is addressable. */
+    val address: String? = null,
+    /** Why a declared resource cannot be opened in this phase, when applicable. */
+    val disabledReason: String? = null,
 )

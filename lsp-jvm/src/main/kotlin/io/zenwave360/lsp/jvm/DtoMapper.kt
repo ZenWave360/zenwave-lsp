@@ -87,6 +87,9 @@ internal object DtoMapper {
             "flow" -> SymbolKind.Function
             "domain", "subdomain" -> SymbolKind.Package
             "manifest" -> SymbolKind.File
+            "artifacts", "docs", "consumers" -> SymbolKind.Namespace
+            "zdl", "zfl", "asyncapi", "asyncapi-client", "openapi" -> SymbolKind.File
+            "consumer" -> SymbolKind.Variable
             else -> SymbolKind.Object
         }
 
@@ -182,7 +185,10 @@ data class HierarchyNodeDto(
     val relatedResources: List<NavigationTarget>,
     val uiHints: Map<String, String>,
     /** Ids of the nodes and service groups in the same document's `zenwave/eventFlowViews` that stand for this concept. */
-    val viewNodeIds: List<String> = emptyList()
+    val viewNodeIds: List<String> = emptyList(),
+    val version: String? = null,
+    val address: String? = null,
+    val disabledReason: String? = null,
 )
 
 internal fun HierarchyNode.toDto(): HierarchyNodeDto =
@@ -196,7 +202,10 @@ internal fun HierarchyNode.toDto(): HierarchyNodeDto =
         children = children.map { it.toDto() },
         relatedResources = relatedResources,
         uiHints = uiHints,
-        viewNodeIds = viewNodeIds
+        viewNodeIds = viewNodeIds,
+        version = version,
+        address = address,
+        disabledReason = disabledReason,
     )
 
 /** Params of the `zenwave/pluginCatalogue` notification: the catalogue as a JSON object. Nullable: Gson leaves absent properties null. */
