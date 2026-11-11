@@ -8,6 +8,7 @@ import io.zenwave360.architecture.manifest.ManifestResolutionException
 import io.zenwave360.architecture.manifest.ManifestResourceLoadException
 import io.zenwave360.architecture.manifest.ManifestResourceLoadResult
 import io.zenwave360.architecture.manifest.ManifestService
+import io.zenwave360.architecture.manifest.ManifestSubdomain
 import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.lsp.core.config.ResourceReferenceResolver
@@ -119,10 +120,12 @@ object ZenwaveResources {
         for (owner in manifest.artifactOwners) {
             val documentVersion = when (owner) {
                 is ManifestService -> owner.documentVersion()
+                is ManifestSubdomain -> owner.documentVersion()
                 is ManifestDomain -> owner.version?.trim()?.takeIf { it.isNotEmpty() }
             }
             val docs = when (owner) {
                 is ManifestService -> owner.docs
+                is ManifestSubdomain -> owner.docs
                 is ManifestDomain -> owner.docs
             }
             owner.artifacts.forEach { artifact ->

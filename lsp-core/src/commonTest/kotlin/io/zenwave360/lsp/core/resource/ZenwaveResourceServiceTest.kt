@@ -277,4 +277,19 @@ class ZenwaveResourceServiceTest {
         )
         listOf("u:p", "abc", "abcdef123456", "zzzzzz9999").forEach { assertFalse(it in text, text) }
     }
+
+    @Test
+    fun statAndReadServeASubdomainDocument() = runTest {
+        val io = Recording().apply { serve("https://git.example.org/sales.checkout/raw/GUIDE.md", "guide") }
+        val text = manifestText.replace(
+            "  sales:" + NL + "    services:",
+            "  sales:" + NL + "    version: 2.0.0" + NL + "    subdomains:" + NL + "      checkout:" + NL +
+                "        id: sales.checkout" + NL + "        docs: { guide: GUIDE.md }" + NL + "    services:",
+        )
+        val service = service(io, text = text)
+        val address = "zenwave:/sales.checkout/2.0.0/GUIDE.md"
+        assertEquals(5, service.stat(address).size)
+        assertEquals("guide", service.read(address).content)
+        assertEquals(1, io.loaded.size)
+    }
 }
