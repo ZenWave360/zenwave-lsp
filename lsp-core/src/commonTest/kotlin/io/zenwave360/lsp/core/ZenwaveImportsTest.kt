@@ -309,4 +309,45 @@ class ZenwaveImportsTest {
         assertEquals(emptyList(), server.conceptualHierarchy("$base/openapi.yml"))
         assertEquals(emptyList(), io.loaded)
     }
+
+    @Test
+    fun anImportDiagnosticNeverShowsACredentialOfTheReference() = runTest {
+        val text = "@import(\"https://alice:password@example.org/model.zdl?token=secret\")\n$CHECKOUT_FLOW_ZFL"
+        val (server, _) = fixture(mapOf("checkout.zfl" to text, "orders/model.zdl" to ORDERS_MODEL_ZDL))
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", text)
+
+        val problem = server.importDiagnostics(flow).documents.getValue(flow).single { it.code == "import-not-declared" }
+
+        assertFalse("password" in problem.message || "secret" in problem.message, problem.message)
+    }
+
+    @Test
+    fun theDocumentCapHoldsWhenBatchesOfImportsAreAtTheLimitAndSaysSo() = runTest {
+        val docs = mutableMapOf("checkout.zfl" to (1..20).joinToString("\n") { "@import(\"r$it.zdl\")" } + "\n" + CHECKOUT_FLOW_ZFL)
+        for (i in 1..20) docs["r$i.zdl"] = (1..20).joinToString("\n") { "@import(\"c${i}_$it.zdl\")" } + "\n"
+        val (server, io) = fixture(docs)
+        val flow = "$base/checkout.zfl"
+        server.openDocument(flow, "zfl", docs.getValue("checkout.zfl"))
+
+        val result = server.importDiagnostics(flow)
+
+        assertTrue(io.loaded.size <= 50, "at most 50 documents are read: ${io.loaded.size}")
+        assertTrue(result.documents.values.flatten().any { it.code == "import-limit" })
+    }
+
+    @Test
+    fun aRetainedCopyIsRefreshedWhenTheImportedDocumentIsReadOnItsOwn() = runTest {
+        val (server, io) = fixture(mapOf("checkout.zfl" to CHECKOUT_FLOW_ZFL, "orders/model.zdl" to "@import(\"c.zdl\")\n$ORDERS_MODEL_ZDL"))
+        val flow = "$base/checkout.zfl"
+        val b = "$base/orders/model.zdl"
+        server.openDocument(flow, "zfl", CHECKOUT_FLOW_ZFL)
+        assertTrue(server.importDiagnostics(flow).documents.getValue(b).any { it.code == "import-unreadable" })
+
+        io.documents["$raw/orders/c.zdl"] = ORDERS_MODEL_ZDL
+        server.openDocument(b, "zdl", server.readResource(b).content)
+        assertTrue(server.importDiagnostics(b).documents.getValue(b).none { it.code == "import-unreadable" })
+
+        assertTrue(server.importedDiagnosticsFor(b)!!.none { it.code == "import-unreadable" }, "closing it would not bring the old error back")
+    }
 }

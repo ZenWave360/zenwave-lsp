@@ -220,6 +220,9 @@ class ZenwaveLanguageServer(
     private class ImportRun {
         var reads = 0
         val visited = mutableSetOf<String>()
+
+        /** The documents read or about to be read, counted against the cap before anything is read. */
+        val reserved = mutableSetOf<String>()
         val failures = mutableMapOf<String, Throwable>()
     }
 
@@ -246,6 +249,7 @@ class ZenwaveLanguageServer(
      * failure is remembered for the run, so a target that failed is not asked for again by another document.
      */
     private suspend fun follow(base: String, text: String, run: ImportRun): Followings {
+        run.reserved += base
         val seen = mutableSetOf<String>()
         val followed = mutableListOf<Followed>()
         var skipped: DocumentImport? = null
@@ -254,7 +258,7 @@ class ZenwaveLanguageServer(
             if (!DocumentImports.isModelDocument(import.reference) || !seen.add(import.reference)) continue
             val target = ZenwaveResources.resolveReference(base, import.reference)
             if (target != null && target in run.visited) continue
-            if (perDocument >= MAX_IMPORTS_PER_DOCUMENT || run.reads >= MAX_IMPORT_READS || run.visited.size >= MAX_IMPORTED_DOCUMENTS) {
+            if (perDocument >= MAX_IMPORTS_PER_DOCUMENT || run.reads >= MAX_IMPORT_READS || run.reserved.size >= MAX_IMPORTED_DOCUMENTS) {
                 if (skipped == null) skipped = import
                 continue
             }
@@ -265,6 +269,7 @@ class ZenwaveLanguageServer(
             }
             perDocument += 1
             run.reads += 1
+            if (target != null) run.reserved += target
             try {
                 followed += Followed(import, resources().readImport(base, import.reference), null)
             } catch (e: CancellationException) {
@@ -354,6 +359,8 @@ class ZenwaveLanguageServer(
             val before = importedBy[uri].orEmpty()
             importedBy[uri] = now
             now.forEach { importedDiagnostics[it] = all.getValue(it) }
+            // Another root's retained copy of this document is refreshed by this document's own reading.
+            if (importedBy.values.any { uri in it }) importedDiagnostics[uri] = all.getValue(uri)
             val cleared = (before - now).filterTo(linkedSetOf()) { releasable(it) }
             val published = linkedMapOf<String, List<Diagnostic>>()
             all.forEach { (address, diagnostics) -> if (address == uri || sessionStore.get(address) == null) published[address] = diagnostics }
@@ -396,12 +403,15 @@ class ZenwaveLanguageServer(
 
     private fun importProblem(uri: String, import: DocumentImport, error: Throwable): Diagnostic {
         val denied = (error as? ResourceRequestException)?.kind == ResourceFailureKind.NOT_DECLARED
-        val reason = ZenwaveResourceService.redact(error.message ?: error::class.simpleName.orEmpty())
+        val reason = error.message ?: error::class.simpleName.orEmpty()
         return Diagnostic(
             uri = uri,
             range = Range(Position(import.line, import.start), Position(import.line, import.end)),
             severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.ERROR,
-            message = if (denied) "Import ${import.reference} is not allowed: $reason" else "Import ${import.reference} cannot be read: $reason",
+            // The reference is client-written text and may carry user info or a token: redact the whole message.
+            message = ZenwaveResourceService.redact(
+                if (denied) "Import ${import.reference} is not allowed: $reason" else "Import ${import.reference} cannot be read: $reason",
+            ),
             code = if (denied) "import-not-declared" else "import-unreadable",
         )
     }
