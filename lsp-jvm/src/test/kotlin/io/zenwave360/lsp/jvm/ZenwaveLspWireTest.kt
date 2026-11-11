@@ -450,25 +450,29 @@ class ZenwaveLspWireTest {
     @Test
     fun aWorkspaceResolvedEntryAnswersWithItsFileUri() {
         val dir = java.nio.file.Files.createTempDirectory("zenwave-resources-")
-        java.nio.file.Files.createDirectories(dir.resolve("orders"))
-        java.nio.file.Files.writeString(dir.resolve("orders/openapi.yml"), "openapi: 3.0.0\n")
+        java.nio.file.Files.createDirectories(dir.resolve("orders/contracts"))
+        java.nio.file.Files.writeString(dir.resolve("orders/contracts/openapi.yml"), "openapi: 3.0.0\n")
         val manifest = dir.resolve("zenwave-architecture.yml")
         java.nio.file.Files.writeString(
             manifest,
             listOf(
                 "config:", "  contentResolution: [workspace]", "  sources:", "    workspace:",
-                "      basePathExpression: \"\${service.id}\"",
-                "domains:", "  sales:", "    services:", "      orders:", "        id: orders", "        artifacts:",
-                "          - { type: openapi, path: openapi.yml, version: 0.1.0 }", "",
+                "      basePathExpression: \"\${service.id}\"", "  properties:", "    p: contracts",
+                "domains:", "  sales:", "    services:", "      orders:", "        id: orders", "        specs:",
+                "          - { type: openapi, path: \"{{p}}/openapi.yml\", version: 0.1.0 }", "",
             ).joinToString("\n"),
         )
         initialize("""{"zenwave":{"projectManifestUri":"${manifest.toUri()}"}}""")
 
-        val stat = request("zenwave/statResource", resourceParams("zenwave:/orders/0.1.0/openapi.yml")).asJsonObject
+        val hierarchy = request("zenwave/hierarchy", resourceParams(manifest.toUri().toString())).asJsonArray
+        val resource = hierarchy.flatMap { flatten(it.asJsonObject) }.single { it["label"].asString == "contracts/openapi.yml" }
+        val address = resource["address"].asString
+        assertEquals("zenwave:/orders/0.1.0/contracts/openapi.yml", address)
+        val stat = request("zenwave/statResource", resourceParams(address)).asJsonObject
         assertEquals("workspace", stat["source"].asJsonObject["kind"].asString)
         val fileUri = stat["source"].asJsonObject["fileUri"].asString
-        assertEquals(dir.resolve("orders/openapi.yml").toFile().canonicalFile, java.io.File(java.net.URI(fileUri)).canonicalFile)
-        assertEquals("openapi: 3.0.0\n", request("zenwave/readResource", resourceParams("zenwave:/orders/0.1.0/openapi.yml")).asJsonObject["content"].asString)
+        assertEquals(dir.resolve("orders/contracts/openapi.yml").toFile().canonicalFile, java.io.File(java.net.URI(fileUri)).canonicalFile)
+        assertEquals("openapi: 3.0.0\n", request("zenwave/readResource", resourceParams(address)).asJsonObject["content"].asString)
         assertEquals(
             "resourceNotDeclared",
             requestError("zenwave/readResource", resourceParams("zenwave:/.zenwave-manifest.yml")).second!!.asJsonObject["kind"].asString,
@@ -500,6 +504,33 @@ class ZenwaveLspWireTest {
 
         val symbols = request("textDocument/documentSymbol", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonArray
         assertTrue(symbols.toString().contains("\"name\":\"OrderService\""), symbols.toString())
+    }
+
+    @Test
+    fun manifestResourceHierarchyFieldsArePresentOnlyWhenDeclared() {
+        initialize()
+        val uri = "file:///workspace/resources.yml"
+        open(uri, "yaml", RESOURCE_MANIFEST)
+
+        val nodes = request("zenwave/hierarchy", resourceParams(uri)).asJsonArray.flatMap { flatten(it.asJsonObject) }
+        val artifact = nodes.single { it["label"].asString == "api.yml" }
+        assertEquals("artifact", artifact["kind"].asString)
+        assertEquals("openapi", artifact["uiHints"].asJsonObject["type"].asString)
+        assertEquals("2.0.0", artifact["version"].asString)
+        assertEquals("zenwave:/orders/2.0.0/api.yml", artifact["address"].asString)
+        assertFalse(artifact.has("disabledReason"), artifact.toString())
+
+        val folder = nodes.single { it["label"].asString == "apis/*.yml" }
+        assertEquals("2.1.0", folder["version"].asString)
+        assertFalse(folder.has("address"), folder.toString())
+        assertEquals("pending (phase 2)", folder["disabledReason"].asString)
+
+        val document = nodes.single { it["label"].asString == "readme" }
+        assertEquals("doc", document["kind"].asString)
+        assertEquals("readme", document["uiHints"].asJsonObject["key"].asString)
+        assertFalse(document.has("version"), document.toString())
+        assertEquals("zenwave:/orders/-/README.md", document["address"].asString)
+        assertFalse(document.has("disabledReason"), document.toString())
     }
 
     @Test
@@ -1034,6 +1065,19 @@ class ZenwaveLspWireTest {
             service OrderService for (Order) {
                 createOrder(Order) Order
             }
+        """.trimIndent()
+
+        val RESOURCE_MANIFEST = """
+            domains:
+              sales:
+                services:
+                  orders:
+                    id: orders
+                    docs:
+                      readme: README.md
+                    artifacts:
+                      - { type: openapi, path: api.yml, version: 2.0.0 }
+                      - { type: openapi, path: "apis/*.yml", version: 2.1.0 }
         """.trimIndent()
 
         const val BROKEN_ZFL_URI = "file:///workspace/broken.zfl"

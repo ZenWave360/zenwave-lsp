@@ -235,6 +235,58 @@ class WorkerWireTest {
     }
 
     @Test
+    fun manifestResourceHierarchyFieldsArePresentOnlyWhenDeclared(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+        val uri = "file:///workspace/resources.yml"
+        val manifest = """
+            domains:
+              sales:
+                services:
+                  orders:
+                    id: orders
+                    docs:
+                      readme: README.md
+                    artifacts:
+                      - { type: openapi, path: api.yml, version: 2.0.0 }
+                      - { type: openapi, path: "apis/*.yml", version: 2.1.0 }
+        """.trimIndent()
+
+        return client.request(
+            "initialize",
+            jsonObject("processId" to null, "rootUri" to null, "capabilities" to jsonObject()),
+        ).then { _: dynamic ->
+            client.notify("initialized", jsonObject())
+            client.notify("textDocument/didOpen", textDocumentItem(uri, "yaml", 1, manifest))
+            client.request("zenwave/hierarchy", jsonObject("uri" to uri))
+        }.then { hierarchy: dynamic ->
+            val nodes = (hierarchy as Array<dynamic>).flatMap { flattenHierarchy(it) }
+            val artifact = nodes.single { it.label == "api.yml" }
+            assertEquals("artifact", artifact.kind)
+            assertEquals("openapi", artifact.uiHints.type)
+            assertEquals("2.0.0", artifact.version)
+            assertEquals("zenwave:/orders/2.0.0/api.yml", artifact.address)
+            assertTrue(!JSON.stringify(artifact).contains("\"disabledReason\":"), JSON.stringify(artifact))
+
+            val folder = nodes.single { it.label == "apis/*.yml" }
+            assertEquals("2.1.0", folder.version)
+            assertTrue(!JSON.stringify(folder).contains("\"address\":"), JSON.stringify(folder))
+            assertEquals("pending (phase 2)", folder.disabledReason)
+
+            val document = nodes.single { it.label == "readme" }
+            assertEquals("doc", document.kind)
+            assertEquals("readme", document.uiHints.key)
+            assertTrue(!JSON.stringify(document).contains("\"version\":"), JSON.stringify(document))
+            assertEquals("zenwave:/orders/-/README.md", document.address)
+            assertTrue(!JSON.stringify(document).contains("\"disabledReason\":"), JSON.stringify(document))
+            client.request("shutdown", null)
+        }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
     fun pluginCatalogueIsReplacedByInitializationOptionsAndNotification(): Promise<Unit> {
         val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
         val scriptsUri = "file:///workspace/scripts.zw"
@@ -300,6 +352,9 @@ private fun hierarchyDepth(node: dynamic): Int {
     val children = node.children as Array<dynamic>
     return 1 + (children.maxOfOrNull { hierarchyDepth(it) } ?: 0)
 }
+
+private fun flattenHierarchy(node: dynamic): List<dynamic> =
+    listOf(node) + (node.children as Array<dynamic>).flatMap { flattenHierarchy(it) }
 
 private fun createWorker(scriptUrl: String): dynamic {
     val workerConstructor: dynamic = js("globalThis.Worker")

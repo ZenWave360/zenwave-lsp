@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.architecture
 
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
+import io.zenwave360.lsp.core.manifest.ArchitectureManifestParser
 import io.zenwave360.lsp.core.resource.ZenwaveResourceService
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.architecture.graph.ArchitectureGraphBuilder
@@ -44,7 +45,9 @@ class WorkspaceArchitecturePlane(
             if (runtime != null) return WorkspaceArchitecturePlane(runtime.open(manifestUri))
             val manifestLoader = guardedLoader(manifestUri, followManifestOrigin = true)
             val manifestText = manifestLoader.loadResourceText(manifestUri)
-            val manifest = manifestLoader.parse(manifestUri, manifestText)
+            // The manifest facade normalizes legacy syntax before parsing.  Keep the resource service on the
+            // same library model so an address shown in its hierarchy is also declared to `zenwave:`.
+            val manifest = manifestLoader.parse(manifestUri, ArchitectureManifestParser.normalizeSourceText(manifestText))
             val workspace = WorkspaceRuntime(manifestLoader, ArchitectureGraphBuilder(guardedLoader(manifestUri, false)))
                 .build(manifest)
             // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),

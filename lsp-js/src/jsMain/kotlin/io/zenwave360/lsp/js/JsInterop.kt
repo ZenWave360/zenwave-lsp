@@ -94,6 +94,9 @@ internal fun hierarchyNodeToJson(node: HierarchyNode): dynamic =
         "relatedResources" to node.relatedResources.map(::navigationTargetToJson).toTypedArray(),
         "uiHints" to stringMapToJson(node.uiHints),
         "viewNodeIds" to node.viewNodeIds.toTypedArray(),
+        "version" to node.version,
+        "address" to node.address,
+        "disabledReason" to node.disabledReason,
     )
 
 internal fun diagnosticToJson(diagnostic: Diagnostic): dynamic =
@@ -122,6 +125,9 @@ internal fun symbolKind(kind: String): Int =
         "flow" -> 12 // Function
         "domain", "subdomain" -> 4 // Package
         "manifest" -> 1 // File
+        "artifacts", "docs", "consumers" -> 3 // Namespace
+        "zdl", "zfl", "asyncapi", "asyncapi-client", "openapi" -> 1 // File
+        "consumer" -> 13 // Variable
         else -> 19 // Object
     }
 

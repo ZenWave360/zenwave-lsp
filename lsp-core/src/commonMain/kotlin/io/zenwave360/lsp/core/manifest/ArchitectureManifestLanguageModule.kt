@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.manifest
 
+import io.zenwave360.architecture.manifest.ManifestArtifactOwner
+import io.zenwave360.architecture.manifest.ManifestService
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
@@ -14,6 +16,10 @@ import io.zenwave360.lsp.core.spec.SpecParserBridge
 import io.zenwave360.lsp.core.spec.YamlDocumentModel
 import io.zenwave360.lsp.core.spec.rootLocation
 import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.resource.DeclaredFlag
+import io.zenwave360.lsp.core.resource.DeclaredKind
+import io.zenwave360.lsp.core.resource.DeclaredResource
+import io.zenwave360.lsp.core.resource.ZenwaveResources
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 class ArchitectureManifestLanguageModule : LanguageModule {
@@ -168,6 +174,46 @@ class ArchitectureManifestLanguageModule : LanguageModule {
     }
 
     private fun buildDomainHierarchy(manifest: ArchitectureManifest, document: YamlDocumentModel): List<HierarchyNode> {
+        val source = manifest.source ?: return legacyDomainHierarchy(manifest, document)
+        val declaredByOwner = ZenwaveResources.declaredResources(source).groupBy { it.owner }
+        return source.domains.map { domain ->
+            val domainPath = buildDomainPath(domain.key, null)
+            val subdomainNodes = domain.subdomains.map { subdomain ->
+                val subdomainPath = buildDomainPath(domain.key, subdomain.key)
+                HierarchyNode(
+                    id = "${manifest.uri}#$subdomainPath",
+                    label = subdomain.key,
+                    kind = "subdomain",
+                    language = languageId,
+                    source = document.locationOf(subdomainPath) ?: rootLocation(manifest.uri),
+                    children = ownerChildren(
+                        manifest.uri,
+                        document,
+                        subdomain,
+                        subdomainPath,
+                        declaredByOwner[subdomain].orEmpty(),
+                    ) + subdomain.services.map { serviceNode(manifest.uri, document, it, declaredByOwner) }
+                )
+            }
+            HierarchyNode(
+                id = "${manifest.uri}#$domainPath",
+                label = domain.key,
+                kind = "domain",
+                language = languageId,
+                source = document.locationOf(domainPath) ?: rootLocation(manifest.uri),
+                children = ownerChildren(
+                    manifest.uri,
+                    document,
+                    domain,
+                    domainPath,
+                    declaredByOwner[domain].orEmpty(),
+                ) + domain.services.map { serviceNode(manifest.uri, document, it, declaredByOwner) } + subdomainNodes
+            )
+        }
+    }
+
+    /** Kept for malformed or older parsed manifests that do not retain the source owner model. */
+    private fun legacyDomainHierarchy(manifest: ArchitectureManifest, document: YamlDocumentModel): List<HierarchyNode> {
         val groupedByDomain = manifest.services.groupBy { it.domainKey }
         return groupedByDomain.entries.map { (domainKey, domainServices) ->
             val subdomainGroups = domainServices.groupBy { it.subdomainKey }
@@ -195,6 +241,27 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         }
     }
 
+    private fun serviceNode(
+        uri: String,
+        document: YamlDocumentModel,
+        service: ManifestService,
+        declaredByOwner: Map<ManifestArtifactOwner, List<DeclaredResource>>,
+    ) =
+        HierarchyNode(
+            id = "$uri#${buildServicePath(service.domainKey, service.subdomainKey, service.serviceKey)}",
+            label = service.serviceKey,
+            kind = "service",
+            language = languageId,
+            source = document.locationOf(buildServicePath(service.domainKey, service.subdomainKey, service.serviceKey)) ?: rootLocation(uri),
+            children = ownerChildren(
+                uri,
+                document,
+                service,
+                buildServicePath(service.domainKey, service.subdomainKey, service.serviceKey),
+                declaredByOwner[service].orEmpty(),
+            )
+        )
+
     private fun serviceNode(uri: String, document: YamlDocumentModel, service: ArchitectureService) =
         HierarchyNode(
             id = "$uri#${buildServicePath(service)}",
@@ -204,6 +271,132 @@ class ArchitectureManifestLanguageModule : LanguageModule {
             source = document.locationOf(buildServicePath(service)) ?: rootLocation(uri),
             children = emptyList()
         )
+
+    private fun ownerChildren(
+        uri: String,
+        document: YamlDocumentModel,
+        owner: ManifestArtifactOwner,
+        ownerPath: String,
+        declared: List<DeclaredResource>,
+    ): List<HierarchyNode> = buildList {
+        val artifacts = declared.filter { it.kind == DeclaredKind.ARTIFACT }
+        if (artifacts.isNotEmpty()) {
+            add(
+                groupNode(uri, document, ownerPath, "artifacts", "Artifacts", artifactSourcePaths(document, ownerPath, artifacts).map { (sourcePath, entry) ->
+                    resourceNode(uri, document, sourcePath, entry)
+                })
+            )
+        }
+
+        val docs = declared.filter { it.kind == DeclaredKind.DOCUMENT }
+        if (docs.isNotEmpty()) {
+            add(
+                groupNode(uri, document, ownerPath, "docs", "Docs", docs.map { entry ->
+                    resourceNode(uri, document, "$ownerPath.docs${propertySegment(requireNotNull(entry.docKey))}", entry)
+                })
+            )
+        }
+
+        if (owner is ManifestService && owner.consumers.isNotEmpty()) {
+            add(
+                groupNode(uri, document, ownerPath, "consumers", "Consumers", consumerSourceEntries(document, ownerPath, owner.consumers).map { (sourcePath, label) ->
+                    HierarchyNode(
+                        id = "$uri#$sourcePath",
+                        label = label,
+                        kind = "consumer",
+                        language = languageId,
+                        source = document.locationOf(sourcePath) ?: rootLocation(uri),
+                        children = emptyList(),
+                    )
+                })
+            )
+        }
+    }
+
+    private fun groupNode(
+        uri: String,
+        document: YamlDocumentModel,
+        ownerPath: String,
+        kind: String,
+        label: String,
+        children: List<HierarchyNode>,
+    ) = HierarchyNode(
+        id = "$uri#$ownerPath.$kind",
+        label = label,
+        kind = kind,
+        language = languageId,
+        source = document.locationOf("$ownerPath.$kind") ?: document.locationOf(ownerPath) ?: rootLocation(uri),
+        children = children,
+    )
+
+    private fun resourceNode(
+        uri: String,
+        document: YamlDocumentModel,
+        sourcePath: String,
+        entry: DeclaredResource,
+    ) = HierarchyNode(
+        id = "$uri#$sourcePath",
+        label = entry.artifact?.path ?: requireNotNull(entry.docKey),
+        kind = if (entry.artifact != null) "artifact" else "doc",
+        language = languageId,
+        source = document.locationOf(sourcePath) ?: rootLocation(uri),
+        children = emptyList(),
+        uiHints = entry.artifact?.let { mapOf("type" to it.type) } ?: mapOf("key" to requireNotNull(entry.docKey)),
+        version = entry.version,
+        address = entry.address,
+        disabledReason = entry.flag?.reason(),
+    )
+
+    /**
+     * The manifest library deliberately drops malformed artifacts.  Keep hierarchy ids and locations attached to
+     * the original YAML sequence rather than to that filtered list.
+     */
+    private fun artifactSourcePaths(
+        document: YamlDocumentModel,
+        ownerPath: String,
+        artifacts: List<DeclaredResource>,
+    ): List<Pair<String, DeclaredResource>> {
+        val rawArtifacts = document.nodeAt("$ownerPath.artifacts") as? List<*> ?: emptyList<Any?>()
+        val declaredRawIndices = rawArtifacts.mapIndexedNotNull { index, value ->
+            index.takeIf { value.isArtifactDeclaration() }
+        }
+        return artifacts.mapIndexed { filteredIndex, entry ->
+            ("$ownerPath.artifacts[${declaredRawIndices.getOrElse(filteredIndex) { filteredIndex }}]") to entry
+        }
+    }
+
+    /**
+     * Consumers are normalized by the manifest library and malformed values are removed.  The hierarchy is a view
+     * of the manifest text, so preserve the raw label and its sequence position.
+     */
+    private fun consumerSourceEntries(
+        document: YamlDocumentModel,
+        ownerPath: String,
+        consumers: List<String>,
+    ): List<Pair<String, String>> {
+        val rawConsumers = (document.nodeAt("$ownerPath.consumers") as? List<*>).orEmpty()
+            .mapIndexedNotNull { index, value -> value.consumerLabel()?.let { "$ownerPath.consumers[$index]" to it } }
+        return consumers.mapIndexed { filteredIndex, normalized ->
+            rawConsumers.getOrNull(filteredIndex) ?: ("$ownerPath.consumers[$filteredIndex]" to normalized)
+        }
+    }
+
+    private fun Any?.isArtifactDeclaration(): Boolean {
+        val values = this as? Map<*, *> ?: return false
+        return (values["type"] as? String)?.isNotBlank() == true && (values["path"] as? String)?.isNotBlank() == true
+    }
+
+    private fun Any?.consumerLabel(): String? = when (this) {
+        is String -> takeIf { it.isNotBlank() }
+        is Map<*, *> -> (this["service"] as? String)?.takeIf { it.isNotBlank() }
+        else -> null
+    }
+
+    private fun DeclaredFlag.reason(): String = when (this) {
+        DeclaredFlag.FOLDER -> "pending (phase 2)"
+        DeclaredFlag.ABSOLUTE_URI -> "absolute URI"
+        DeclaredFlag.UNADDRESSABLE -> "unaddressable"
+    }
 
     private fun resolveTarget(
         manifest: ArchitectureManifest,
@@ -281,10 +474,13 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         }
 
     private fun buildServicePath(service: ArchitectureService): String =
+        buildServicePath(service.domainKey, service.subdomainKey, service.serviceKey)
+
+    private fun buildServicePath(domainKey: String, subdomainKey: String?, serviceKey: String): String =
         buildString {
-            append(buildDomainPath(service.domainKey, service.subdomainKey))
+            append(buildDomainPath(domainKey, subdomainKey))
             append(".services")
-            append(propertySegment(service.serviceKey))
+            append(propertySegment(serviceKey))
         }
 
     private fun propertySegment(value: String): String =
@@ -303,7 +499,7 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         )
 }
 
-private data class ParsedArchitectureDocument(
+internal data class ParsedArchitectureDocument(
     val manifest: ArchitectureManifest,
     val document: YamlDocumentModel,
 )

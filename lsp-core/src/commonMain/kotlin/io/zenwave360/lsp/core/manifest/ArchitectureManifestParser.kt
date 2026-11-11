@@ -43,7 +43,8 @@ object ArchitectureManifestParser {
                         diagnostic.location?.let { put("manifestLocation", it) }
                     }
                 )
-            }
+            },
+            source = manifest,
         )
     }
 
