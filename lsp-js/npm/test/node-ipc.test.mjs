@@ -2,6 +2,7 @@
 // and speaks LSP to it over child-process IPC, as vscode-languageclient's TransportKind.ipc does.
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -463,6 +464,50 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     await server.connection.sendRequest('shutdown');
     await server.connection.sendNotification('exit');
     assert.equal(await server.exited, 0, server.stderr());
+  });
+});
+
+describe('A manifest served over http (AR-R11)', { timeout: 120_000 }, () => {
+  let http;
+  let server;
+  const requests = [];
+
+  before(async () => {
+    http = createServer((request, response) => {
+      requests.push(request.url);
+      response.writeHead(200, { 'content-type': 'text/yaml' });
+      response.end('domains:\n  sales:\n    services:\n      orders:\n        id: orders\n');
+    });
+    await new Promise((resolve) => http.listen(0, '127.0.0.1', resolve));
+    server = startServer(['--node-ipc']);
+  });
+
+  after(() => {
+    if (server.child.exitCode === null) server.child.kill();
+    http.close();
+  });
+
+  test('the server reads the manifest from the address, once, and keeps serving', async () => {
+    const manifestUri = `http://127.0.0.1:${http.address().port}/architecture/.zenwave-manifest.yml`;
+    const result = await server.connection.sendRequest('initialize', {
+      processId: process.pid,
+      rootUri: null,
+      capabilities: {},
+      initializationOptions: { zenwave: { projectManifestUri: manifestUri } },
+    });
+    assert.equal(result.serverInfo.name, 'zenwave-lsp');
+    await server.connection.sendNotification('initialized', {});
+    const deadline = Date.now() + 20_000;
+    while (requests.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(requests, ['/architecture/.zenwave-manifest.yml']);
+
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: ordersUri, languageId: 'zdl', version: 1, text: ordersText },
+    });
+    assert.deepEqual(await server.diagnosticsFor(ordersUri), []);
+    assert.deepEqual(requests, ['/architecture/.zenwave-manifest.yml']);
+    assert.equal(server.logs.filter((log) => /manifest/i.test(log.message)).length, 0, JSON.stringify(server.logs));
+    assert.equal(server.child.exitCode, null, server.stderr());
   });
 });
 

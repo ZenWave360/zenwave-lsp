@@ -17,6 +17,7 @@ import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.promise
+import kotlin.js.Promise
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
@@ -66,6 +67,16 @@ class ZenwaveJsLanguageServer(
 
     var initializationOptions: ZenwaveInitializationOptions? = null
         private set
+
+    /**
+     * The opening of the manifest named by `initializationOptions.zenwave.projectManifestUri`, started at
+     * initialisation and not awaited by it: a manifest at an `http(s)` address is read by the library with
+     * `fetch`, and a slow or failing one must not hold up `initialize`. A failure is recorded in [workspaceStatus].
+     */
+    internal var workspaceOpening: Promise<Unit>? = null
+        private set
+
+    internal fun workspaceStatus() = server.workspaceStatus()
 
     init {
         registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
@@ -203,6 +214,7 @@ class ZenwaveJsLanguageServer(
 
     fun initialize(params: dynamic): dynamic {
         initializationOptions = parseInitializationOptions(if (isPresent(params)) params.initializationOptions else null)
+        initializationOptions?.projectManifestUri?.let(::openWorkspace)
         if (isPresent(params) && isPresent(params.initializationOptions)) {
             val catalogue = params.initializationOptions.pluginCatalogue
             if (isPresent(catalogue)) replacePluginCatalogue(catalogue)
@@ -211,6 +223,20 @@ class ZenwaveJsLanguageServer(
             "capabilities" to buildCapabilities(),
             "serverInfo" to jsonObject("name" to "zenwave-lsp", "version" to serverVersion),
         )
+    }
+
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun openWorkspace(manifestUri: String) {
+        workspaceOpening = GlobalScope.promise {
+            try {
+                server.openWorkspace(manifestUri)
+            } catch (error: Throwable) {
+                // openWorkspace records a failure itself; anything else must not become an unhandled rejection.
+                val console = connection.console
+                if (isPresent(console)) console.warn("Could not open the workspace manifest: ${error.message}")
+            }
+            Unit
+        }
     }
 
     /** Uses [catalogue] for the next `.zw` previews. Anything that is not a catalogue is logged and ignored. */

@@ -298,7 +298,10 @@ class ZenwaveLanguageServer(
                 workspaceStatus = WorkspaceStatus(WorkspaceState.READY, manifestUri)
                 workspaceStatus
             }
-        } catch (error: Exception) {
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Throwable: a failed fetch in JavaScript is not an Exception, and must not leave the status BUILDING.
             lock.write {
                 architecturePlane = null
                 workspaceStatus = WorkspaceStatus(
