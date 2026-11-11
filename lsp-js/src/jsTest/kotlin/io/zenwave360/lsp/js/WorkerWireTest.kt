@@ -216,6 +216,25 @@ class WorkerWireTest {
     }
 
     @Test
+    fun aManifestServedOverHttpIsReadByTheLibraryInTheBrowser(): Promise<Unit> {
+        val manifestUri = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures/zenwave-architecture.yml"
+        val recording = RecordingConnection()
+        val server = ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test")
+        server.listen()
+
+        recording.call(
+            "onInitialize",
+            jsonObject("initializationOptions" to jsonObject("zenwave" to jsonObject("projectManifestUri" to manifestUri))),
+        )
+
+        return server.workspaceOpening!!.then {
+            val status = server.workspaceStatus()
+            assertEquals(io.zenwave360.lsp.core.platform.WorkspaceState.READY, status.state, status.toString())
+            assertEquals(manifestUri, status.manifestUri)
+        }
+    }
+
+    @Test
     fun pluginCatalogueIsReplacedByInitializationOptionsAndNotification(): Promise<Unit> {
         val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
         val scriptsUri = "file:///workspace/scripts.zw"

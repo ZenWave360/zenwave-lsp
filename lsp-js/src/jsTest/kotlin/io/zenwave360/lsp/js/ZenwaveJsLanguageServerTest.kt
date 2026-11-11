@@ -115,6 +115,22 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun aFailingManifestIsRecordedAndDoesNotHoldUpInitialize(): Promise<Unit> {
+        val (server, recording) = listening()
+
+        val result = recording.call(
+            "onInitialize",
+            jsonObject("initializationOptions" to jsonObject("zenwave" to jsonObject("projectManifestUri" to "http://127.0.0.1:1/zenwave-architecture.yml"))),
+        )
+
+        assertEquals("zenwave-lsp", result.serverInfo.name)
+        return server.workspaceOpening!!.then {
+            assertEquals(io.zenwave360.lsp.core.platform.WorkspaceState.FAILED, server.workspaceStatus().state)
+            assertEquals("http://127.0.0.1:1/zenwave-architecture.yml", server.workspaceStatus().manifestUri)
+        }
+    }
+
+    @Test
     fun servesAnOpenedZdlDocument(): Promise<Unit> {
         val (_, recording) = listening()
 

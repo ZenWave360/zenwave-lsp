@@ -219,6 +219,31 @@ class ZenwaveLspWireTest {
     }
 
     @Test
+    fun initializeReadsAManifestServedOverHttpWithTheLibrary() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val http = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
+        http.createContext("/") { exchange ->
+            requests += exchange.requestURI.path
+            val body = "domains:\n  sales:\n    services:\n      orders:\n        id: orders\n".toByteArray()
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        http.start()
+        try {
+            val manifestUri = "http://127.0.0.1:${http.address.port}/architecture/.zenwave-manifest.yml"
+
+            initialize("""{"zenwave":{"projectManifestUri":"$manifestUri"}}""")
+
+            val status = request("zenwave/workspaceStatus", "{}").asJsonObject
+            assertEquals("ready", status["state"].asString, "the http manifest was read: $status")
+            assertEquals(manifestUri, status["manifestUri"].asString)
+            assertEquals(listOf("/architecture/.zenwave-manifest.yml"), requests.toList())
+        } finally {
+            http.stop(0)
+        }
+    }
+
+    @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()
         open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)
