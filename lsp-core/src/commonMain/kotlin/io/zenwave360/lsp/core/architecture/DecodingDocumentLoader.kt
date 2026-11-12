@@ -100,9 +100,10 @@ internal class DecodingDocumentLoader(
             val path = rest.substring(2)
             val absolute = path.startsWith("/")
             val segments = mutableListOf<String>()
-            // A drive marker is the root of a Windows file URI.  Never pop it: doing so could turn
-            // file:///c:/../../d:/x into d:/x (or file:///c:/../../x into /x).
-            val rootSegments = if (path.trimStart('/').substringBefore('/').matches(Regex("[A-Za-z]:"))) 1 else 0
+            // Detect the drive root after decoding too: c%3A is just as much a root as c:.
+            // Never pop it, which could turn file:///c%3A/../d:/x into d:/x (or ../x into /x).
+            val decodedRoot = LoaderDocumentReader.loaderLocation(uri).trimStart('/').substringBefore('/')
+            val rootSegments = if (decodedRoot.matches(Regex("[A-Za-z]:"))) 1 else 0
             path.split('/').forEach { part ->
                 when {
                     part.isEmpty() || part == "." -> Unit

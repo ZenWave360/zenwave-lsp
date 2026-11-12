@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.spec
 
+import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.jsonrefparser.model.MissingRefException
 import io.zenwave360.jsonrefparser.model.OnMissing
 import io.zenwave360.jsonrefparser.model.RefParserOptions
@@ -22,11 +23,18 @@ internal data class SpecDocument(
     val unresolvedRefs: Map<String, String>,
 )
 
-internal fun parseSpecDocument(snapshot: DocumentSnapshot): SpecDocument {
+internal fun parseSpecDocument(
+    snapshot: DocumentSnapshot,
+    documentLoaders: List<DocumentLoader>? = null,
+): SpecDocument {
     val options = RefParserOptions(onMissing = OnMissing.SKIP)
+    // Only a local file opened by the client is trusted to dereference external documents. Remote and
+    // zenwave content gets no external loaders, so neither a file ref nor an HTTP redirect can read disk.
+    // The parser still resolves same-document refs from its in-memory root document.
+    val loaders = if (isTrustedLocalSpec(snapshot.ref.uri)) documentLoaders else emptyList()
     val diagnostics = mutableListOf<Diagnostic>()
     val parsed = try {
-        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options)
+        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options, loaders = loaders)
     } catch (exception: MissingRefException) {
         diagnostics += Diagnostic(
             uri = snapshot.ref.uri,
@@ -36,7 +44,7 @@ internal fun parseSpecDocument(snapshot: DocumentSnapshot): SpecDocument {
             code = "missing-ref",
             data = mapOf("language" to snapshot.ref.languageId)
         )
-        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, RefParserOptions(onMissing = OnMissing.SKIP))
+        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options, loaders = loaders)
     }
     val documentModel = YamlDocumentModel.fromParsedDocument(snapshot.ref.uri, parsed)
     val unresolvedRefs = findUnresolvedRefs(documentModel.rawModel)
@@ -117,7 +125,7 @@ internal fun defaultSpecDefinition(
     val targetPath = target.substringAfter('#')
     val targetLocation = when (targetUri) {
         document.model.uri -> document.model.locationOf(targetPath)
-        else -> loadExternalLocation(targetUri, targetPath)
+        else -> loadExternalLocation(document.model.uri, targetUri, targetPath)
     }
     return listOf(
         NavigationTarget(
@@ -164,7 +172,7 @@ internal fun refContribution(
     val targetPath = target.substringAfter('#')
     val targetLocation = when (targetUri) {
         model.uri -> model.locationOf(targetPath)
-        else -> loadExternalLocation(targetUri, targetPath)
+        else -> loadExternalLocation(model.uri, targetUri, targetPath)
     }
     return CrossReferenceContribution(
         sourceUri = model.uri,
@@ -186,7 +194,7 @@ private fun describeResolvedReference(document: SpecDocument, path: String): Str
     val targetPath = target.substringAfter('#')
     val targetNode = when (targetUri) {
         document.model.uri -> document.model.nodeAt(targetPath)
-        else -> loadExternalModel(targetUri)?.nodeAt(targetPath)
+        else -> loadExternalModel(document.model.uri, targetUri)?.nodeAt(targetPath)
     }
     val targetDescription = describeSpecNode(targetPath, targetNode) ?: "No details"
     return "$targetDescription\n\n- source: `$ref`"
@@ -277,17 +285,22 @@ private fun findUnresolvedRefs(
     return results
 }
 
-private fun loadExternalModel(uri: String): YamlDocumentModel? =
-    runCatching { YamlDocumentModel.fromParsedDocument(uri, SpecParserBridge.parseUri(uri)) }.getOrNull()
+private fun isTrustedLocalSpec(uri: String): Boolean = uri.startsWith("file:", ignoreCase = true)
 
-private fun loadExternalLocation(uri: String, path: String): SourceLocation? {
+private fun loadExternalModel(sourceUri: String, uri: String): YamlDocumentModel? {
+    // Hover, definition and cross references must not retry a refused ref with the default loaders.
+    if (!isTrustedLocalSpec(sourceUri)) return null
+    return runCatching { YamlDocumentModel.fromParsedDocument(uri, SpecParserBridge.parseUri(uri)) }.getOrNull()
+}
+
+private fun loadExternalLocation(sourceUri: String, uri: String, path: String): SourceLocation? {
     val normalizedPath = when {
         path.isBlank() -> "$"
         path.startsWith("$") -> path
         else -> "$.$path"
     }
-    return loadExternalModel(uri)?.locationOf(uri, normalizedPath)
-        ?: loadExternalModel(uri)?.locationOf(normalizedPath)
+    return loadExternalModel(sourceUri, uri)?.locationOf(uri, normalizedPath)
+        ?: loadExternalModel(sourceUri, uri)?.locationOf(normalizedPath)
 }
 
 /** Where a document of a spec declares the node a `uri#path` semantic id names, when its own uri is the id's. */

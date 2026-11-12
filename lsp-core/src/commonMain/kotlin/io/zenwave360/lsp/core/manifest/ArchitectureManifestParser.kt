@@ -17,17 +17,22 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
 object ArchitectureManifestParser {
-    fun parse(uri: String, text: String): ArchitectureManifest = parse(uri, text, guardedLoaders(uri))
+    fun parse(uri: String, text: String): ArchitectureManifest = parseDocument(uri, text).manifest
 
-    /** Visible to common tests so the parser's default loader can be exercised with a recording delegate. */
-    internal fun parse(uri: String, text: String, documentLoaders: List<DocumentLoader>): ArchitectureManifest {
-        val loader = ZenWaveManifestLoader(documentLoaders, archiveEntryLoader = null)
+    /** All manifest parsing, including the language module's location model, uses this guarded entry point. */
+    internal fun parseDocument(
+        uri: String,
+        text: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): ParsedArchitectureDocument {
+        val loaders = guardedLoaders(uri, documentLoaders)
+        val loader = ZenWaveManifestLoader(loaders, archiveEntryLoader = null)
         val normalizedText = normalizeSourceText(text)
         // The location model dereferences too: it must use the same guarded chain, not the parser's default loaders.
-        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = documentLoaders)
+        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = loaders)
         val document = YamlDocumentModel.fromParsedDocument(uri, parsedDocument)
         val manifest = runImmediate { loader.parse(uri, normalizedText) }
-        return ArchitectureManifest(
+        val architectureManifest = ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,
             services = manifest.services.map { toArchitectureService(loader, manifest, it) },
@@ -52,6 +57,7 @@ object ArchitectureManifestParser {
             },
             source = manifest,
         )
+        return ParsedArchitectureDocument(architectureManifest, document)
     }
 
     /**
@@ -155,6 +161,11 @@ object ArchitectureManifestParser {
             ?: error("Manifest parsing suspended unexpectedly")
     }
 }
+
+internal data class ParsedArchitectureDocument(
+    val manifest: ArchitectureManifest,
+    val document: YamlDocumentModel,
+)
 
 private fun Map<String, Any?>.stringMap(): Map<String, String> =
     entries.mapNotNull { (key, value) ->

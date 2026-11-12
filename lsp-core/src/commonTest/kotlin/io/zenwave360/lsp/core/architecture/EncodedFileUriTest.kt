@@ -25,6 +25,39 @@ import kotlin.test.assertTrue
  */
 class EncodedFileUriTest {
     @Test
+    fun anEncodedDriveRootCannotBePoppedDuringDotSegmentNormalisation() = runTest {
+        val seen = mutableListOf<String>()
+        val delegate = object : DocumentLoader {
+            override fun canLoad(uri: String): Boolean {
+                seen += "can:$uri"
+                return true
+            }
+
+            override suspend fun load(uri: String): String {
+                seen += "load:$uri"
+                return "ok"
+            }
+        }
+        val loader = DecodingDocumentLoader(delegate)
+        listOf("c%3A", "C%3a").forEach { drive ->
+            listOf("file:///$drive/../d:/x", "file:///$drive/../x").forEach { uri ->
+                assertTrue(loader.canLoad(uri), uri)
+                val failure = assertFailsWith<IllegalStateException> { loader.load(uri) }
+                assertTrue("not served" in failure.message.orEmpty(), failure.message)
+            }
+        }
+        assertEquals(emptyList(), seen, "refused paths must not reach delegate canLoad or load")
+
+        listOf("c%3A" to "c:", "C%3a" to "C:").forEach { (encoded, decoded) ->
+            val uri = "file:///$encoded/w/a/../b/x.yml"
+            assertTrue(loader.canLoad(uri), uri)
+            assertEquals("ok", loader.load(uri))
+            assertEquals(listOf("can:$decoded/w/b/x.yml", "load:$decoded/w/b/x.yml"), seen)
+            seen.clear()
+        }
+    }
+
+    @Test
     fun aFileUriIsDecodedOnceAndAnotherSchemeIsLeftUntouched() = runTest {
         val seen = mutableListOf<String>()
         val delegate = object : DocumentLoader {

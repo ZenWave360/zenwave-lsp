@@ -45,22 +45,74 @@ class ArchitectureManifestParserTest {
             }
         }
         val manifestUri = "file:///work/architecture/zenwave-architecture.yml"
-        val loaders = ArchitectureManifestParser.guardedLoaders(manifestUri, listOf(DecodingDocumentLoader(delegate)))
 
         listOf(
             "file:////server/share/domains.yml",
             "file:///%2fserver/share/domains.yml",
         ).forEach { ref ->
             assertFails(ref) {
-                ArchitectureManifestParser.parse(
+                ArchitectureManifestParser.parseDocument(
                     manifestUri,
                     "domains:\n  \$ref: $ref\n",
-                    loaders,
+                    listOf(DecodingDocumentLoader(delegate)),
                 )
             }
         }
 
         assertEquals(emptyList(), reads)
+    }
+
+    @Test
+    fun bothManifestAndLocationParsingGuardReferencesThatChangeBetweenReads() {
+        val manifestUri = "file:///work/architecture/zenwave-architecture.yml"
+        val composedUri = "file:///work/architecture/domains.yml"
+        listOf(1, 2).forEach { poisonOnRead ->
+            val reads = mutableListOf<String>()
+            val delegate = object : DocumentLoader {
+                override fun canLoad(uri: String) = true
+
+                override suspend fun load(uri: String): String {
+                    reads += uri
+                    return if (reads.size >= poisonOnRead) {
+                        "\$ref: file:////server/share/secret.yml\n"
+                    } else {
+                        "sales:\n  services:\n    orders: {}\n"
+                    }
+                }
+            }
+
+            assertFails("poison on read $poisonOnRead") {
+                ArchitectureManifestParser.parseDocument(
+                    manifestUri,
+                    "domains:\n  \$ref: domains.yml\n",
+                    listOf(DecodingDocumentLoader(delegate)),
+                )
+            }
+            assertEquals(List(poisonOnRead) { "${composedUri.removePrefix("file://")}" }, reads)
+        }
+    }
+
+    @Test
+    fun guardedEntryPointReturnsTheLocationModelWithoutAThirdParse() {
+        val reads = mutableListOf<String>()
+        val delegate = object : DocumentLoader {
+            override fun canLoad(uri: String) = true
+
+            override suspend fun load(uri: String): String {
+                reads += uri
+                check(reads.size <= 2) { "The language location model must not reparse references" }
+                return "sales:\n  services:\n    orders: {}\n"
+            }
+        }
+        val parsed = ArchitectureManifestParser.parseDocument(
+            "file:///work/architecture/zenwave-architecture.yml",
+            "domains:\n  \$ref: domains.yml\n",
+            listOf(DecodingDocumentLoader(delegate)),
+        )
+
+        assertEquals(listOf("orders"), parsed.manifest.services.map { it.serviceKey })
+        assertTrue(parsed.document.nodeAt("$.domains.sales.services.orders") is Map<*, *>)
+        assertEquals(2, reads.size)
     }
 
     @Test
