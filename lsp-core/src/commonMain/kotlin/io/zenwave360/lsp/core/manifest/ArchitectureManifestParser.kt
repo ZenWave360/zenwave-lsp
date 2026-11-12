@@ -5,6 +5,10 @@ import io.zenwave360.architecture.manifest.ManifestVariableInterpolator
 import io.zenwave360.architecture.manifest.ManifestService
 import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.OpeningDocumentGuard
+import io.zenwave360.lsp.core.architecture.decodingLoaders
+import io.zenwave360.lsp.core.architecture.validateWorkspacePaths
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge
@@ -14,17 +18,26 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
 object ArchitectureManifestParser {
-    private val loader = ZenWaveManifestLoader()
+    fun parse(uri: String, text: String): ArchitectureManifest = parseDocument(uri, text).manifest
 
-    fun parse(uri: String, text: String): ArchitectureManifest {
+    /** All manifest parsing, including the language module's location model, uses this guarded entry point. */
+    internal fun parseDocument(
+        uri: String,
+        text: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): ParsedArchitectureDocument {
+        val loaders = guardedLoaders(uri, documentLoaders)
+        val loader = ZenWaveManifestLoader(loaders, archiveEntryLoader = null)
         val normalizedText = normalizeSourceText(text)
-        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri)
+        // The location model dereferences too: it must use the same guarded chain, not the parser's default loaders.
+        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = loaders)
         val document = YamlDocumentModel.fromParsedDocument(uri, parsedDocument)
         val manifest = runImmediate { loader.parse(uri, normalizedText) }
-        return ArchitectureManifest(
+        validateWorkspacePaths(manifest)
+        val architectureManifest = ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,
-            services = manifest.services.map { toArchitectureService(manifest, it) },
+            services = manifest.services.map { toArchitectureService(loader, manifest, it) },
             diagnostics = manifest.diagnostics.map { diagnostic ->
                 val semanticPath = diagnostic.location?.let(::manifestLocationToSemanticPath)
                 val range = semanticPath
@@ -46,9 +59,23 @@ object ArchitectureManifestParser {
             },
             source = manifest,
         )
+        return ParsedArchitectureDocument(architectureManifest, document)
     }
 
-    private fun toArchitectureService(manifest: ZenWaveManifest, service: ManifestService): ArchitectureService {
+    /**
+     * This parser resolves manifest `$refs` for diagnostics and resource locations. Use the same guarded,
+     * decoding chain as workspace opening so a ref cannot turn into a UNC path before validation.
+     */
+    internal fun guardedLoaders(
+        manifestUri: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): List<DocumentLoader> = listOf(OpeningDocumentGuard(manifestUri, documentLoaders, followManifestOrigin = true))
+
+    private fun toArchitectureService(
+        loader: ZenWaveManifestLoader,
+        manifest: ZenWaveManifest,
+        service: ManifestService,
+    ): ArchitectureService {
         val repositoryUri = resolveRepositoryUri(manifest, service)
         return ArchitectureService(
             domainKey = service.domainKey,
@@ -136,6 +163,11 @@ object ArchitectureManifestParser {
             ?: error("Manifest parsing suspended unexpectedly")
     }
 }
+
+internal data class ParsedArchitectureDocument(
+    val manifest: ArchitectureManifest,
+    val document: YamlDocumentModel,
+)
 
 private fun Map<String, Any?>.stringMap(): Map<String, String> =
     entries.mapNotNull { (key, value) ->

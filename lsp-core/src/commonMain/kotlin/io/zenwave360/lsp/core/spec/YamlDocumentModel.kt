@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.spec
 
 import io.zenwave360.jsonrefparser.RefParser
+import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.ResolvedRef
 import io.zenwave360.jsonrefparser.model.getOriginalRef
@@ -16,6 +17,7 @@ class YamlDocumentModel(
     val resolvedRefs: Map<String, String>,
     val referenceTable: Map<String, String> = emptyMap(),
     private val documentLocationTables: Map<String, Map<String, SourceLocation>> = mapOf(uri to locationTable),
+    internal val documentLoaders: List<DocumentLoader>? = null,
 ) {
     fun pathAtPosition(position: Position): String? =
         SemanticPointerEvaluator.pathAtPosition(locationTable, position)
@@ -33,9 +35,14 @@ class YamlDocumentModel(
         SemanticPointerEvaluator.evaluate(rawModel, path)
 
     companion object {
-        fun fromParsedDocument(uri: String, parsedDocument: ParsedDocument): YamlDocumentModel =
+        fun fromParsedDocument(
+            uri: String,
+            parsedDocument: ParsedDocument,
+            documentLoaders: List<DocumentLoader>? = null,
+        ): YamlDocumentModel =
             YamlDocumentModel(
                 uri = uri,
+                documentLoaders = documentLoaders,
                 rawModel = parsedDocument.schema,
                 locationTable = buildCanonicalLocationTable(parsedDocument.schema, parsedDocument.locations),
                 resolvedRefs = parsedDocument.resolvedRefs.associateResolvedRefs(uri),

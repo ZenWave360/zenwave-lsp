@@ -8,6 +8,7 @@ import io.zenwave360.lsp.core.spec.SpecParserBridge
 import io.zenwave360.lsp.core.spec.YamlDocumentModel
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -15,6 +16,19 @@ import kotlin.test.assertTrue
 class ArchitectureManifestLanguageModuleTest {
 
     private val module = ArchitectureManifestLanguageModule()
+
+    @Test
+    fun languageModuleUsesTheGuardedManifestEntryPoint() {
+        listOf("file:////server/share/domains.yml", "file:///%2fserver/share/domains.yml").forEach { ref ->
+            val snapshot = DocumentSnapshot(
+                DocumentRef("file:///work/architecture/zenwave-architecture.yml", "manifest", 1),
+                "domains:\n  \$ref: $ref\n",
+            )
+            val failure = assertFails(ref) { module.parse(snapshot) }
+            val messages = generateSequence(failure) { it.cause }.mapNotNull { it.message }.toList()
+            assertTrue(messages.any { "not served" in it || "Content outside the manifest" in it }, messages.toString())
+        }
+    }
 
     @Test
     fun canHandleDetectsManifestByDomainStructure() {

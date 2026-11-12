@@ -58,6 +58,11 @@ class ZenwaveLanguageServer(
     private val documentReader: DocumentReader = LoaderDocumentReader(),
     /** Absolute `http(s)` reads for hierarchy, its dependencies and imports. Does not follow redirects. */
     private val absoluteHttp: AbsoluteHttpFetch = platformAbsoluteHttpFetch(),
+    /**
+     * Where a failed workspace open is reported. The line is already redacted. The JS and JVM servers point
+     * this at the client log; a test collects the line by passing its own.
+     */
+    var log: (String) -> Unit = {},
 ) {
     private val lock = PlatformReadWriteLock()
     private var resourceSettings = ZenwaveResourceSettings()
@@ -612,15 +617,22 @@ class ZenwaveLanguageServer(
             throw error
         } catch (error: Throwable) {
             // Throwable: a failed fetch in JavaScript is not an Exception, and must not leave the status BUILDING.
-            lock.write {
+            // The reason is redacted before it is stored or logged: an http(s) manifest URL can carry user info.
+            val reason = ZenwaveResourceService.redact(
+                error.message ?: error::class.simpleName ?: "the workspace could not be opened",
+            )
+            val status = lock.write {
                 architecturePlane = null
                 workspaceStatus = WorkspaceStatus(
                     state = WorkspaceState.FAILED,
                     manifestUri = manifestUri,
-                    message = error.message ?: error::class.simpleName,
+                    message = reason,
                 )
                 workspaceStatus
-            }.also { opening.complete(null) }
+            }
+            opening.complete(null)
+            log("Could not open the workspace manifest: $reason")
+            status
         }
     }
 
@@ -654,9 +666,23 @@ class ZenwaveLanguageServer(
     /** `zenwave/readResource` (AR-R5). */
     suspend fun readResource(uri: String): ResourceContent = resources().read(uri)
 
-    private fun resources(): ZenwaveResourceService =
-        lock.read { architecturePlane }?.resources
-            ?: throw ResourceRequestException(ResourceFailureKind.NOT_DECLARED, "The address is not served: no architecture manifest is open")
+    private fun resources(): ZenwaveResourceService {
+        val (plane, status) = lock.read { architecturePlane to workspaceStatus }
+        return plane?.resources ?: throw ResourceRequestException(
+            ResourceFailureKind.NOT_DECLARED,
+            closedManifestMessage(status),
+        )
+    }
+
+    /**
+     * The refusal used when no manifest is open. A failed open appends its redacted reason, so the client
+     * sees why `file:///c%3A/...` did not open instead of only "no architecture manifest is open".
+     */
+    private fun closedManifestMessage(status: WorkspaceStatus): String {
+        val base = "The address is not served: no architecture manifest is open"
+        val reason = status.message?.takeIf { status.state == WorkspaceState.FAILED && it.isNotBlank() }
+        return if (reason == null) base else "$base: $reason"
+    }
 
     suspend fun conceptsAt(documentSymbol: DocumentSymbolRef): List<ArchitectureConceptRef> =
         lock.read { architecturePlane }?.conceptsAt(documentSymbol)?.elements.orEmpty()

@@ -1,10 +1,143 @@
 package io.zenwave360.lsp.core.manifest
 
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.DecodingDocumentLoader
+import io.zenwave360.lsp.core.writeTestFile
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class ArchitectureManifestParserTest {
+
+    @Test
+    fun defaultLoaderRefusesUncFileReferencesBeforeTheyAreRead() {
+        listOf(
+            "file:////server/share/domains.yml",
+            "file:///%2fserver/share/domains.yml",
+        ).forEach { ref ->
+            val failure = assertFails(ref) {
+                ArchitectureManifestParser.parse(
+                    uri = "file:///work/architecture/zenwave-architecture.yml",
+                    text = "domains:\n  \$ref: $ref\n",
+                )
+            }
+            // Refused by the guard or the decoder before any read: no cause comes from the file system.
+            val causes = generateSequence(failure) { it.cause }.toList()
+            val messages = causes.mapNotNull { it.message }
+            assertTrue(
+                messages.any { "not served" in it || "Content outside the manifest" in it },
+                messages.toString(),
+            )
+            assertTrue(causes.none { it::class.simpleName.orEmpty().contains("FileSystem") }, messages.toString())
+        }
+    }
+
+    @Test
+    fun parserRefsRejectedByTheDefaultChainNeverReachTheFileLoader() {
+        val reads = mutableListOf<String>()
+        val delegate = object : DocumentLoader {
+            override fun canLoad(uri: String) = true
+
+            override suspend fun load(uri: String): String {
+                reads += uri
+                return "domains: {}"
+            }
+        }
+        val manifestUri = "file:///work/architecture/zenwave-architecture.yml"
+
+        listOf(
+            "file:////server/share/domains.yml",
+            "file:///%2fserver/share/domains.yml",
+        ).forEach { ref ->
+            assertFails(ref) {
+                ArchitectureManifestParser.parseDocument(
+                    manifestUri,
+                    "domains:\n  \$ref: $ref\n",
+                    listOf(DecodingDocumentLoader(delegate)),
+                )
+            }
+        }
+
+        assertEquals(emptyList(), reads)
+    }
+
+    @Test
+    fun bothManifestAndLocationParsingGuardReferencesThatChangeBetweenReads() {
+        val manifestUri = "file:///work/architecture/zenwave-architecture.yml"
+        val composedUri = "file:///work/architecture/domains.yml"
+        listOf(1, 2).forEach { poisonOnRead ->
+            val reads = mutableListOf<String>()
+            val delegate = object : DocumentLoader {
+                override fun canLoad(uri: String) = true
+
+                override suspend fun load(uri: String): String {
+                    reads += uri
+                    return if (reads.size >= poisonOnRead) {
+                        "\$ref: file:////server/share/secret.yml\n"
+                    } else {
+                        "sales:\n  services:\n    orders: {}\n"
+                    }
+                }
+            }
+
+            assertFails("poison on read $poisonOnRead") {
+                ArchitectureManifestParser.parseDocument(
+                    manifestUri,
+                    "domains:\n  \$ref: domains.yml\n",
+                    listOf(DecodingDocumentLoader(delegate)),
+                )
+            }
+            assertEquals(List(poisonOnRead) { "${composedUri.removePrefix("file://")}" }, reads)
+        }
+    }
+
+    @Test
+    fun guardedEntryPointReturnsTheLocationModelWithoutAThirdParse() {
+        val reads = mutableListOf<String>()
+        val delegate = object : DocumentLoader {
+            override fun canLoad(uri: String) = true
+
+            override suspend fun load(uri: String): String {
+                reads += uri
+                check(reads.size <= 2) { "The language location model must not reparse references" }
+                return "sales:\n  services:\n    orders: {}\n"
+            }
+        }
+        val parsed = ArchitectureManifestParser.parseDocument(
+            "file:///work/architecture/zenwave-architecture.yml",
+            "domains:\n  \$ref: domains.yml\n",
+            listOf(DecodingDocumentLoader(delegate)),
+        )
+
+        assertEquals(listOf("orders"), parsed.manifest.services.map { it.serviceKey })
+        assertTrue(parsed.document.nodeAt("$.domains.sales.services.orders") is Map<*, *>)
+        assertEquals(2, reads.size)
+    }
+
+    @Test
+    fun defaultLoaderFollowsAPlainRelativeReferenceNextToALocalManifest() {
+        val manifestUri = writeTestFile(
+            "manifest-parser-refs/zenwave-architecture.yml",
+            "domains:\n  \$ref: domains.yml\n",
+        )
+        writeTestFile(
+            "manifest-parser-refs/domains.yml",
+            """
+                sales:
+                  services:
+                    orders:
+                      id: sales.orders
+            """.trimIndent(),
+        )
+
+        val manifest = ArchitectureManifestParser.parse(
+            uri = manifestUri,
+            text = "domains:\n  \$ref: domains.yml\n",
+        )
+
+        assertEquals(listOf("orders"), manifest.services.map { it.serviceKey })
+    }
 
     @Test
     fun parsesDomainsWithDirectServicesAndSubdomainsIntoNormalizedServices() {

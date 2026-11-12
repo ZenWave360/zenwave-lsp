@@ -36,6 +36,7 @@ class LoaderDocumentReader(
         if (refusesHttp(location) || refusesHttp(location.trimStart { it == '/' || it == '\\' })) throw httpRefused(uri)
         val loader = loaders.firstOrNull { it.canLoad(location) }
             ?: throw DocumentUnreachableException(shown(uri), "no reader handles this scheme")
+        // Client-requested document reads are trusted: the user may have opened a file on a network share.
         return loader.load(location)
     }
 

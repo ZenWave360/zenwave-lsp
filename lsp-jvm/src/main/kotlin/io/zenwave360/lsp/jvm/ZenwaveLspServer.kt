@@ -125,6 +125,7 @@ class ZenwaveLspServer(
 
     override fun connect(client: LanguageClient) {
         this.client = client
+        server.log = { message -> client.logMessage(MessageParams(MessageType.Warning, message)) }
     }
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =

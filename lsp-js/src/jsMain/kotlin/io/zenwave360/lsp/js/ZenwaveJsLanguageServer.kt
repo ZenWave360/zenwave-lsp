@@ -92,6 +92,10 @@ class ZenwaveJsLanguageServer(
         private set
 
     init {
+        server.log = { message ->
+            val console = connection.console
+            if (isPresent(console)) console.warn(message)
+        }
         registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
             answer {
                 val uri = stringOrNull(if (isPresent(params)) params.uri else null)

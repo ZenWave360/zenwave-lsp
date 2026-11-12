@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.spec
 
+import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.jsonrefparser.model.MissingRefException
 import io.zenwave360.jsonrefparser.model.OnMissing
 import io.zenwave360.jsonrefparser.model.RefParserOptions
@@ -22,11 +23,14 @@ internal data class SpecDocument(
     val unresolvedRefs: Map<String, String>,
 )
 
-internal fun parseSpecDocument(snapshot: DocumentSnapshot): SpecDocument {
+internal fun parseSpecDocument(
+    snapshot: DocumentSnapshot,
+    documentLoaders: List<DocumentLoader>? = null,
+): SpecDocument {
     val options = RefParserOptions(onMissing = OnMissing.SKIP)
     val diagnostics = mutableListOf<Diagnostic>()
     val parsed = try {
-        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options)
+        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options, loaders = documentLoaders)
     } catch (exception: MissingRefException) {
         diagnostics += Diagnostic(
             uri = snapshot.ref.uri,
@@ -36,9 +40,9 @@ internal fun parseSpecDocument(snapshot: DocumentSnapshot): SpecDocument {
             code = "missing-ref",
             data = mapOf("language" to snapshot.ref.languageId)
         )
-        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, RefParserOptions(onMissing = OnMissing.SKIP))
+        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri, options, loaders = documentLoaders)
     }
-    val documentModel = YamlDocumentModel.fromParsedDocument(snapshot.ref.uri, parsed)
+    val documentModel = YamlDocumentModel.fromParsedDocument(snapshot.ref.uri, parsed, documentLoaders)
     val unresolvedRefs = findUnresolvedRefs(documentModel.rawModel)
     diagnostics += unresolvedRefs.map { (path, ref) ->
         val location = documentModel.locationOf(path)?.range ?: Range(Position(0, 0), Position(0, 0))
@@ -92,7 +96,7 @@ internal fun defaultSpecHover(
     val path = document.model.pathAtPosition(position) ?: return null
     val range = document.model.locationOf(path)?.range
     val markdown = when {
-        path.endsWith(".\$ref") -> describeResolvedReference(document, path)
+        isReferencePath(path) || document.model.referenceTable[path] != null -> describeResolvedReference(document, path)
         else -> describeSpecNode(path, document.model.nodeAt(path))
     }
     return HoverResult(
@@ -112,12 +116,13 @@ internal fun defaultSpecDefinition(
     val ref = document.model.referenceTable[refPath]
         ?: (document.model.nodeAt(refPath) as? String)
         ?: return emptyList()
+    if (!referenceIsSafe(document.model.uri, ref)) return emptyList()
     val target = document.model.resolveRef(ref) ?: return emptyList()
     val targetUri = target.substringBefore('#')
     val targetPath = target.substringAfter('#')
     val targetLocation = when (targetUri) {
         document.model.uri -> document.model.locationOf(targetPath)
-        else -> loadExternalLocation(targetUri, targetPath)
+        else -> loadExternalLocation(document.model, targetUri, targetPath)
     }
     return listOf(
         NavigationTarget(
@@ -159,12 +164,13 @@ internal fun refContribution(
     val ref = model.referenceTable[sourcePath]
         ?: (model.nodeAt(sourcePath) as? String)
         ?: return null
+    if (!referenceIsSafe(model.uri, ref)) return null
     val target = model.resolveRef(ref) ?: return null
     val targetUri = target.substringBefore('#')
     val targetPath = target.substringAfter('#')
     val targetLocation = when (targetUri) {
         model.uri -> model.locationOf(targetPath)
-        else -> loadExternalLocation(targetUri, targetPath)
+        else -> loadExternalLocation(model, targetUri, targetPath)
     }
     return CrossReferenceContribution(
         sourceUri = model.uri,
@@ -180,20 +186,21 @@ internal fun refContribution(
 }
 
 private fun describeResolvedReference(document: SpecDocument, path: String): String? {
-    val ref = document.model.nodeAt(path) as? String ?: return null
+    val ref = document.model.referenceTable[path] ?: (document.model.nodeAt(path) as? String) ?: return null
+    if (!referenceIsSafe(document.model.uri, ref)) return "### \$ref\n\n`$ref`"
     val target = document.model.resolveRef(ref) ?: return "### \$ref\n\n`$ref`"
     val targetUri = target.substringBefore('#')
     val targetPath = target.substringAfter('#')
     val targetNode = when (targetUri) {
         document.model.uri -> document.model.nodeAt(targetPath)
-        else -> loadExternalModel(targetUri)?.nodeAt(targetPath)
+        else -> loadExternalModel(document.model, targetUri)?.nodeAt(targetPath)
     }
     val targetDescription = describeSpecNode(targetPath, targetNode) ?: "No details"
     return "$targetDescription\n\n- source: `$ref`"
 }
 
 private fun resolveReferencePath(model: YamlDocumentModel, path: String): String? {
-    if (path.endsWith(".\$ref")) return path
+    if (isReferencePath(path)) return path
     if (model.referenceTable[path] != null) return path
     val node = model.nodeAt(path)
     if (node is Map<*, *> && node["\$ref"] is String) {
@@ -211,6 +218,8 @@ private fun resolveReferencePath(model: YamlDocumentModel, path: String): String
     }
     return null
 }
+
+private fun isReferencePath(path: String): Boolean = path.endsWith(".\$ref") || path.endsWith("['\$ref']")
 
 private fun describeSpecNode(path: String, node: Any?): String? {
     val value = node ?: return null
@@ -277,17 +286,21 @@ private fun findUnresolvedRefs(
     return results
 }
 
-private fun loadExternalModel(uri: String): YamlDocumentModel? =
-    runCatching { YamlDocumentModel.fromParsedDocument(uri, SpecParserBridge.parseUri(uri)) }.getOrNull()
+private fun loadExternalModel(source: YamlDocumentModel, uri: String): YamlDocumentModel? {
+    val loaders = listOf(ReferenceDocumentLoader(source.uri, source.documentLoaders))
+    return runCatching {
+        YamlDocumentModel.fromParsedDocument(uri, SpecParserBridge.parseUri(uri, loaders = loaders), loaders)
+    }.getOrNull()
+}
 
-private fun loadExternalLocation(uri: String, path: String): SourceLocation? {
+private fun loadExternalLocation(source: YamlDocumentModel, uri: String, path: String): SourceLocation? {
     val normalizedPath = when {
         path.isBlank() -> "$"
         path.startsWith("$") -> path
         else -> "$.$path"
     }
-    return loadExternalModel(uri)?.locationOf(uri, normalizedPath)
-        ?: loadExternalModel(uri)?.locationOf(normalizedPath)
+    val model = loadExternalModel(source, uri) ?: return null
+    return model.locationOf(uri, normalizedPath) ?: model.locationOf(normalizedPath)
 }
 
 /** Where a document of a spec declares the node a `uri#path` semantic id names, when its own uri is the id's. */

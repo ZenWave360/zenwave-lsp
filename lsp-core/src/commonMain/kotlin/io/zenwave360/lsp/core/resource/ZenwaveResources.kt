@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.resource
 
+import io.zenwave360.lsp.core.architecture.validateWorkspacePath
+
 import io.zenwave360.architecture.manifest.ManifestArtifact
 import io.zenwave360.architecture.manifest.ManifestArtifactOwner
 import io.zenwave360.architecture.manifest.ManifestDomain
@@ -247,6 +249,11 @@ object ZenwaveResources {
         options: ManifestLoadOptions = ManifestLoadOptions(),
     ): ManifestResourceLoadResult {
         val artifact = allowed.declared?.artifact
+        try {
+            validateWorkspacePath(manifest, allowed.owner, artifact, allowed.address.path, allowed.address.version)
+        } catch (refused: IllegalStateException) {
+            return ManifestResourceLoadResult(path = allowed.address.path, errorMessage = refused.message)
+        }
         if (artifact != null) return loader.loadArtifactResult(manifest, allowed.owner, artifact, options)
         val path = allowed.address.path
         return try {

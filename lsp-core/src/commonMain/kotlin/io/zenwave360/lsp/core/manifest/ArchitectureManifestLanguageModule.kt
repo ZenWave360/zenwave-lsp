@@ -12,7 +12,6 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
-import io.zenwave360.lsp.core.spec.SpecParserBridge
 import io.zenwave360.lsp.core.spec.YamlDocumentModel
 import io.zenwave360.lsp.core.spec.rootLocation
 import io.zenwave360.lsp.core.contracts.Range
@@ -487,22 +486,8 @@ class ArchitectureManifestLanguageModule : LanguageModule {
         if (value.matches(Regex("[A-Za-z_][A-Za-z0-9_]*"))) ".$value" else "['$value']"
 
     private fun parseDocument(snapshot: DocumentSnapshot): ParsedArchitectureDocument =
-        ParsedArchitectureDocument(
-            manifest = ArchitectureManifestParser.parse(snapshot.ref.uri, snapshot.text),
-            document = YamlDocumentModel.fromParsedDocument(
-                snapshot.ref.uri,
-                SpecParserBridge.parseText(
-                    ArchitectureManifestParser.normalizeSourceText(snapshot.text),
-                    snapshot.ref.uri
-                )
-            )
-        )
+        ArchitectureManifestParser.parseDocument(snapshot.ref.uri, snapshot.text)
 }
-
-internal data class ParsedArchitectureDocument(
-    val manifest: ArchitectureManifest,
-    val document: YamlDocumentModel,
-)
 
 private object ResourceOrRaw {
     fun compareUri(rawValue: String, resolvedUri: String): String = resolvedUri

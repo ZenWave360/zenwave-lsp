@@ -72,6 +72,24 @@ class OpeningLoaderTest {
 
     private val localManifest = "file:///work/architecture/zenwave-architecture.yml"
 
+    @Test
+    fun intellijDriveFormManifestOpensAndComposesThroughTheDecodingGuard() = runTest {
+        val manifest = "file://C:/work/m.yml"
+        val io = Recording(mapOf(
+            "C:/work/m.yml" to "domains:\n  \$ref: 'domains.yml'\n",
+            "C:/work/domains.yml" to "sales: {services: {}}\n",
+        ))
+        val guard = OpeningDocumentGuard(manifest, listOf(DecodingDocumentLoader(io)), true)
+        assertTrue(guard.isReadable(manifest))
+        assertTrue(guard.isReadable("file:///C:/work/m.yml"))
+        val loader = ZenWaveManifestLoader(listOf(guard), null)
+        WorkspaceRuntime(loader, ArchitectureGraphBuilder(loader)).open(manifest)
+        assertEquals(listOf("C:/work/m.yml", "C:/work/domains.yml"), io.loaded)
+        listOf("file://host/work/m.yml", "file:////attacker/share/m.yml", "file://C:/work/%2e%2e/m.yml").forEach { bad ->
+            assertFalse(guard.isReadable(bad), bad)
+        }
+    }
+
     private fun guard(manifest: String, follow: Boolean = false) = OpeningDocumentGuard(manifest, emptyList(), follow)
 
     @Test
@@ -140,6 +158,33 @@ class OpeningLoaderTest {
         val port = guard("http://allowed.example:80/m.yml", follow = true)
         assertTrue(port.isReadable("http://allowed.example/sales.yml"))
         assertFalse(port.isReadable("https://allowed.example/sales.yml"))
+    }
+
+    @Test
+    fun theManifestUriItselfIsHeldToTheLocalPathRules() = runTest {
+        val io = Recording(emptyMap())
+        listOf(
+            "file:///%2fserver/share/m.yml",
+            "file://server/share/m.yml",
+            "file:///c%3A/a/%2e%2e/m.yml",
+            "file://user:s3cret@server/share/m.yml",
+        ).forEach { manifest ->
+            val guard = OpeningDocumentGuard(manifest, listOf(io))
+            assertFalse(guard.isReadable(manifest), manifest)
+            val failure = assertFailsWith<IllegalStateException> { guard.load(manifest) }
+            val message = failure.message.orEmpty()
+            assertTrue("not served" in message, message)
+            assertTrue("plain local file path" in message, message)
+            assertTrue("s3cret" !in message, message)
+            if ("s3cret" in manifest) assertTrue("<redacted>" in message, message)
+        }
+        assertTrue(io.loaded.isEmpty())
+
+        val plain = "file:///c%3A/work/arch/zenwave-architecture.yml"
+        val spaced = "file:///c%3A/work/a%20b/zenwave-architecture.yml"
+        assertTrue(OpeningDocumentGuard(plain, listOf(io)).isReadable(plain))
+        assertTrue(OpeningDocumentGuard(spaced, listOf(io)).isReadable(spaced))
+        assertTrue(OpeningDocumentGuard(spaced, listOf(io)).isReadable(plain))
     }
 
     @Test
