@@ -12,6 +12,10 @@ import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
 import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
+import io.zenwave360.lsp.core.resource.AbsoluteHttpFetch
+import io.zenwave360.lsp.core.resource.AbsoluteHttpReads
+import io.zenwave360.lsp.core.resource.AbsoluteUriNotAllowed
+import io.zenwave360.lsp.core.resource.AbsoluteUriPolicy
 import io.zenwave360.lsp.core.resource.ResourceContent
 import io.zenwave360.lsp.core.resource.ResourceFailureKind
 import io.zenwave360.lsp.core.resource.ResourceRequestException
@@ -19,11 +23,14 @@ import io.zenwave360.lsp.core.resource.ResourceStat
 import io.zenwave360.lsp.core.resource.DocumentImport
 import io.zenwave360.lsp.core.resource.DocumentImports
 import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
 import io.zenwave360.lsp.core.resource.ZenwaveResources
+import io.zenwave360.lsp.core.resource.platformAbsoluteHttpFetch
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.Range
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import io.zenwave360.lsp.core.visualization.SavedPoint
 import io.zenwave360.lsp.core.visualization.DocumentFailureKind
 import io.zenwave360.lsp.core.visualization.DocumentRequestException
@@ -44,13 +51,16 @@ class ZenwaveLanguageServer(
     private val sessionStore: DocumentSessionStore,
     private val crossReferenceIndex: CrossReferenceIndex,
     architecturePlane: WorkspaceArchitecturePlane? = null,
-    private val workspaceOpener: suspend (String) -> WorkspaceArchitecturePlane = { manifestUri ->
-        WorkspaceArchitecturePlane.open(manifestUri)
+    private val workspaceOpener: suspend (String, ZenwaveResourceSettings) -> WorkspaceArchitecturePlane = { manifestUri, settings ->
+        WorkspaceArchitecturePlane.open(manifestUri, resourceSettings = settings)
     },
-    /** Reads documents that are not open, for conceptualHierarchy. */
+    /** Reads documents that are not open, for conceptualHierarchy. Absolute `http(s)` URIs do not use this. */
     private val documentReader: DocumentReader = LoaderDocumentReader(),
+    /** Absolute `http(s)` reads for hierarchy, its dependencies and imports. Does not follow redirects. */
+    private val absoluteHttp: AbsoluteHttpFetch = platformAbsoluteHttpFetch(),
 ) {
     private val lock = PlatformReadWriteLock()
+    private var resourceSettings = ZenwaveResourceSettings()
     private val parsedCache = linkedMapOf<String, DocumentCacheEntry>()
     private var architecturePlane: WorkspaceArchitecturePlane? = architecturePlane
     private var workspaceStatus = if (architecturePlane == null) {
@@ -58,6 +68,12 @@ class ZenwaveLanguageServer(
     } else {
         WorkspaceStatus(WorkspaceState.READY)
     }
+
+    /**
+     * Completed with the project manifest text when [openWorkspace] finishes, or with null when it fails.
+     * Hierarchy of that URI waits on this while the manifest is still loading.
+     */
+    private var manifestOpening: CompletableDeferred<String?>? = null
     /** The documents each open `zenwave:` document imports, and the diagnostics last found for them (AR-R9). */
     private val importedBy = mutableMapOf<String, Set<String>>()
     private val importedDiagnostics = mutableMapOf<String, List<Diagnostic>>()
@@ -139,8 +155,10 @@ class ZenwaveLanguageServer(
             entry = getOrBuildCacheEntry(open)
         } else {
             if (!mayHaveHierarchy(uri)) return emptyList()
-            val text = readUnopened(uri)
-                ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open and cannot be read")
+            val text = readUnopened(uri) ?: throw DocumentRequestException(
+                DocumentFailureKind.DOCUMENT_NOT_FOUND,
+                unopenedFailure(uri),
+            )
             snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
             entry = buildCacheEntry(snapshot)
         }
@@ -205,8 +223,25 @@ class ZenwaveLanguageServer(
     /** The content of a document that is not open, or null when it cannot be reached. */
     private suspend fun readUnopened(uri: String): String? =
         try {
-            // AR-R9: a `zenwave:` address is read by the server itself, through the declared-only check and the cache.
-            if (uri.startsWith(ZENWAVE_SCHEME)) resources().read(uri).content else documentReader.read(uri)
+            when {
+                // AR-R9: a `zenwave:` address is read by the server itself, through the declared-only check and the cache.
+                uri.startsWith(ZENWAVE_SCHEME) -> resources().read(uri).content
+                // The same allow-list as stat/read, including every redirect. A refusal returns null and fetches nothing.
+                // The one exception is the project manifest itself: the client named that address, and openWorkspace
+                // already loaded it. Hierarchy uses that text, so an empty allow-list does not hide the open manifest.
+                AbsoluteUriPolicy.isAbsoluteHttp(uri) -> {
+                    openedProjectManifest(uri) ?: run {
+                        val canonical = AbsoluteUriPolicy.parse(uri) ?: throw AbsoluteUriNotAllowed(uri, null)
+                        AbsoluteHttpReads.read(absoluteHttp, resourceSettings.allowedDomains, canonical)
+                    }
+                }
+                // A file: URI whose path is an http(s) URL is not a file and is not fetched, even when the host is allowed.
+                LoaderDocumentReader.refusesHttp(uri) -> throw DocumentUnreachableException(
+                    ZenwaveResourceService.redact(LoaderDocumentReader.displayUri(uri)),
+                    "an http(s) URL is not read as a file",
+                )
+                else -> documentReader.read(uri)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -216,6 +251,12 @@ class ZenwaveLanguageServer(
             if (e is Error && e !is NotImplementedError) throw e
             null
         }
+
+    /** A missing document. A disguised `http(s)` URL is decoded once before redaction, so an encoded user info or query does not survive. */
+    private fun unopenedFailure(uri: String): String {
+        val shown = if (LoaderDocumentReader.refusesHttp(uri)) LoaderDocumentReader.displayUri(uri) else uri
+        return ZenwaveResourceService.redact("$shown is not open and cannot be read")
+    }
 
     private class ImportRun {
         var reads = 0
@@ -271,6 +312,9 @@ class ZenwaveLanguageServer(
             run.reads += 1
             if (target != null) run.reserved += target
             try {
+                if (AbsoluteUriPolicy.isAbsoluteHttp(import.reference)) {
+                    throw absoluteImportRefusal(import.reference)
+                }
                 followed += Followed(import, resources().readImport(base, import.reference), null)
             } catch (e: CancellationException) {
                 throw e
@@ -392,6 +436,26 @@ class ZenwaveLanguageServer(
     fun importedDiagnosticsFor(uri: String): List<Diagnostic>? =
         lock.read { if (importedBy.values.any { uri in it }) importedDiagnostics[uri] else null }
 
+    /**
+     * An import whose reference is an absolute `http(s)` URI. Owner-relative imports never fetch one. A reference
+     * the policy rejects is `resourceNotAllowed` and is not requested; one it accepts is still not an owner-relative
+     * path, so it stays `resourceNotDeclared` and is not requested either.
+     */
+    private fun absoluteImportRefusal(reference: String): ResourceRequestException {
+        val canonical = AbsoluteUriPolicy.parse(reference)
+        if (canonical == null || !AbsoluteUriPolicy.allows(resourceSettings.allowedDomains, canonical)) {
+            val host = canonical?.host ?: "(none)"
+            return ResourceRequestException(
+                ResourceFailureKind.NOT_ALLOWED,
+                "The absolute URI is not served: host '$host' is not an allowed domain",
+            )
+        }
+        return ResourceRequestException(
+            ResourceFailureKind.NOT_DECLARED,
+            "The address is not served: the reference leaves the owner's content",
+        )
+    }
+
     private fun limitProblem(uri: String, import: DocumentImport) = Diagnostic(
         uri = uri,
         range = Range(Position(import.line, import.start), Position(import.line, import.end)),
@@ -508,16 +572,43 @@ class ZenwaveLanguageServer(
         }
     }
 
+    /** The remote manifest name and allowed domains from `initializationOptions.zenwave` (AR-Q1, AR-Q4). */
+    fun applyResourceSettings(settings: ZenwaveResourceSettings) {
+        resourceSettings = settings
+    }
+
+    /**
+     * Records [manifestUri] before [openWorkspace] runs.
+     *
+     * `initialize` starts the open and returns without waiting, and `zenwave/hierarchy` of that same address
+     * can arrive while the fetch is still in flight. The hierarchy waits for the text the open produces.
+     */
+    fun expectProjectManifest(manifestUri: String) {
+        lock.write {
+            workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri)
+            val opening = manifestOpening
+            if (opening == null || opening.isCompleted) manifestOpening = CompletableDeferred()
+        }
+    }
+
     suspend fun openWorkspace(manifestUri: String): WorkspaceStatus {
-        lock.write { workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri) }
+        val settings = resourceSettings
+        val opening = lock.write {
+            workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri)
+            val current = manifestOpening
+            if (current != null && !current.isCompleted) current
+            else CompletableDeferred<String?>().also { manifestOpening = it }
+        }
         return try {
-            val workspace = workspaceOpener(manifestUri)
+            val workspace = workspaceOpener(manifestUri, settings)
+            val text = workspace.resources?.openedManifestText(manifestUri)
             lock.write {
                 architecturePlane = workspace
                 workspaceStatus = WorkspaceStatus(WorkspaceState.READY, manifestUri)
                 workspaceStatus
-            }
-        } catch (error: kotlinx.coroutines.CancellationException) {
+            }.also { opening.complete(text) }
+        } catch (error: CancellationException) {
+            opening.complete(null)
             throw error
         } catch (error: Throwable) {
             // Throwable: a failed fetch in JavaScript is not an Exception, and must not leave the status BUILDING.
@@ -529,8 +620,30 @@ class ZenwaveLanguageServer(
                     message = error.message ?: error::class.simpleName,
                 )
                 workspaceStatus
-            }
+            }.also { opening.complete(null) }
         }
+    }
+
+    /**
+     * The text [openWorkspace] loaded for the project manifest, when [uri] is that address.
+     * Any other absolute URL stays on the allow-list. The document reader never fetches this URL.
+     */
+    private suspend fun openedProjectManifest(uri: String): String? {
+        val (status, opening) = lock.read { workspaceStatus to manifestOpening }
+        val manifest = status.manifestUri ?: return null
+        if (!isProjectManifest(uri, manifest)) return null
+        return when (status.state) {
+            WorkspaceState.READY -> lock.read { architecturePlane }?.resources?.openedManifestText(uri)
+            WorkspaceState.BUILDING -> opening?.await()
+            else -> null
+        }
+    }
+
+    private fun isProjectManifest(uri: String, manifest: String): Boolean {
+        if (uri == manifest) return true
+        val asked = AbsoluteUriPolicy.identity(uri) ?: return false
+        val opened = AbsoluteUriPolicy.identity(manifest) ?: return false
+        return asked == opened
     }
 
     fun workspaceStatus(): WorkspaceStatus = lock.read { workspaceStatus }

@@ -11,8 +11,9 @@ import io.zenwave360.jsonrefparser.io.DocumentLoader
  * With [followManifestOrigin] a remote manifest may also read its own origin (a `$ref` to a sibling document of the
  * manifest); the graph's artifact loads do not, so a remote manifest reads only itself there.
  *
- * Limit: the loaders underneath follow HTTP redirects, and the target of a redirect is not checked again here (tracked
- * as AR-Q5 in the spec).
+ * Limit: while a workspace opens, the loaders underneath still follow HTTP redirects, and the target of a redirect is
+ * not checked again here. A client's absolute `http(s)` read is not that path: lsp-core fetches it and checks every
+ * redirect hop against the allowed domains.
  */
 internal class OpeningDocumentGuard(
     manifestUri: String,

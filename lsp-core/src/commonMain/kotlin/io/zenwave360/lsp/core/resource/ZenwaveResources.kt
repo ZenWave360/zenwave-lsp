@@ -9,15 +9,20 @@ import io.zenwave360.architecture.manifest.ManifestResourceLoadException
 import io.zenwave360.architecture.manifest.ManifestResourceLoadResult
 import io.zenwave360.architecture.manifest.ManifestService
 import io.zenwave360.architecture.manifest.ManifestSubdomain
+import io.zenwave360.architecture.manifest.ManifestResolvedResource
 import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.lsp.core.config.ResourceReferenceResolver
+import kotlinx.coroutines.CancellationException
 
 /** The segment that stands for "no version" in a `zenwave:` address (AR-Q3). */
 const val ZENWAVE_UNVERSIONED_SEGMENT = "-"
 
-/** The address of a remote manifest (AR-Q1): the reserved leading dot is a first segment no owner id has. */
-const val ZENWAVE_REMOTE_MANIFEST_ADDRESS = "zenwave:/.zenwave-manifest.yml"
+/** The file name of a remote manifest when the client does not name another (AR-Q1). */
+const val DEFAULT_REMOTE_MANIFEST_NAME = ".zenwave-manifest.yml"
+
+/** The address of a remote manifest with the default name (AR-Q1): a leading dot no owner id has. */
+const val ZENWAVE_REMOTE_MANIFEST_ADDRESS = "zenwave:/" + DEFAULT_REMOTE_MANIFEST_NAME
 
 /**
  * A parsed `zenwave:/<owner.id>/<version>/<content.path>` address (AR-R1). The fields are decoded; [version] is
@@ -33,7 +38,11 @@ const val UNADDRESSABLE_PERCENT_REASON = "a literal % in a path is not supported
 
 /** Why a declared entry has no `zenwave:` address. */
 enum class DeclaredFlag {
-    /** The entry is an absolute URI (AR-Q4): it bypasses `contentResolution` and has no owner-relative name. */
+    /**
+     * The entry is an absolute URI (AR-Q4): it bypasses `contentResolution` and has no owner-relative name.
+     * It stays flagged in the tree. `zenwave/statResource` and `zenwave/readResource` fetch it only when its
+     * host is an allowed domain, and otherwise refuse it before any request.
+     */
     ABSOLUTE_URI,
 
     /** The entry names a folder, which is reserved for phase 2 (AR-R12). */
@@ -90,7 +99,11 @@ object ZenwaveResources {
         "zenwave:/" + listOf(ownerId, version ?: ZENWAVE_UNVERSIONED_SEGMENT).joinToString("/") { encodeSegment(it) } +
             "/" + path.split('/').joinToString("/") { encodeSegment(it) }
 
-    fun isRemoteManifestAddress(address: String): Boolean = address == ZENWAVE_REMOTE_MANIFEST_ADDRESS
+    /** `zenwave:/<name>` for a plain file name (AR-Q1). The default name keeps [ZENWAVE_REMOTE_MANIFEST_ADDRESS]. */
+    fun remoteManifestAddress(name: String = DEFAULT_REMOTE_MANIFEST_NAME): String = "zenwave:/$name"
+
+    fun isRemoteManifestAddress(address: String, name: String = DEFAULT_REMOTE_MANIFEST_NAME): Boolean =
+        address == remoteManifestAddress(name)
 
     /**
      * Parses the grammar of AR-R1, or returns null. Refused, before anything is joined to anything: another
@@ -248,6 +261,43 @@ object ZenwaveResources {
             )
         } catch (error: ManifestResolutionException) {
             ManifestResourceLoadResult(path = path, errorMessage = error.message)
+        }
+    }
+
+    /**
+     * AR-Q4. Reads a declared absolute `http(s)` entry by fetching that URI directly, not through
+     * `contentResolution` and not through [ZenWaveManifestLoader]. The loader's HTTP client follows redirects
+     * on its own, so the request is made here: [AbsoluteUriPolicy] parses the entry once, the host of that
+     * canonical URL is checked, and [AbsoluteHttpReads] fetches that same string, checking every redirect the
+     * same way. When the URL is rejected this throws [AbsoluteUriNotAllowed] before any request.
+     */
+    suspend fun loadAbsolute(
+        entry: DeclaredResource,
+        allowedDomains: List<String>,
+        http: AbsoluteHttpFetch,
+    ): ManifestResourceLoadResult {
+        val path = entry.path
+        val canonical = AbsoluteUriPolicy.parse(path) ?: throw AbsoluteUriNotAllowed(path, null)
+        if (!AbsoluteUriPolicy.allows(allowedDomains, canonical)) {
+            throw AbsoluteUriNotAllowed(path, canonical.host)
+        }
+        return try {
+            val text = AbsoluteHttpReads.read(http, allowedDomains, canonical)
+            ManifestResourceLoadResult(path, ManifestResolvedResource(canonical.scheme, canonical.url), text)
+        } catch (refused: AbsoluteUriNotAllowed) {
+            throw refused
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            val message = error.message ?: error::class.simpleName.orEmpty()
+            val candidate = ManifestResolvedResource(canonical.scheme, canonical.url)
+            ManifestResourceLoadResult(
+                path = path,
+                errorMessage = message,
+                candidates = listOf(candidate),
+                finalError = message,
+                candidateErrors = listOf(message),
+            )
         }
     }
 

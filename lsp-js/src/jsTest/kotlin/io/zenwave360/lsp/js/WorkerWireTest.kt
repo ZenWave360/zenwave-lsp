@@ -88,7 +88,10 @@ class WorkerWireTest {
         val brokenZflUri = "file:///workspace/broken.zfl"
         val zwUri = "file:///workspace/orders.zw"
         val brokenZwUri = "file:///workspace/broken.zw"
-        val fixtures = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures"
+        val origin = js("globalThis.location.origin") as String
+        val fixtures = origin + "/base/kotlin/wire-fixtures"
+        // The fixtures are served by the test page's own host. Absolute http reads only that host when it is allowed.
+        val fixtureHost = origin.substringAfter("://").substringBefore(":")
 
         return client.request(
             "initialize",
@@ -96,7 +99,12 @@ class WorkerWireTest {
                 "processId" to null,
                 "rootUri" to null,
                 "capabilities" to jsonObject(),
-                "initializationOptions" to jsonObject("zenwave" to jsonObject("projectManifestUri" to "file:///workspace/zenwave-architecture.yml")),
+                "initializationOptions" to jsonObject(
+                    "zenwave" to jsonObject(
+                        "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
+                        "allowedDomains" to arrayOf(fixtureHost),
+                    ),
+                ),
             ),
         ).then { result: dynamic ->
             assertEquals("zenwave-lsp", result.serverInfo.name)

@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.architecture
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestParser
 import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.architecture.graph.ArchitectureGraphBuilder
 import io.zenwave360.jsonrefparser.io.defaultLoaders
@@ -41,6 +42,7 @@ class WorkspaceArchitecturePlane(
         suspend fun open(
             manifestUri: String,
             runtime: WorkspaceRuntime? = null,
+            resourceSettings: ZenwaveResourceSettings = ZenwaveResourceSettings(),
         ): WorkspaceArchitecturePlane {
             if (runtime != null) return WorkspaceArchitecturePlane(runtime.open(manifestUri))
             val manifestLoader = guardedLoader(manifestUri, followManifestOrigin = true)
@@ -53,7 +55,10 @@ class WorkspaceArchitecturePlane(
             // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),
             // so this loader is not the guard above: it reads the candidates the manifest's sources produce.
             val resourceLoader = ZenWaveManifestLoader(defaultLoaders(), archiveEntryLoader = null)
-            return WorkspaceArchitecturePlane(workspace, ZenwaveResourceService(manifestUri, manifest, resourceLoader, manifestText))
+            return WorkspaceArchitecturePlane(
+                workspace,
+                ZenwaveResourceService(manifestUri, manifest, resourceLoader, manifestText, resourceSettings),
+            )
         }
 
         private fun guardedLoader(manifestUri: String, followManifestOrigin: Boolean) = ZenWaveManifestLoader(

@@ -151,8 +151,8 @@ class ZenwaveImportsTest {
         val escaping = own.single { it.code == "import-not-declared" && it.range.start.line == 0 }
         assertEquals("../../other/x.zdl", text.lines()[0].substring(escaping.range.start.character, escaping.range.end.character))
         assertEquals(DiagnosticSeverity.ERROR, escaping.severity)
-        assertEquals(1, own.single { it.code == "import-unreadable" }.range.start.line)
-        assertEquals(2, own.single { it.code == "import-not-declared" && it.range.start.line == 2 }.range.start.line, "another scheme is refused")
+        assertEquals(1, own.single { it.code == "import-unreadable" && it.range.start.line == 1 }.range.start.line)
+        assertEquals(2, own.single { it.code == "import-unreadable" && it.range.start.line == 2 }.range.start.line, "an absolute http import is refused and not fetched")
         assertEquals(listOf("$raw/missing.zdl"), io.loaded.filter { !it.endsWith("model.zdl") && !it.endsWith("checkout.zfl") }, "only the allowed import was tried")
     }
 
@@ -317,7 +317,7 @@ class ZenwaveImportsTest {
         val flow = "$base/checkout.zfl"
         server.openDocument(flow, "zfl", text)
 
-        val problem = server.importDiagnostics(flow).documents.getValue(flow).single { it.code == "import-not-declared" }
+        val problem = server.importDiagnostics(flow).documents.getValue(flow).single { it.code == "import-unreadable" }
 
         assertFalse("password" in problem.message || "secret" in problem.message, problem.message)
     }

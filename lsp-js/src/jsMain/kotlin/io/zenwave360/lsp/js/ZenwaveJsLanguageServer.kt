@@ -20,6 +20,8 @@ import kotlinx.coroutines.await
 import kotlinx.coroutines.promise
 import io.zenwave360.lsp.core.resource.ResourceJson
 import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
+import io.zenwave360.lsp.core.resource.resolveRemoteManifestName
 import kotlin.js.Promise
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
@@ -44,6 +46,10 @@ fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
 data class ZenwaveInitializationOptions(
     val configUri: String? = null,
     val projectManifestUri: String? = null,
+    val remoteManifestName: String = io.zenwave360.lsp.core.resource.DEFAULT_REMOTE_MANIFEST_NAME,
+    val allowedDomains: List<String> = emptyList(),
+    /** Set when [remoteManifestName] was rejected and replaced by the default. The server logs it. */
+    val remoteManifestNameWarning: String? = null,
 )
 
 /**
@@ -243,7 +249,22 @@ class ZenwaveJsLanguageServer(
 
     fun initialize(params: dynamic): dynamic {
         initializationOptions = parseInitializationOptions(if (isPresent(params)) params.initializationOptions else null)
-        initializationOptions?.projectManifestUri?.let(::openWorkspace)
+        initializationOptions?.let { options ->
+            server.applyResourceSettings(
+                ZenwaveResourceSettings(
+                    remoteManifestName = options.remoteManifestName,
+                    allowedDomains = options.allowedDomains,
+                )
+            )
+            options.remoteManifestNameWarning?.let { warning ->
+                val console = connection.console
+                if (isPresent(console)) console.warn(warning)
+            }
+        }
+        initializationOptions?.projectManifestUri?.let { manifestUri ->
+            server.expectProjectManifest(manifestUri)
+            openWorkspace(manifestUri)
+        }
         if (isPresent(params) && isPresent(params.initializationOptions)) {
             val catalogue = params.initializationOptions.pluginCatalogue
             if (isPresent(catalogue)) replacePluginCatalogue(catalogue)
@@ -457,8 +478,25 @@ internal fun parseInitializationOptions(initializationOptions: dynamic): Zenwave
     if (!isPresent(zenwave) || jsTypeOf(zenwave) != "object") return null
     val configUri = stringOrNull(zenwave.configUri)
     val projectManifestUri = stringOrNull(zenwave.projectManifestUri)
-    if (configUri == null && projectManifestUri == null) return null
-    return ZenwaveInitializationOptions(configUri = configUri, projectManifestUri = projectManifestUri)
+    val requestedName = stringOrNull(zenwave.remoteManifestName)
+    val allowedDomains = stringListOrNull(zenwave.allowedDomains)
+    if (configUri == null && projectManifestUri == null && requestedName == null && allowedDomains == null) return null
+    val name = resolveRemoteManifestName(requestedName)
+    return ZenwaveInitializationOptions(
+        configUri = configUri,
+        projectManifestUri = projectManifestUri,
+        remoteManifestName = name.name,
+        allowedDomains = allowedDomains.orEmpty(),
+        remoteManifestNameWarning = name.warning,
+    )
+}
+
+/** A JSON array of strings, or null when the field is absent or not an array. Entries that are not strings are dropped. */
+private fun stringListOrNull(value: dynamic): List<String>? {
+    if (!isPresent(value)) return null
+    if (js("Array.isArray(value)") as Boolean != true) return null
+    val length = (value.length as Number).toInt()
+    return List(length) { index -> stringOrNull(value[index]) }.filterNotNull()
 }
 
 /**

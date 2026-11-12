@@ -125,6 +125,40 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun parsesRemoteManifestNameAndAllowedDomains() {
+        val options = parseInitializationOptions(
+            jsonObject(
+                "zenwave" to jsonObject(
+                    "remoteManifestName" to "architecture.yml",
+                    "allowedDomains" to arrayOf("github.com", "*.githubusercontent.com"),
+                )
+            )
+        )
+
+        assertEquals("architecture.yml", options?.remoteManifestName)
+        assertEquals(listOf("github.com", "*.githubusercontent.com"), options?.allowedDomains)
+        assertNull(options?.remoteManifestNameWarning)
+
+        val (server, recording) = listening()
+        recording.call(
+            "onInitialize",
+            jsonObject(
+                "capabilities" to jsonObject(),
+                "initializationOptions" to jsonObject(
+                    "zenwave" to jsonObject(
+                        "remoteManifestName" to "a/b.yml",
+                        "allowedDomains" to arrayOf("GitHub.com"),
+                    )
+                ),
+            ),
+        )
+        assertEquals(".zenwave-manifest.yml", server.initializationOptions?.remoteManifestName)
+        assertEquals(listOf("GitHub.com"), server.initializationOptions?.allowedDomains)
+        assertNotNull(server.initializationOptions?.remoteManifestNameWarning)
+        assertTrue(recording.warnings.any { "a/b.yml" in it && ".zenwave-manifest.yml" in it })
+    }
+
+    @Test
     fun aFailingManifestIsRecordedAndDoesNotHoldUpInitialize(): Promise<Unit> {
         val (server, recording) = listening()
 
