@@ -5,7 +5,7 @@ import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.RefParserOptions
 
 internal expect object SpecParserBridge {
-    /** [loaders] replaces the platform delegates; implicit reads always retain the reference guard. */
+    /** [loaders] replaces platform delegates; implicit reads retain per-reference guards on every document. */
     fun parseText(
         text: String,
         baseUri: String,

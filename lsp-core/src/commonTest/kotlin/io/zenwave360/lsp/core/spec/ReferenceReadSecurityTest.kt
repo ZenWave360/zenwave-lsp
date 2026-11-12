@@ -1,6 +1,9 @@
 package io.zenwave360.lsp.core.spec
 
 import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.jsonrefparser.model.MissingRefException
+import io.zenwave360.jsonrefparser.model.OnMissing
+import io.zenwave360.jsonrefparser.model.RefParserOptions
 import io.zenwave360.lsp.core.avro.AvroLanguageModule
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
@@ -53,14 +56,14 @@ class ReferenceReadSecurityTest {
             val document = parseSpecDocument(root, listOf(io))
             assertEquals(listOf(local, remote), io.reads)
             assertTrue(document.unresolvedRefs.isNotEmpty())
-            val position = assertNotNull(document.model.locationOf("$.models['\$ref']")).range.start
+            val position = assertNotNull(document.model.locationOf("$.models")).range.start
             defaultSpecHover(document, position, language)
             assertTrue(io.reads.size > 2, "hover must exercise the guarded reload")
             val beforeDefinition = io.reads.size
             defaultSpecDefinition(document, position, language)
             assertTrue(io.reads.size > beforeDefinition, "definition must exercise the guarded reload")
             val beforeContribution = io.reads.size
-            refContribution(document.model, "$.models['\$ref']", "models", "references")
+            refContribution(document.model, "$.models", "models", "references")
             assertTrue(io.reads.size > beforeContribution, "cross references must exercise the guarded reload")
             assertTrue(io.probes.all { it == local || it == remote }, io.probes.toString())
             assertTrue(io.reads.all { it == local || it == remote }, io.reads.toString())
@@ -77,6 +80,98 @@ class ReferenceReadSecurityTest {
         assertEquals("LocalOrder", parsed.model.nodeAt("$.models.title"))
         assertEquals(emptyMap(), parsed.unresolvedRefs)
         assertEquals(listOf(uri), io.reads)
+    }
+
+    @Test
+    fun refusedRefsDoNotDisableValidRefsIncludingNormalizedAliases() {
+        listOf("file:////attacker/share/schema.yml", "../../../d:/local.yml").forEach { refused ->
+            val local = "file:///d:/local.yml"
+            val io = Recording(mutableMapOf(local to "Order: {type: object, title: LocalOrder}"))
+            val text = """
+                refused: {${'$'}ref: '$refused#/Order'}
+                valid: {${'$'}ref: '$local#/Order'}
+            """.trimIndent()
+            val document = parseSpecDocument(snapshot("file:///c:/work/api.yml", "openapi", text), listOf(io))
+            assertEquals("LocalOrder", document.model.nodeAt("$.valid.title"))
+            assertEquals(listOf("$refused#/Order"), document.unresolvedRefs.values.toList())
+            assertEquals(listOf(local), io.probes)
+            assertEquals(listOf(local), io.reads)
+            val raw = YamlDocumentModel.fromParsedDocument("file:///c:/work/api.yml", SpecParserBridge.parseRaw(text, "file:///c:/work/api.yml"))
+            assertEquals(raw.locationOf("$.refused['\$ref']"), document.model.locationOf("$.refused['\$ref']"))
+            assertEquals(raw.locationOf("$.valid"), document.model.locationOf("$.valid"))
+        }
+    }
+
+    @Test
+    fun fetchedDocumentsSkipOnlyTheirOwnRefusals() {
+        val remote = "https://example.test/schema.yml"
+        val sibling = "https://example.test/types.yml"
+        val local = "file:///C:/work/local.yml"
+        val io = Recording(mutableMapOf(
+            remote to """
+                refused: {${'$'}ref: '$local#/Order'}
+                valid: {${'$'}ref: 'types.yml#/Order'}
+            """.trimIndent(),
+            sibling to "Order: {title: RemoteOrder}",
+            local to "Order: {title: LocalOrder}",
+        ))
+        val document = parseSpecDocument(snapshot("file:///C:/work/api.yml", "openapi", """
+            remote: {${'$'}ref: '$remote'}
+            local: {${'$'}ref: '$local#/Order'}
+        """.trimIndent()), listOf(io))
+        assertEquals("RemoteOrder", document.model.nodeAt("$.remote.valid.title"))
+        assertEquals("LocalOrder", document.model.nodeAt("$.local.title"))
+        assertEquals(listOf("$local#/Order"), document.unresolvedRefs.values.toList())
+        assertEquals(listOf(remote, sibling, local), io.reads)
+    }
+
+    @Test
+    fun failingRemoteSiblingRemainsUnresolvedWhileValidSiblingResolves() {
+        val missing = "https://example.test/missing.yml"
+        val valid = "https://example.test/valid.yml"
+        val io = Recording(mutableMapOf(valid to "Order: {title: RemoteOrder}"))
+        val document = parseSpecDocument(snapshot("https://example.test/api.yml", "openapi", """
+            missing: {${'$'}ref: 'missing.yml#/Order'}
+            valid: {${'$'}ref: 'valid.yml#/Order'}
+        """.trimIndent()), listOf(io))
+        assertEquals(listOf("missing.yml#/Order"), document.unresolvedRefs.values.toList())
+        assertEquals("RemoteOrder", document.model.nodeAt("$.valid.title"))
+        assertEquals(1, document.diagnostics.count { it.code == "missing-ref" })
+        assertEquals(listOf(missing, valid), io.reads)
+    }
+
+    @Test
+    fun refusedRefStillFailsWithOnMissingFailWithoutProbingDelegate() {
+        val io = Recording()
+        assertFailsWith<MissingRefException> {
+            SpecParserBridge.parseText("models: {${'$'}ref: 'file:////attacker/share/schema.yml'}",
+                "file:///C:/work/api.yml", RefParserOptions(), listOf(io))
+        }
+        assertEquals(emptyList(), io.probes)
+        assertEquals(emptyList(), io.reads)
+    }
+
+    @Test
+    fun refusedYamlScalarsAndJsonRefsPreserveOtherRefsAndLocations() {
+        val refused = "file:////attacker/share/schema.yml#/Order"
+        val uri = "file:///C:/work/api.yml"
+        val texts = listOf(
+            "refused:\n  ${'$'}ref: &bad '$refused'\nalias: {${'$'}ref: *bad}\nvalid: {${'$'}ref: 'local.yml#/Order'}",
+            "refused:\n  ${'$'}ref: >-\n    $refused\nvalid: {${'$'}ref: 'local.yml#/Order'}",
+            """{"refused/array": [{"${'$'}ref": "$refused"}], "valid": {"${'$'}ref": "local.yml#/Order"}}""",
+            "\uFEFFlabel: 😀\rrefused: {${'$'}ref: '../../../d:/local.yml#/Order'}\rvalid: {${'$'}ref: 'local.yml#/Order'}",
+        )
+        texts.forEach { text ->
+            val io = Recording(mutableMapOf("file:///C:/work/local.yml" to "Order: {title: LocalOrder}"))
+            val parsed = SpecParserBridge.parseText(text, uri,
+                RefParserOptions(onMissing = OnMissing.SKIP), listOf(io))
+            val document = YamlDocumentModel.fromParsedDocument(uri, parsed)
+            assertEquals("LocalOrder", document.nodeAt("$.valid.title"))
+            assertTrue(document.rawModel.toString().contains(if (text.contains(refused)) refused else "../../../d:/local.yml#/Order"))
+            assertTrue(!document.rawModel.toString().contains("zenwave-refused"))
+            assertEquals(SpecParserBridge.parseRaw(text, uri).locations["/valid"], parsed.locations["/valid"])
+            assertEquals(listOf("file:///C:/work/local.yml"), io.reads)
+        }
     }
 
     @Test
@@ -123,7 +218,8 @@ class ReferenceReadSecurityTest {
         assertEquals(io.documents[uri], guard.load(uri))
         assertFailsWith<IllegalStateException> { guard.load("file:///C:/secret.yml") }
         io.documents[uri] = "Order: {${'$'}ref: 'file:///C:/secret.yml'}"
-        assertFailsWith<IllegalStateException> { guard.load(uri) }
+        val guardedText = guard.load(uri)
+        assertTrue(!guardedText.contains("secret.yml"))
         assertEquals(listOf(uri, uri), io.reads)
     }
 

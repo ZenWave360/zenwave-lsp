@@ -1,14 +1,16 @@
 package io.zenwave360.lsp.core.spec
 
+import io.zenwave360.jsonrefparser.RefParser
 import io.zenwave360.jsonrefparser.io.DocumentLoader
-import io.zenwave360.jsonrefparser.model.OnMissing
-import io.zenwave360.jsonrefparser.model.RefParserOptions
+import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.lsp.core.architecture.DecodingDocumentLoader
 import io.zenwave360.lsp.core.architecture.decodingLoaders
 import io.zenwave360.lsp.core.resource.AbsoluteHttpReads
 import io.zenwave360.lsp.core.resource.AbsoluteUriPolicy
 import io.zenwave360.lsp.core.resource.CanonicalAbsoluteUrl
 import io.zenwave360.lsp.core.resource.platformAbsoluteHttpFetch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /** Each external document is checked under its own origin before the parser sees its refs. */
 internal class ReferenceDocumentLoader(
@@ -18,21 +20,71 @@ internal class ReferenceDocumentLoader(
 ) : DocumentLoader {
     private val delegates = suppliedLoaders ?: decodingLoaders()
     private val usePlatformHttp = suppliedLoaders == null
+    private val refusedRefs = mutableMapOf<String, String>()
+    private val originalDocuments = mutableMapOf<String, ParsedDocument>()
 
     // Claim refused addresses too: no later loader may retry them without the policy.
     override fun canLoad(uri: String): Boolean = true
 
     override suspend fun load(uri: String): String {
-        check(referenceIsSafe(sourceUri, uri, allowedDomains)) { "The reference is not served" }
+        check(uri !in refusedRefs && referenceIsSafe(sourceUri, uri, allowedDomains)) { "The reference is not served" }
         val http = AbsoluteUriPolicy.parse(uri)
         val text = if (http != null && usePlatformHttp) {
             readHttp(http)
         } else {
             (delegates.firstOrNull { it.canLoad(uri) } ?: error("No document loader available")).load(uri)
         }
+        currentCoroutineContext().ensureActive()
         // A local root never lends filesystem access to a fetched HTTP (or zenwave:) document.
-        requireSafeReferences(text, uri, allowedDomains)
-        return text
+        return prepareText(text, uri)
+    }
+
+    /**
+     * Preserve each raw refusal before upstream URI resolution erases backslashes or drive climbs.
+     * Give only that ref an unreadable address; denying its normalized target would also deny a
+     * different, valid ref to the same target. Source ranges and original refs are restored below.
+     */
+    internal fun prepareText(text: String, uri: String): String {
+        val parsed = SpecParserBridge.parseRaw(text, uri)
+        originalDocuments[RefParser.normalizeUri(uri)] = parsed
+        val offsets = yamlSourceOffsets(text)
+        val replacements = linkedMapOf<Pair<Int, Int>, String>()
+        visitReferences(parsed.root) { path, ref, _ ->
+            if (!referenceIsSafe(uri, ref, allowedDomains)) {
+                val location = checkNotNull(parsed.locations[path]) { "The reference is not served" }
+                val range = offsets[location.line][location.column] to offsets[location.endLine][location.endColumn]
+                replacements.getOrPut(range) {
+                    // Always refused by the local-file policy, including when nested in another guard.
+                    val address = "file:////zenwave-refused/${refusedRefs.size}"
+                    refusedRefs[address] = ref
+                    val scalar = text.substring(range.first, range.second)
+                    // Keep YAML anchors/tags and line boundaries (including block scalars).
+                    val prefix = Regex("^(?:[!&][^\\s]+\\s+)*").find(scalar)?.value.orEmpty()
+                    val lines = location.endLine - location.line
+                    prefix + "\"$address\"" + "\n".repeat(lines) +
+                        if (lines > 0) " ".repeat(location.endColumn) else ""
+                }
+            }
+        }
+        return replacements.entries.sortedByDescending { it.key.first }.fold(text) { result, (range, replacement) ->
+            result.replaceRange(range.first, range.second, replacement)
+        }
+    }
+
+    internal fun restoreDocument(parsed: ParsedDocument): ParsedDocument {
+        fun restoreRefs(root: Any?) = visitReferences(root) { _, ref, node ->
+            refusedRefs[ref]?.let { original -> node["\$ref"] = original }
+        }
+        restoreRefs(parsed.root)
+        restoreRefs(parsed.schema)
+        return parsed.copy(
+            locations = parsed.locations.mapValues { (path, location) ->
+                originalDocuments[location.file]?.locations?.get(path) ?: location
+            },
+            documentLocations = parsed.documentLocations.mapValues { (uri, locations) ->
+                originalDocuments[uri]?.locations ?: locations
+            },
+        )
     }
 
     /** Default HTTP loaders follow redirects unchecked. Inspect each hop instead. */
@@ -56,18 +108,22 @@ internal class ReferenceDocumentLoader(
     }
 }
 
-internal fun referenceLoadersFor(
-    text: String,
-    uri: String,
-    options: RefParserOptions,
-    delegates: List<DocumentLoader>?,
-): List<DocumentLoader> {
-    if (!referencesAreSafe(text, uri)) {
-        check(options.onMissing == OnMissing.SKIP) { "The reference is not served" }
-        // Keep original refs and their diagnostics; no external read from a refused root document.
-        return emptyList()
+/** YAML marks count Unicode code points and accept more line breaks than LF. */
+private fun yamlSourceOffsets(text: String): List<List<Int>> {
+    val lines = mutableListOf(mutableListOf(0))
+    var index = 0
+    while (index < text.length) {
+        val char = text[index]
+        val width = if (char.isHighSurrogate() && text.getOrNull(index + 1)?.isLowSurrogate() == true) 2 else 1
+        index += width
+        when {
+            char in "\n\u0085\u2028\u2029" || (char == '\r' && text.getOrNull(index) != '\n') ->
+                lines += mutableListOf(index)
+            char == '\uFEFF' -> lines.last()[lines.last().lastIndex] = index
+            else -> lines.last() += index
+        }
     }
-    return listOf(ReferenceDocumentLoader(uri, delegates))
+    return lines
 }
 
 internal fun requireSafeReferences(text: String, uri: String, allowedDomains: List<String> = emptyList()) {
@@ -75,26 +131,37 @@ internal fun requireSafeReferences(text: String, uri: String, allowedDomains: Li
 }
 
 private fun referencesAreSafe(text: String, uri: String, allowedDomains: List<String> = emptyList()): Boolean {
-    val root = SpecParserBridge.parseRaw(text, uri).root
+    var safe = true
+    visitReferences(SpecParserBridge.parseRaw(text, uri).root) { _, ref, _ ->
+        if (!referenceIsSafe(uri, ref, allowedDomains)) safe = false
+    }
+    return safe
+}
+
+private fun visitReferences(root: Any?, visitRef: (String, String, MutableMap<String, Any?>) -> Unit) {
     val ancestors = mutableListOf<Any>()
-    fun visit(node: Any?): Boolean {
-        if (node !is Map<*, *> && node !is List<*>) return true
-        if (ancestors.any { it === node }) return true
+    fun visit(node: Any?, path: String) {
+        if (node !is Map<*, *> && node !is List<*>) return
+        if (ancestors.any { it === node }) return
         ancestors += node
         try {
-            return when (node) {
+            when (node) {
                 is Map<*, *> -> {
                     val ref = node["\$ref"] as? String
-                    (ref == null || referenceIsSafe(uri, ref, allowedDomains)) && node.values.all(::visit)
+                    @Suppress("UNCHECKED_CAST")
+                    if (ref != null) visitRef("$path/\$ref", ref, node as MutableMap<String, Any?>)
+                    node.forEach { (key, value) ->
+                        val token = key.toString().replace("~", "~0").replace("/", "~1")
+                        visit(value, "$path/$token")
+                    }
                 }
-                is List<*> -> node.all(::visit)
-                else -> true
+                is List<*> -> node.forEachIndexed { index, value -> visit(value, "$path/$index") }
             }
         } finally {
             ancestors.removeAt(ancestors.lastIndex)
         }
     }
-    return visit(root)
+    visit(root, "")
 }
 
 internal fun referenceIsSafe(sourceUri: String, reference: String, allowedDomains: List<String> = emptyList()): Boolean {

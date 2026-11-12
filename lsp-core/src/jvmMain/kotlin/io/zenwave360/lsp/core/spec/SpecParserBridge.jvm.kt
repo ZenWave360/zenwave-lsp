@@ -13,16 +13,20 @@ internal actual object SpecParserBridge {
         baseUri: String,
         options: RefParserOptions,
         loaders: List<DocumentLoader>?,
-    ): ParsedDocument =
-        RefParser.fromText(text = text, baseUri = baseUri, options = options,
-            loaders = referenceLoadersFor(text, baseUri, options, loaders))
+    ): ParsedDocument {
+        val guard = ReferenceDocumentLoader(baseUri, loaders)
+        return guard.restoreDocument(RefParser.fromText(text = guard.prepareText(text, baseUri), baseUri = baseUri, options = options,
+            loaders = listOf(guard))
             .dereferenceBlocking()
-            .getParsedDocument()
+            .getParsedDocument())
+    }
 
-    actual fun parseUri(uri: String, options: RefParserOptions, loaders: List<DocumentLoader>?): ParsedDocument =
-        RefParser(uri, options = options, loaders = listOf(ReferenceDocumentLoader(uri, loaders)))
+    actual fun parseUri(uri: String, options: RefParserOptions, loaders: List<DocumentLoader>?): ParsedDocument {
+        val guard = loaders?.singleOrNull() as? ReferenceDocumentLoader ?: ReferenceDocumentLoader(uri, loaders)
+        return guard.restoreDocument(RefParser(uri, options = options, loaders = listOf(guard))
             .dereferenceBlocking()
-            .getParsedDocument()
+            .getParsedDocument())
+    }
 
     actual fun parseRaw(text: String, baseUri: String): ParsedDocument =
         RefParser.fromText(text, baseUri, loaders = emptyList()).parseBlocking().getParsedDocument()
