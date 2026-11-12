@@ -66,12 +66,18 @@ internal class ReferenceDocumentLoader(
                 }
             }
         }
-        return replacements.entries.sortedByDescending { it.key.first }.fold(text) { result, (range, replacement) ->
+        val rewritten = replacements.entries.sortedByDescending { it.key.first }.fold(text) { result, (range, replacement) ->
             result.replaceRange(range.first, range.second, replacement)
         }
+        // Fail closed: whatever the offsets did, no refused ref may reach the parser.
+        visitReferences(SpecParserBridge.parseRaw(rewritten, uri).root) { _, ref, _ ->
+            check(ref in refusedRefs || referenceIsSafe(uri, ref, allowedDomains)) { "The reference is not served" }
+        }
+        return rewritten
     }
 
     internal fun restoreDocument(parsed: ParsedDocument): ParsedDocument {
+        if (refusedRefs.isEmpty()) return parsed
         fun restoreRefs(root: Any?) = visitReferences(root) { _, ref, node ->
             refusedRefs[ref]?.let { original -> node["\$ref"] = original }
         }
@@ -108,7 +114,7 @@ internal class ReferenceDocumentLoader(
     }
 }
 
-/** YAML marks count Unicode code points and accept more line breaks than LF. */
+/** YAML marks count Unicode code points; only LF and a lone CR advance the line, as the reader does. */
 private fun yamlSourceOffsets(text: String): List<List<Int>> {
     val lines = mutableListOf(mutableListOf(0))
     var index = 0
@@ -117,7 +123,7 @@ private fun yamlSourceOffsets(text: String): List<List<Int>> {
         val width = if (char.isHighSurrogate() && text.getOrNull(index + 1)?.isLowSurrogate() == true) 2 else 1
         index += width
         when {
-            char in "\n\u0085\u2028\u2029" || (char == '\r' && text.getOrNull(index) != '\n') ->
+            char == '\n' || (char == '\r' && text.getOrNull(index) != '\n') ->
                 lines += mutableListOf(index)
             char == '\uFEFF' -> lines.last()[lines.last().lastIndex] = index
             else -> lines.last() += index
@@ -170,6 +176,8 @@ internal fun referenceIsSafe(sourceUri: String, reference: String, allowedDomain
     val source = AbsoluteUriPolicy.parse(sourceUri)
     val http = AbsoluteUriPolicy.parse(target) ?: source?.let { AbsoluteUriPolicy.resolve(it, target) }
     val localSource = isLocalDocument(sourceUri)
+    // The parser reads a rooted bare path through its file delegates, whatever the origin of its document.
+    if (!localSource && AbsoluteUriPolicy.parse(target) == null && (target.startsWith('/') || target.startsWith('\\'))) return false
     if (http != null) {
         return localSource || (source != null && sameOrigin(source, http)) || AbsoluteUriPolicy.allows(allowedDomains, http)
     }

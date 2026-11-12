@@ -237,6 +237,62 @@ class ReferenceReadSecurityTest {
         assertEquals(emptyList(), io.probes)
     }
 
+    @Test
+    fun unicodeLineSeparatorsInFetchedDocumentsDoNotShiftRefusedRefs() {
+        listOf(" ", "\u0085", " ").forEach { separator ->
+            val remote = "https://h.test/x.yml"
+            val io = Recording(mutableMapOf(
+                remote to "a: \"$separator\"\nb: {x: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}\n" +
+                    "c: {${'$'}ref: 'file:///C:/secret.yml'}\n",
+            ))
+            parseSpecDocument(
+                snapshot("file:///C:/work/api.yml", "openapi", "models: {${'$'}ref: '$remote'}"), listOf(io),
+            )
+            assertTrue(io.probes.none { it.contains("secret.yml") }, io.probes.toString())
+            assertTrue(io.reads.none { it.contains("secret.yml") }, io.reads.toString())
+        }
+    }
+
+    @Test
+    fun rootedBarePathsFromRemoteDocumentsAreNeverRead() {
+        val bare = listOf("/etc/x", "/C:/secret.yml", "\\etc\\x")
+        bare.forEach { ref ->
+            assertTrue(!referenceIsSafe("https://h.test/api.yml", ref), ref)
+            assertTrue(!referenceIsSafe("zenwave:/orders/1/api.yml", ref), ref)
+        }
+        assertTrue(referenceIsSafe("https://h.test/api.yml", "sibling.yml"))
+        bare.forEach { ref ->
+            val io = Recording()
+            val document = parseSpecDocument(
+                snapshot("https://h.test/api.yml", "openapi", "models: {${'$'}ref: '${ref.replace("\\", "\\\\")}'}"),
+                listOf(io),
+            )
+            assertTrue(document.unresolvedRefs.isNotEmpty(), ref)
+            assertEquals(emptyList(), io.probes, ref)
+            assertEquals(emptyList(), io.reads, ref)
+            val remote = "https://h.test/doc.yml"
+            val nested = Recording(mutableMapOf(
+                remote to "a: {${'$'}ref: \"${ref.replace("\\", "\\\\")}\"}\n",
+            ))
+            parseSpecDocument(
+                snapshot("file:///C:/work/api.yml", "openapi", "models: {${'$'}ref: '$remote'}"), listOf(nested),
+            )
+            assertTrue(nested.reads.all { it == remote }, nested.reads.toString())
+            assertTrue(nested.probes.all { it == remote }, nested.probes.toString())
+        }
+    }
+
+    @Test
+    fun remoteRelativeSiblingStillResolves() {
+        val sibling = "https://h.test/sibling.yml"
+        val io = Recording(mutableMapOf(sibling to "Order: {type: object, title: Sib}"))
+        val document = parseSpecDocument(
+            snapshot("https://h.test/api.yml", "openapi", "models: {${'$'}ref: 'sibling.yml#/Order'}"), listOf(io),
+        )
+        assertEquals("Sib", document.model.nodeAt("$.models.title"))
+        assertEquals(listOf(sibling), io.reads)
+    }
+
     private fun snapshot(uri: String, language: String, text: String) =
         DocumentSnapshot(DocumentRef(uri, language, 1), text)
 }
