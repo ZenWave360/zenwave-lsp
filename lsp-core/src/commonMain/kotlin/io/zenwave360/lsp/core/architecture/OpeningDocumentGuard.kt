@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.architecture
 import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.lsp.core.platform.LoaderDocumentReader
 import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import io.zenwave360.lsp.core.spec.requireSafeReferences
 
 /**
  * What a workspace may read while it opens (AR-R10, AR-Q4): the manifest itself, and for a local `file:` manifest (the
@@ -55,7 +56,12 @@ internal class OpeningDocumentGuard(
             }
             error("Content outside the manifest is read when a client asks for it, not while the workspace opens: $shown")
         }
-        return (delegates.firstOrNull { it.canLoad(uri) } ?: error("No document loader available")).load(uri)
+        val text = (delegates.firstOrNull { it.canLoad(uri) } ?: error("No document loader available")).load(uri)
+        if (followManifestOrigin) {
+            requireSafeReferences(text, uri)
+            validateRawWorkspaceBase(text, uri)
+        }
+        return text
     }
 
     /** A remote manifest is not a local path. A `file:` manifest must be one this guard would read for anyone. */
@@ -99,6 +105,8 @@ internal class OpeningDocumentGuard(
         fun canonicalFile(uri: String): String? = when {
             uri.startsWith("file:///", ignoreCase = true) && !uri.startsWith("file:////", ignoreCase = true) ->
                 "file:///" + uri.substring("file:///".length)
+            uri.startsWith("file://", ignoreCase = true) && DRIVE_PATH.containsMatchIn(uri.substring(7)) ->
+                "file:///" + uri.substring(7)
             DRIVE_PATH.containsMatchIn(uri) -> "file:///" + uri.replace('\\', '/')
             else -> null
         }

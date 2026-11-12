@@ -25,6 +25,61 @@ import kotlin.test.assertTrue
  */
 class EncodedFileUriTest {
     @Test
+    fun bareFilesystemPathsCannotSkipFileValidation() = runTest {
+        val io = RecordingDelegate().apply { body = { "ok" } }
+        val loader = DecodingDocumentLoader(io)
+        listOf(
+            "C:/../../secret.yml", "C:secret.yml", "/../../secret.yml", "../secret.yml",
+            "//attacker/share/schema.json", "\\\\attacker\\share\\schema.json",
+            "C:/work/%2e%2e/secret.yml", "C:/work/a%2fb.yml", "C:/work/a%5cb.yml",
+            "C:/work/a%23b.yml", "C:/work/a%3fb.yml", "C:/work/a.yml?secret=x",
+        ).forEach { path ->
+            assertTrue(loader.canLoad(path))
+            assertFailsWith<IllegalStateException>(path) { loader.load(path) }
+        }
+        assertEquals(emptyList(), io.seen)
+        assertEquals("ok", loader.load("C:/work/a%20b.yml"))
+        assertEquals("ok", loader.load("/work/arch/../a.yml"))
+        assertEquals(listOf("load:C:/work/a b.yml", "load:/work/a.yml"), io.seen)
+    }
+
+    @Test
+    fun gitCandidatesWithBareDriveClimbingNeverReachTheDelegate() = runTest {
+        val io = RecordingDelegate()
+        val uri = "file:///c%3A/work/arch/m.yml"
+        val text = manifestWithBase("unused").replace("contentResolution: [workspace]", "contentResolution: [git]")
+            .replace("sources:\n", "sources:\n    git:\n      provider: generic\n      contentUrlExpression: 'C:/../../secret.yml'\n")
+        val loader = ZenWaveManifestLoader(listOf(DecodingDocumentLoader(io)), null)
+        val service = ZenwaveResourceService(uri, loader.parse(uri, text), loader)
+        val failure = assertFailsWith<ResourceRequestException> { service.read("zenwave:/sales.orders/0.1.0/openapi.yml") }
+        assertTrue("not served" in failure.message.orEmpty(), failure.message)
+        assertEquals(emptyList(), io.seen)
+    }
+
+    @Test
+    fun workspaceDriveClimbingIsCheckedBeforeUpstreamCandidateNormalisation() = runTest {
+        val io = RecordingDelegate()
+        val uri = "file:///c%3A/work/arch/m.yml"
+        val loader = ZenWaveManifestLoader(listOf(DecodingDocumentLoader(io)), null)
+        listOf("../../../d:/secrets", "../../../d%3A/secrets", "file:///./c%3A/../d:/secrets").forEach { base ->
+            val service = ZenwaveResourceService(uri, loader.parse(uri, manifestWithBase(base)), loader)
+            val failure = assertFailsWith<ResourceRequestException>(base) {
+                service.read("zenwave:/sales.orders/0.1.0/openapi.yml")
+            }
+            assertTrue("not served" in failure.message.orEmpty(), failure.message)
+            assertEquals(emptyList(), io.seen, base)
+        }
+        assertFailsWith<IllegalStateException> {
+            DecodingDocumentLoader(io).load("file:///./c%3A/../d:/x")
+        }
+        assertEquals(emptyList(), io.seen)
+        io.body = { "ok" }
+        val service = ZenwaveResourceService(uri, loader.parse(uri, manifestWithBase("../orders")), loader)
+        assertEquals("ok", service.read("zenwave:/sales.orders/0.1.0/openapi.yml").content)
+        assertEquals(listOf("can:c:/work/orders/openapi.yml", "load:c:/work/orders/openapi.yml"), io.seen)
+    }
+
+    @Test
     fun anEncodedDriveRootCannotBePoppedDuringDotSegmentNormalisation() = runTest {
         val seen = mutableListOf<String>()
         val delegate = object : DocumentLoader {

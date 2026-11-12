@@ -49,6 +49,7 @@ class WorkspaceArchitecturePlane(
             // The manifest facade normalizes legacy syntax before parsing.  Keep the resource service on the
             // same library model so an address shown in its hierarchy is also declared to `zenwave:`.
             val manifest = manifestLoader.parse(manifestUri, ArchitectureManifestParser.normalizeSourceText(manifestText))
+            validateWorkspacePaths(manifest)
             val workspace = WorkspaceRuntime(manifestLoader, ArchitectureGraphBuilder(guardedLoader(manifestUri, false)))
                 .build(manifest)
             // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),

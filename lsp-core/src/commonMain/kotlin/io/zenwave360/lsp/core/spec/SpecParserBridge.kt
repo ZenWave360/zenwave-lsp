@@ -5,7 +5,7 @@ import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.RefParserOptions
 
 internal expect object SpecParserBridge {
-    /** [loaders] replaces the parser's default loaders for external `$ref`s; `null` keeps the defaults. */
+    /** [loaders] replaces the platform delegates; implicit reads always retain the reference guard. */
     fun parseText(
         text: String,
         baseUri: String,
@@ -13,5 +13,12 @@ internal expect object SpecParserBridge {
         loaders: List<DocumentLoader>? = null,
     ): ParsedDocument
 
-    fun parseUri(uri: String, options: RefParserOptions = RefParserOptions()): ParsedDocument
+    fun parseUri(
+        uri: String,
+        options: RefParserOptions = RefParserOptions(),
+        loaders: List<DocumentLoader>? = null,
+    ): ParsedDocument
+
+    /** Parse only, for checking raw reference strings before resolution destroys dot segments. */
+    fun parseRaw(text: String, baseUri: String): ParsedDocument
 }

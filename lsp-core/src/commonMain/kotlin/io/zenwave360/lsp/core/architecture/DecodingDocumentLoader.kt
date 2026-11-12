@@ -9,8 +9,8 @@ import io.zenwave360.lsp.core.resource.ZenwaveResourceService
  * Reads a `file:` URI through [LoaderDocumentReader.loaderLocation], which percent-decodes it once and
  * turns it into the plain path every platform file loader accepts. VS Code on Windows sends
  * `file:///c%3A/Users/...`, and a space arrives as `%20`. The Node file loader does not decode those, so
- * the read misses the file and a workspace candidate falls through to `git`. Every other URI is passed
- * on unchanged: this is only the read. The URI the client named stays the identity.
+ * the read misses the file and a workspace candidate falls through to `git`. Bare absolute paths get
+ * the same validation; relative filesystem paths are refused. Other schemes pass through unchanged.
  *
  * This is the only file read. The manifest loader and the workspace-candidate loader both use it, so a
  * candidate cannot skip the check [OpeningDocumentGuard] applies while the workspace opens. A relative
@@ -41,23 +41,44 @@ internal class DecodingDocumentLoader(
      * The plain path to hand the delegate, or null when a `file:` URI is not a plain local path.
      * Other schemes are returned unchanged, fragment included.
      */
-    private fun readLocation(uri: String): String? {
-        val fileUri = fileUriOrNull(uri) ?: return uri
-        if (!rawFileIsAcceptable(fileUri)) return null
-        val normalized = normalizeLiteralDotSegments(fileUri) ?: return null
-        if (!rawFileIsAcceptable(normalized) || hasDotSegment(normalized)) return null
-        val decoded = LoaderDocumentReader.loaderLocation(normalized).replace('\\', '/')
-        if (!decodedPathIsPlain(decoded)) return null
-        return decoded
-    }
+    internal fun readLocation(uri: String): String? = localReadLocation(uri)
 
     private fun notServed(uri: String): Nothing {
         val shown = ZenwaveResourceService.redact(LoaderDocumentReader.displayUri(uri))
         error("The address is not served: the file path is not a plain local path: $shown")
     }
 
-    private companion object {
+    internal companion object {
+        private val SCHEME = Regex("^[A-Za-z][A-Za-z0-9+.-]*:")
         val DRIVE_PATH = Regex("^[A-Za-z]:[/\\\\].*")
+
+        /** Bare absolute paths get the file URI checks too; relative/drive-relative paths are refused. */
+        fun localReadLocation(uri: String): String? {
+            val fileUri = fileUriOrNull(uri) ?: when {
+                DRIVE_PATH.matches(uri) -> "file:///$uri"
+                uri.startsWith('/') -> "file://$uri"
+                SCHEME.containsMatchIn(uri) && uri.indexOf(':') != 1 -> return uri
+                else -> return null
+            }
+            if (!rawFileIsAcceptable(fileUri)) return null
+            val normalized = normalizeLiteralDotSegments(fileUri) ?: return null
+            if (!rawFileIsAcceptable(normalized) || hasDotSegment(normalized)) return null
+            val decoded = LoaderDocumentReader.loaderLocation(normalized).replace('\\', '/')
+            if (!decodedPathIsPlain(decoded)) return null
+            return decoded
+        }
+
+        /** Check the unnormalised join, before a resolver can erase a climb above a drive root. */
+        fun referenceIsLocal(baseUri: String, reference: String): Boolean {
+            val target = reference.substringBefore('#')
+            if (target.isEmpty()) return true
+            if (SCHEME.containsMatchIn(target) && !target.startsWith("file:", true) && target.indexOf(':') != 1) return false
+            val absolute = target.startsWith("file:", true) || target.startsWith('/') ||
+                Regex("^[A-Za-z]:").containsMatchIn(target)
+            val joined = if (absolute) target else baseUri.substringBeforeLast('/') + "/" + target
+            return localReadLocation(joined) != null &&
+                (joined.startsWith("file:", true) || !SCHEME.containsMatchIn(joined) || DRIVE_PATH.matches(joined))
+        }
 
         /** `file:` in any case, with the scheme spelled so [LoaderDocumentReader.loaderLocation] decodes it. */
         fun fileUriOrNull(uri: String): String? {
@@ -102,8 +123,9 @@ internal class DecodingDocumentLoader(
             val segments = mutableListOf<String>()
             // Detect the drive root after decoding too: c%3A is just as much a root as c:.
             // Never pop it, which could turn file:///c%3A/../d:/x into d:/x (or ../x into /x).
-            val decodedRoot = LoaderDocumentReader.loaderLocation(uri).trimStart('/').substringBefore('/')
-            val rootSegments = if (decodedRoot.matches(Regex("[A-Za-z]:"))) 1 else 0
+            val decodedRoot = LoaderDocumentReader.loaderLocation(uri).split('/')
+                .firstOrNull { it.isNotEmpty() && it != "." }
+            var rootSegments = if (decodedRoot?.matches(Regex("[A-Za-z]:")) == true) 1 else 0
             path.split('/').forEach { part ->
                 when {
                     part.isEmpty() || part == "." -> Unit
@@ -112,7 +134,12 @@ internal class DecodingDocumentLoader(
                     // A local file URI is absolute, or has a drive root.  Traversal above either root is refused.
                     part == ".." && (absolute || rootSegments > 0) -> return null
                     part == ".." -> segments += part
-                    part != ".." -> segments += part
+                    part != ".." -> {
+                        segments += part
+                        if (segments.size == 1 && LoaderDocumentReader.displayUri(part).matches(Regex("[A-Za-z]:"))) {
+                            rootSegments = 1
+                        }
+                    }
                 }
             }
             return "file://" + (if (absolute) "/" else "") + segments.joinToString("/")

@@ -8,6 +8,7 @@ import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.lsp.core.architecture.OpeningDocumentGuard
 import io.zenwave360.lsp.core.architecture.decodingLoaders
+import io.zenwave360.lsp.core.architecture.validateWorkspacePaths
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge
@@ -32,6 +33,7 @@ object ArchitectureManifestParser {
         val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = loaders)
         val document = YamlDocumentModel.fromParsedDocument(uri, parsedDocument)
         val manifest = runImmediate { loader.parse(uri, normalizedText) }
+        validateWorkspacePaths(manifest)
         val architectureManifest = ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,

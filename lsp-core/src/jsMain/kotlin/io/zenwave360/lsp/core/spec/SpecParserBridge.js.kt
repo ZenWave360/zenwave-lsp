@@ -16,17 +16,21 @@ internal actual object SpecParserBridge {
         loaders: List<DocumentLoader>?,
     ): ParsedDocument =
         runSynchronously {
-            RefParser.fromText(text = text, baseUri = baseUri, options = options, loaders = loaders)
+            RefParser.fromText(text = text, baseUri = baseUri, options = options,
+                loaders = referenceLoadersFor(text, baseUri, options, loaders))
                 .dereference()
                 .getParsedDocument()
         }
 
-    actual fun parseUri(uri: String, options: RefParserOptions): ParsedDocument =
+    actual fun parseUri(uri: String, options: RefParserOptions, loaders: List<DocumentLoader>?): ParsedDocument =
         runSynchronously {
-            RefParser(uri, options = options)
+            RefParser(uri, options = options, loaders = listOf(ReferenceDocumentLoader(uri, loaders)))
                 .dereference()
                 .getParsedDocument()
         }
+
+    actual fun parseRaw(text: String, baseUri: String): ParsedDocument =
+        runSynchronously { RefParser.fromText(text, baseUri, loaders = emptyList()).parse().getParsedDocument() }
 
     private fun <T> runSynchronously(block: suspend () -> T): T {
         var result: Result<T>? = null

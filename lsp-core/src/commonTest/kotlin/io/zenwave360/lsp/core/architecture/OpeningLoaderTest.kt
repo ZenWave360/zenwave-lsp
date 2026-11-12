@@ -72,6 +72,24 @@ class OpeningLoaderTest {
 
     private val localManifest = "file:///work/architecture/zenwave-architecture.yml"
 
+    @Test
+    fun intellijDriveFormManifestOpensAndComposesThroughTheDecodingGuard() = runTest {
+        val manifest = "file://C:/work/m.yml"
+        val io = Recording(mapOf(
+            "C:/work/m.yml" to "domains:\n  \$ref: 'domains.yml'\n",
+            "C:/work/domains.yml" to "sales: {services: {}}\n",
+        ))
+        val guard = OpeningDocumentGuard(manifest, listOf(DecodingDocumentLoader(io)), true)
+        assertTrue(guard.isReadable(manifest))
+        assertTrue(guard.isReadable("file:///C:/work/m.yml"))
+        val loader = ZenWaveManifestLoader(listOf(guard), null)
+        WorkspaceRuntime(loader, ArchitectureGraphBuilder(loader)).open(manifest)
+        assertEquals(listOf("C:/work/m.yml", "C:/work/domains.yml"), io.loaded)
+        listOf("file://host/work/m.yml", "file:////attacker/share/m.yml", "file://C:/work/%2e%2e/m.yml").forEach { bad ->
+            assertFalse(guard.isReadable(bad), bad)
+        }
+    }
+
     private fun guard(manifest: String, follow: Boolean = false) = OpeningDocumentGuard(manifest, emptyList(), follow)
 
     @Test
