@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.spec
 
 import io.zenwave360.jsonrefparser.RefParser
+import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.RefParserOptions
 import kotlin.coroutines.Continuation
@@ -8,9 +9,14 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
 internal actual object SpecParserBridge {
-    actual fun parseText(text: String, baseUri: String, options: RefParserOptions): ParsedDocument =
+    actual fun parseText(
+        text: String,
+        baseUri: String,
+        options: RefParserOptions,
+        loaders: List<DocumentLoader>?,
+    ): ParsedDocument =
         runSynchronously {
-            RefParser.fromText(text = text, baseUri = baseUri, options = options)
+            RefParser.fromText(text = text, baseUri = baseUri, options = options, loaders = loaders)
                 .dereference()
                 .getParsedDocument()
         }

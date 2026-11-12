@@ -5,6 +5,9 @@ import io.zenwave360.architecture.manifest.ManifestVariableInterpolator
 import io.zenwave360.architecture.manifest.ManifestService
 import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.OpeningDocumentGuard
+import io.zenwave360.lsp.core.architecture.decodingLoaders
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge
@@ -14,17 +17,20 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
 object ArchitectureManifestParser {
-    private val loader = ZenWaveManifestLoader()
+    fun parse(uri: String, text: String): ArchitectureManifest = parse(uri, text, guardedLoaders(uri))
 
-    fun parse(uri: String, text: String): ArchitectureManifest {
+    /** Visible to common tests so the parser's default loader can be exercised with a recording delegate. */
+    internal fun parse(uri: String, text: String, documentLoaders: List<DocumentLoader>): ArchitectureManifest {
+        val loader = ZenWaveManifestLoader(documentLoaders, archiveEntryLoader = null)
         val normalizedText = normalizeSourceText(text)
-        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri)
+        // The location model dereferences too: it must use the same guarded chain, not the parser's default loaders.
+        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = documentLoaders)
         val document = YamlDocumentModel.fromParsedDocument(uri, parsedDocument)
         val manifest = runImmediate { loader.parse(uri, normalizedText) }
         return ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,
-            services = manifest.services.map { toArchitectureService(manifest, it) },
+            services = manifest.services.map { toArchitectureService(loader, manifest, it) },
             diagnostics = manifest.diagnostics.map { diagnostic ->
                 val semanticPath = diagnostic.location?.let(::manifestLocationToSemanticPath)
                 val range = semanticPath
@@ -48,7 +54,20 @@ object ArchitectureManifestParser {
         )
     }
 
-    private fun toArchitectureService(manifest: ZenWaveManifest, service: ManifestService): ArchitectureService {
+    /**
+     * This parser resolves manifest `$refs` for diagnostics and resource locations. Use the same guarded,
+     * decoding chain as workspace opening so a ref cannot turn into a UNC path before validation.
+     */
+    internal fun guardedLoaders(
+        manifestUri: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): List<DocumentLoader> = listOf(OpeningDocumentGuard(manifestUri, documentLoaders, followManifestOrigin = true))
+
+    private fun toArchitectureService(
+        loader: ZenWaveManifestLoader,
+        manifest: ZenWaveManifest,
+        service: ManifestService,
+    ): ArchitectureService {
         val repositoryUri = resolveRepositoryUri(manifest, service)
         return ArchitectureService(
             domainKey = service.domainKey,

@@ -6,7 +6,6 @@ import io.zenwave360.lsp.core.resource.ZenwaveResourceService
 import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import io.zenwave360.architecture.graph.ArchitectureGraphBuilder
-import io.zenwave360.jsonrefparser.io.defaultLoaders
 import io.zenwave360.architecture.workspace.WorkspaceQueryApi
 import io.zenwave360.architecture.workspace.WorkspaceRuntime
 import io.zenwave360.architecture.workspace.WorkspaceSourceLocation
@@ -54,7 +53,9 @@ class WorkspaceArchitecturePlane(
                 .build(manifest)
             // What a client asks for through `zenwave:` is read by the library for declared entries only (ZenwaveResources),
             // so this loader is not the guard above: it reads the candidates the manifest's sources produce.
-            val resourceLoader = ZenWaveManifestLoader(defaultLoaders(), archiveEntryLoader = null)
+            // Those candidates keep the client's encoding (`file:///c%3A/.../a%20b/...`). [DecodingDocumentLoader]
+            // checks every `file:` URI, manifest or candidate, before the delegate reads it.
+            val resourceLoader = ZenWaveManifestLoader(decodingLoaders(), archiveEntryLoader = null)
             return WorkspaceArchitecturePlane(
                 workspace,
                 ZenwaveResourceService(manifestUri, manifest, resourceLoader, manifestText, resourceSettings),
@@ -62,7 +63,10 @@ class WorkspaceArchitecturePlane(
         }
 
         private fun guardedLoader(manifestUri: String, followManifestOrigin: Boolean) = ZenWaveManifestLoader(
-            listOf(OpeningDocumentGuard(manifestUri, defaultLoaders(), followManifestOrigin)),
+            // The guard checks the original URI, including the manifest itself, before the identity exemption.
+            // The wrapper then applies the same local-path rules to the `file:` read: encoded dots and separators,
+            // a host or UNC authority, and `//`, `#` or `?` after one decode are refused before any loader sees a path.
+            listOf(OpeningDocumentGuard(manifestUri, decodingLoaders(), followManifestOrigin)),
             archiveEntryLoader = null,
         )
 

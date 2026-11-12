@@ -143,6 +143,33 @@ class OpeningLoaderTest {
     }
 
     @Test
+    fun theManifestUriItselfIsHeldToTheLocalPathRules() = runTest {
+        val io = Recording(emptyMap())
+        listOf(
+            "file:///%2fserver/share/m.yml",
+            "file://server/share/m.yml",
+            "file:///c%3A/a/%2e%2e/m.yml",
+            "file://user:s3cret@server/share/m.yml",
+        ).forEach { manifest ->
+            val guard = OpeningDocumentGuard(manifest, listOf(io))
+            assertFalse(guard.isReadable(manifest), manifest)
+            val failure = assertFailsWith<IllegalStateException> { guard.load(manifest) }
+            val message = failure.message.orEmpty()
+            assertTrue("not served" in message, message)
+            assertTrue("plain local file path" in message, message)
+            assertTrue("s3cret" !in message, message)
+            if ("s3cret" in manifest) assertTrue("<redacted>" in message, message)
+        }
+        assertTrue(io.loaded.isEmpty())
+
+        val plain = "file:///c%3A/work/arch/zenwave-architecture.yml"
+        val spaced = "file:///c%3A/work/a%20b/zenwave-architecture.yml"
+        assertTrue(OpeningDocumentGuard(plain, listOf(io)).isReadable(plain))
+        assertTrue(OpeningDocumentGuard(spaced, listOf(io)).isReadable(spaced))
+        assertTrue(OpeningDocumentGuard(spaced, listOf(io)).isReadable(plain))
+    }
+
+    @Test
     fun refusedAddressesNeverReachTheDelegate() = runTest {
         val io = Recording(emptyMap())
         val guard = OpeningDocumentGuard(localManifest, listOf(io))
