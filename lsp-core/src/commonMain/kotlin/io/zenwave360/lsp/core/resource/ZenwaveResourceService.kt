@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.resource
 
+import io.zenwave360.architecture.manifest.ManifestResourceLoadResult
 import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
 import kotlinx.coroutines.CancellationException
@@ -14,6 +15,9 @@ enum class ResourceFailureKind(val wireName: String) {
 
     /** AR-R6: allowed, but no source could produce the content. */
     UNRESOLVED("resourceUnresolved"),
+
+    /** AR-Q4: an absolute URI the policy refuses. That URL is not requested. */
+    NOT_ALLOWED("resourceNotAllowed"),
 }
 
 /** One source the library tried, in order (AR-R6). [url] has its credentials removed. */
@@ -54,6 +58,10 @@ class ZenwaveResourceService(
     private val loader: ZenWaveManifestLoader,
     /** The text the manifest was opened with; served as is, and read again only if absent (AR-R11). */
     private val manifestText: String? = null,
+    /** The remote manifest name and the hosts an absolute URI may be fetched from (AR-Q1, AR-Q4). */
+    private val settings: ZenwaveResourceSettings = ZenwaveResourceSettings(),
+    /** Absolute `http(s)` reads. Does not follow redirects; [AbsoluteHttpReads] checks each hop. */
+    private val absoluteHttp: AbsoluteHttpFetch = platformAbsoluteHttpFetch(),
 ) {
     private class Served(val address: String, val content: String, val source: ResourceSource)
 
@@ -63,6 +71,23 @@ class ZenwaveResourceService(
     private val readReferences = mutableSetOf<String>()
 
     private val manifestIsRemote = manifestUri.startsWith("http://", true) || manifestUri.startsWith("https://", true)
+
+    /**
+     * The text this workspace was opened with, when [uri] is that manifest.
+     * Hierarchy of `projectManifestUri` reads this. A second fetch of the same address would depend on
+     * [ZenwaveResourceSettings.allowedDomains], which does not have to name the manifest's own host.
+     */
+    internal fun openedManifestText(uri: String): String? {
+        val text = manifestText ?: return null
+        if (uri == manifestUri) return text
+        val asked = AbsoluteUriPolicy.identity(uri) ?: return null
+        val opened = AbsoluteUriPolicy.identity(manifestUri) ?: return null
+        return if (asked == opened) text else null
+    }
+
+    /** A name that is not a plain file name falls back here too, so the address cannot carry a path. */
+    private val remoteManifestAddress =
+        ZenwaveResources.remoteManifestAddress(resolveRemoteManifestName(settings.remoteManifestName).name)
 
     suspend fun stat(uri: String): ResourceStat {
         val served = serve(uri)
@@ -92,19 +117,36 @@ class ZenwaveResourceService(
         return ResourceContent(served.address, "utf8", served.content)
     }
 
+    private fun isRemoteManifest(uri: String): Boolean = uri == remoteManifestAddress
+
+    /**
+     * A declared absolute http(s) entry. A URL the policy accepts matches on its canonical form, so the host that
+     * is checked is the host that is fetched. A URL the policy rejects matches only itself, and is then refused
+     * before any request.
+     */
+    private fun absoluteEntry(uri: String): DeclaredResource? {
+        val entries = ZenwaveResources.declaredResources(manifest).filter { it.flag == DeclaredFlag.ABSOLUTE_URI }
+        val identity = AbsoluteUriPolicy.identity(uri)
+        if (identity != null) {
+            return entries.firstOrNull { AbsoluteUriPolicy.identity(it.path) == identity }
+        }
+        return entries.firstOrNull { it.path == uri }
+    }
+
     private fun keyOf(uri: String): String {
-        if (ZenwaveResources.isRemoteManifestAddress(uri)) {
+        if (isRemoteManifest(uri)) {
             if (!manifestIsRemote) throw notDeclared("the manifest is a local file, which is not served")
             return uri
         }
+        absoluteEntry(uri)?.let { return it.path }
         return ZenwaveResources.parse(uri)?.address ?: throw notDeclared("not a valid zenwave: address")
     }
 
     private suspend fun serve(uri: String, preAuthorized: ResourceCheck.Allowed? = null): Served {
         val key = keyOf(uri)
         // A cached entry is served only to a request the check still allows: what the server read for a reference
-        // (an import) does not become readable by itself.
-        if (preAuthorized == null && !ZenwaveResources.isRemoteManifestAddress(key)) authorize(key)
+        // (an import) does not become readable by itself. An absolute entry is checked in [fetchAbsolute].
+        if (preAuthorized == null && !isRemoteManifest(key) && absoluteEntry(key) == null) authorize(key)
         while (true) {
             val mine = CompletableDeferred<Served>()
             val other: CompletableDeferred<Served>? = mutex.withLock {
@@ -137,9 +179,27 @@ class ZenwaveResourceService(
     }
 
     private suspend fun fetch(key: String, preAuthorized: ResourceCheck.Allowed? = null): Served {
-        if (ZenwaveResources.isRemoteManifestAddress(key)) return fetchManifest(key)
+        if (isRemoteManifest(key)) return fetchManifest(key)
+        absoluteEntry(key)?.let { return fetchAbsolute(it) }
         val allowed = preAuthorized ?: authorize(key)
         val result = ZenwaveResources.load(loader, manifest, allowed)
+        return servedFrom(allowed.address.address, result, rememberReference = allowed.declared == null)
+    }
+
+    /** AR-Q4. The domain check inside [ZenwaveResources.loadAbsolute] runs before the fetch, so a refusal requests nothing. */
+    private suspend fun fetchAbsolute(entry: DeclaredResource): Served {
+        val result = try {
+            ZenwaveResources.loadAbsolute(entry, settings.allowedDomains, absoluteHttp)
+        } catch (refused: AbsoluteUriNotAllowed) {
+            throw ResourceRequestException(
+                ResourceFailureKind.NOT_ALLOWED,
+                refused.message ?: "The absolute URI is not served",
+            )
+        }
+        return servedFrom(entry.path, result, rememberReference = false)
+    }
+
+    private suspend fun servedFrom(address: String, result: ManifestResourceLoadResult, rememberReference: Boolean): Served {
         val content = result.content
         if (content == null) {
             val candidates = result.candidates.mapIndexed { index, candidate ->
@@ -154,7 +214,7 @@ class ZenwaveResourceService(
             }
             throw ResourceRequestException(
                 ResourceFailureKind.UNRESOLVED,
-                "Cannot read $key: " + redact(result.errorMessage ?: "no source produced the content"),
+                redact("Cannot read $address: ${result.errorMessage ?: "no source produced the content"}"),
                 candidates,
             )
         }
@@ -163,8 +223,8 @@ class ZenwaveResourceService(
             kind = resource?.source ?: "unknown",
             fileUri = if (resource?.source == "workspace") fileUriOf(resource.uri) else null,
         )
-        val served = Served(allowed.address.address, content, source)
-        if (allowed.declared == null) mutex.withLock { readReferences += served.address }
+        val served = Served(address, content, source)
+        if (rememberReference) mutex.withLock { readReferences += served.address }
         return served
     }
 
@@ -174,11 +234,12 @@ class ZenwaveResourceService(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            val message = redact(error.message ?: error::class.simpleName.orEmpty())
+            val detail = error.message ?: error::class.simpleName.orEmpty()
+            val message = redact("Cannot read $key: $detail")
             throw ResourceRequestException(
                 ResourceFailureKind.UNRESOLVED,
-                "Cannot read $key: $message",
-                listOf(ResourceCandidate(MANIFEST_SOURCE_KIND, redact(manifestUri), message.ifEmpty { null })),
+                message,
+                listOf(ResourceCandidate(MANIFEST_SOURCE_KIND, redact(manifestUri), redact(detail).ifEmpty { null })),
             )
         }
         return Served(key, text, ResourceSource(MANIFEST_SOURCE_KIND))

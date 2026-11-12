@@ -9,6 +9,7 @@ import com.google.gson.JsonParser
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
 import io.zenwave360.lsp.core.resource.ResourceJson
 import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
 import io.zenwave360.lsp.core.visualization.DocumentRequestException
 import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.visualization.VisualizationJson
@@ -129,8 +130,20 @@ class ZenwaveLspServer(
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =
         CompletableFuture.supplyAsync {
             initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
+            initializationOptions?.let { options ->
+                server.applyResourceSettings(
+                    ZenwaveResourceSettings(
+                        remoteManifestName = options.remoteManifestName,
+                        allowedDomains = options.allowedDomains,
+                    )
+                )
+                options.remoteManifestNameWarning?.let { warning ->
+                    client?.logMessage(MessageParams(MessageType.Warning, warning))
+                }
+            }
             pluginCatalogueFrom(params.initializationOptions)?.let(::replacePluginCatalogue)
             initializationOptions?.projectManifestUri?.let { manifestUri ->
+                server.expectProjectManifest(manifestUri)
                 runBlocking { server.openWorkspace(manifestUri) }
             }
             InitializeResult(buildCapabilities()).apply {
