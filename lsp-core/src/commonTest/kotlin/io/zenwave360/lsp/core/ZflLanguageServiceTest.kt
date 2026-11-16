@@ -126,10 +126,9 @@ systems {
 }
 
 flow PaymentsFlow {
-    when CustomerRequestsSubscriptionRenewal {
+    when CustomerRequestsSubscriptionRenewal do renewSubscription {
         service Subscription.SubscriptionService
-        command renewSubscription
-        event SubscriptionRenewed
+        emits SubscriptionRenewed
     }
 }
 """.trimIndent()
