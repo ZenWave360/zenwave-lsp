@@ -81,22 +81,13 @@ class ZflLanguageModule(
     override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
         val model = (parsedArtifact as SemanticModel).asZflMap()
         val context = locateZflContext(snapshot.text, model, position, snapshot.ref.uri) ?: return emptyList()
-        if (context.kind != "command") return emptyList()
-        val whenModel = context.flowName?.let { flowName ->
-            model.mapAt("flows")[flowName].asZflMap()["whens"].asZflList().getOrNull(context.whenIndex ?: -1).asZflMap()
-        }.orEmpty()
-        val serviceName = whenModel["service"].asZflString()
-
-        val definitionRange = findTokenDefinitionRange(snapshot.text, serviceName.orEmpty()) { line ->
-            serviceName != null && line.trimStart().startsWith("service ") && line.contains(serviceName)
-        } ?: return emptyList()
-
+        val range = zflDefinitionRange(snapshot.text, model, context) ?: return emptyList()
         return listOf(
             NavigationTarget(
                 targetKind = "definition",
                 label = context.name,
                 uri = snapshot.ref.uri,
-                range = definitionRange,
+                range = range,
                 category = "zfl",
                 relationType = "declares"
             )
