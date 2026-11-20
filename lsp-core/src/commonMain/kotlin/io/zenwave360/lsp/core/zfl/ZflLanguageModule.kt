@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.zfl
 import io.zenwave360.language.zfl.ZflParser as DslZflParser
 import io.zenwave360.language.zfl.formatter.ZflFormatter
 import io.zenwave360.language.zfl.formatter.ZflSystemsOrganizationMode
+import io.zenwave360.lsp.core.contracts.CompletionItem
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
@@ -20,6 +21,9 @@ import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.parser.ZflParser
 import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
+import io.zenwave360.language.zfl.semantic.Severity as DslSeverity
+import io.zenwave360.language.zfl.semantic.ZflSemanticAnalyzer
+import kotlinx.coroutines.CancellationException
 
 class ZflLanguageModule(
     private val parserAdapter: ZflParser = ZflParserAdapter()
@@ -37,7 +41,7 @@ class ZflLanguageModule(
             extensions = listOf(".zfl"),
             supportsHover = true,
             supportsDefinition = true,
-            supportsCompletion = false,
+            supportsCompletion = true,
             supportsDiagnostics = true,
             supportsHierarchy = true,
             supportsReferences = true,
@@ -50,15 +54,15 @@ class ZflLanguageModule(
         return ParseResult(
             documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = semanticModel,
-            diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
+            diagnostics = diagnosticsFromModel(snapshot, semanticModel)
         )
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
-        diagnosticsFromModel(snapshot.ref.uri, parseModel(snapshot).asZflMap())
+        diagnosticsFromModel(snapshot, parseModel(snapshot))
 
     override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> =
-        diagnosticsFromModel(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap())
+        diagnosticsFromModel(snapshot, parsedArtifact as SemanticModel)
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         return hover(snapshot, position, parseModel(snapshot))
@@ -66,6 +70,7 @@ class ZflLanguageModule(
 
     override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? {
         val model = (parsedArtifact as SemanticModel).asZflMap()
+        ZflRules(snapshot.ref.uri, snapshot.text).let { rules -> if (rules.isRuleSite(position)) return rules.hover(position) }
         val context = locateZflContext(snapshot.text, model, position, snapshot.ref.uri) ?: return null
         return HoverResult(
             documentSymbol = DocumentSymbolRef(snapshot.ref.uri, context.semanticPath, context.range),
@@ -80,6 +85,7 @@ class ZflLanguageModule(
 
     override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
         val model = (parsedArtifact as SemanticModel).asZflMap()
+        ZflRules(snapshot.ref.uri, snapshot.text).let { rules -> if (rules.isRuleSite(position)) return rules.definition(position) }
         val context = locateZflContext(snapshot.text, model, position, snapshot.ref.uri) ?: return emptyList()
         val range = zflDefinitionRange(snapshot.text, model, context) ?: return emptyList()
         return listOf(
@@ -105,6 +111,9 @@ class ZflLanguageModule(
 
     override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), snapshot.text, related)
+
+    override fun completion(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<CompletionItem> =
+        ZflRules(snapshot.ref.uri, snapshot.text).completion(position)
 
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
@@ -133,7 +142,9 @@ class ZflLanguageModule(
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
 
-    private fun diagnosticsFromModel(uri: String, model: Map<String, Any?>): List<Diagnostic> {
+    private fun diagnosticsFromModel(snapshot: DocumentSnapshot, semanticModel: SemanticModel): List<Diagnostic> {
+        val uri = snapshot.ref.uri
+        val model = semanticModel.asZflMap()
         val problems = model["problems"]
             .asZflList()
             .map { toZflDiagnostic(uri, it.asZflMap()) }
@@ -152,7 +163,49 @@ class ZflLanguageModule(
                 )
             )
         }
-        return emptyList()
+        return semanticWarnings(snapshot, semanticModel)
+    }
+
+    /**
+     * What the semantic analysis finds beyond the syntax, such as `@rules(...)` naming a rule the flow does not declare
+     * (ZFL-R12). Only warnings and notes are shown: the analysis never turns a document that parses into an error here.
+     */
+    private fun semanticWarnings(snapshot: DocumentSnapshot, semanticModel: SemanticModel): List<Diagnostic> {
+        val zflModel = (semanticModel as? ZflSemanticModel)?.model ?: return emptyList()
+        val diagnostics = try {
+            ZflSemanticAnalyzer().analyze(zflModel).diagnostics
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        val lines = snapshot.text.lines()
+        return diagnostics.filter { it.severity != DslSeverity.ERROR }.mapNotNull { diagnostic ->
+            val ref = diagnostic.sourceRef ?: return@mapNotNull null
+            val line = ref.line - 1
+            val start = ref.column - 1
+            val end = tokenEnd(lines.getOrNull(line).orEmpty(), start)
+            Diagnostic(
+                uri = snapshot.ref.uri,
+                range = Range(Position(line, start), Position(line, end)),
+                severity = if (diagnostic.severity == DslSeverity.WARNING) DiagnosticSeverity.WARNING else DiagnosticSeverity.INFO,
+                message = diagnostic.message,
+                code = "zfl.semantic",
+                data = mapOf("language" to languageId),
+            )
+        }
+    }
+
+    /** The end of the name or quoted string that starts at [start] of [line]; one character when none does. */
+    private fun tokenEnd(line: String, start: Int): Int {
+        if (start >= line.length) return start
+        if (line[start] == '"') {
+            val close = line.indexOf('"', start + 1)
+            return if (close < 0) line.length else close + 1
+        }
+        var end = start
+        while (end < line.length && (line[end].isLetterOrDigit() || line[end] == '_' || line[end] == '-')) end++
+        return if (end == start) start + 1 else end
     }
 }
 

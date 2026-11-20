@@ -43,7 +43,7 @@ internal class ZflHierarchyBuilder(
         }.toMap()
         return listOfNotNull(
             buildSystemsSection(uri, enriched.systems, locations, viewIds, declarations),
-            buildFlowsSection(uri, enriched.flows, locations, viewIds)
+            buildFlowsSection(uri, enriched.flows, locations, viewIds, text?.let { ZflRules(uri, it) })
         )
     }
 
@@ -197,6 +197,7 @@ internal class ZflHierarchyBuilder(
         flows: List<EnrichedFlow>,
         locations: Map<String, IntArray>,
         viewIds: ViewModelIds,
+        rules: ZflRules? = null,
     ): HierarchyNode? {
         if (flows.isEmpty()) return null
         return HierarchyNode(
@@ -300,7 +301,7 @@ internal class ZflHierarchyBuilder(
                     kind = "flow",
                     language = "zfl",
                     source = locations.findSource(uri, flow.sourcePath),
-                    children = startNodes + whenNodes + endNode
+                    children = rules?.hierarchy(flow.name).orEmpty() + startNodes + whenNodes + endNode
                 )
             }
         )

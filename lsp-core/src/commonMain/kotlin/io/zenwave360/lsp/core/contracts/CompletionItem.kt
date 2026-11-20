@@ -4,5 +4,6 @@ data class CompletionItem(
     val label: String,
     val kind: String,
     val detail: String?,
-    val insertText: String
+    val insertText: String,
+    val documentation: String? = null
 )

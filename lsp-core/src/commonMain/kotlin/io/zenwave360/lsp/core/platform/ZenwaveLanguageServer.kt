@@ -1,6 +1,8 @@
 package io.zenwave360.lsp.core.platform
 
 import io.zenwave360.lsp.core.catalogue.PluginCatalogues
+import io.zenwave360.lsp.core.contracts.CodeAction
+import io.zenwave360.lsp.core.contracts.CompletionItem
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
@@ -133,6 +135,26 @@ class ZenwaveLanguageServer(
         withEntry(uri) { entry, snapshot ->
             entry.module?.takeUnless { entry.processingFailure != null }?.definition(snapshot, position, entry.parsedArtifact)
         } ?: emptyList()
+
+    fun completion(uri: String, position: Position): List<CompletionItem> =
+        withEntry(uri) { entry, snapshot ->
+            entry.module?.takeUnless { entry.processingFailure != null || !it.capabilities.supportsCompletion }
+                ?.completion(snapshot, position, entry.parsedArtifact)
+        } ?: emptyList()
+
+    /** The code actions for the diagnostics of an open document that touch [range]. */
+    fun codeActions(uri: String, range: Range): List<CodeAction> =
+        withEntry(uri) { entry, snapshot ->
+            val touching = entry.diagnostics.filter { it.range.touches(range) }
+            if (touching.isEmpty()) return@withEntry emptyList()
+            entry.module?.takeUnless { entry.processingFailure != null || !it.capabilities.supportsCodeActions }
+                ?.codeActions(snapshot, touching, entry.parsedArtifact)
+        } ?: emptyList()
+
+    private fun Range.touches(other: Range): Boolean {
+        fun Position.after(o: Position) = line > o.line || (line == o.line && character > o.character)
+        return !start.after(other.end) && !other.start.after(end)
+    }
 
     fun hierarchy(uri: String): List<HierarchyNode> =
         withEntry(uri) { entry, snapshot ->
