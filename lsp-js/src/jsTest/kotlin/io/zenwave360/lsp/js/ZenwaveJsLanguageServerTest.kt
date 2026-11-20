@@ -123,6 +123,21 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun ignoresAStaleConfigUriFromAnOlderClient() {
+        val options = parseInitializationOptions(
+            jsonObject(
+                "zenwave" to jsonObject(
+                    "configUri" to "file:///workspace/.zenwave/config.yml",
+                    "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
+                )
+            )
+        )
+
+        assertEquals("file:///workspace/zenwave-architecture.yml", options?.projectManifestUri)
+        assertNull(parseInitializationOptions(jsonObject("zenwave" to jsonObject("configUri" to "file:///workspace/.zenwave/config.yml"))))
+    }
+
+    @Test
     fun parsesRemoteManifestNameAndAllowedDomains() {
         val options = parseInitializationOptions(
             jsonObject(
