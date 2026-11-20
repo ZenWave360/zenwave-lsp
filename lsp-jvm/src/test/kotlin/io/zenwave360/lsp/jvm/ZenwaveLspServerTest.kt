@@ -132,6 +132,46 @@ class ZenwaveLspServerTest {
     }
 
     @Test
+    fun completionAndQuickFixForRules() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        val capabilities = server.initialize(InitializeParams()).get().capabilities
+        assertNotNull(capabilities.completionProvider)
+        assertNotNull(capabilities.codeActionProvider)
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { audit \"Audited\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(au)",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        server.didOpen(DidOpenTextDocumentParams(TextDocumentItem(uri, "zdl", 1, text)))
+
+        val items = server.completion(
+            org.eclipse.lsp4j.CompletionParams(TextDocumentIdentifier(uri), Position(5, 12))
+        ).get().left
+        assertEquals(listOf("audit"), items.map { it.label })
+        assertEquals("audit", items.single().insertText)
+
+        val range = org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8))
+        val actions = server.codeAction(
+            org.eclipse.lsp4j.CodeActionParams(
+                TextDocumentIdentifier(uri), range, org.eclipse.lsp4j.CodeActionContext(emptyList())
+            )
+        ).get()
+        val fix = actions.single().right
+        assertEquals("Replace 'policies' with 'rules'", fix.title)
+        assertEquals("quickfix", fix.kind)
+        val edit = fix.edit.changes.getValue(uri).single()
+        assertEquals("rules", edit.newText)
+        assertEquals(org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8)), edit.range)
+        assertEquals(org.eclipse.lsp4j.DiagnosticSeverity.Warning, fix.diagnostics.single().severity)
+    }
+
+    @Test
     fun hierarchyCustomRequestReturnsDocumentTree() {
         val server = ZenwaveLspServer(defaultCoreLanguageServer())
         server.didOpen(

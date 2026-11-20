@@ -17,6 +17,13 @@ import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
 import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests as CustomRequestMethods
 import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
 import kotlinx.coroutines.runBlocking
+import org.eclipse.lsp4j.CodeActionKind
+import org.eclipse.lsp4j.CodeActionOptions
+import org.eclipse.lsp4j.CodeActionParams
+import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionList
+import org.eclipse.lsp4j.CompletionOptions
+import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
@@ -255,6 +262,19 @@ class ZenwaveLspServer(
         )
     }
 
+    override fun completion(params: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> =
+        CompletableFuture.completedFuture(
+            Either.forLeft(
+                server.completion(params.textDocument.uri, DtoMapper.toPosition(params.position)).map(DtoMapper::toCompletionItem)
+            )
+        )
+
+    override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>>> =
+        CompletableFuture.completedFuture(
+            server.codeActions(params.textDocument.uri, DtoMapper.fromLspRange(params.range))
+                .map { Either.forRight<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>(DtoMapper.toCodeAction(it)) }
+        )
+
     override fun definition(params: DefinitionParams): CompletableFuture<Either<List<org.eclipse.lsp4j.Location>, List<org.eclipse.lsp4j.LocationLink>>> {
         val locations = server.definition(
             params.textDocument.uri,
@@ -425,6 +445,12 @@ class ZenwaveLspServer(
         return ServerCapabilities().apply {
             setTextDocumentSync(TextDocumentSyncKind.Incremental)
             setHoverProvider(moduleCapabilities.any { it.supportsHover })
+            if (moduleCapabilities.any { it.supportsCompletion }) {
+                completionProvider = CompletionOptions(false, listOf("(", ",", "\"", " "))
+            }
+            if (moduleCapabilities.any { it.supportsCodeActions }) {
+                codeActionProvider = Either.forRight(CodeActionOptions(listOf(CodeActionKind.QuickFix)))
+            }
             setDefinitionProvider(moduleCapabilities.any { it.supportsDefinition })
             setReferencesProvider(moduleCapabilities.any { it.supportsReferences })
             setDocumentSymbolProvider(moduleCapabilities.any { it.supportsHierarchy })
