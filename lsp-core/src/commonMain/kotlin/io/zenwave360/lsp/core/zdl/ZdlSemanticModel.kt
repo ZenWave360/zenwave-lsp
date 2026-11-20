@@ -18,7 +18,7 @@ class ZdlSemanticModel(
                 jsonPath = p["path"] as String,
                 range = toRange(p["location"] as IntArray),
                 message = p["message"] as String,
-                severity = Severity.ERROR
+                severity = if (p["severity"] == "WARNING") Severity.WARNING else Severity.ERROR
             )
         }
 

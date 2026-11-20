@@ -65,7 +65,8 @@ internal fun toDiagnostic(uri: String, problem: Map<String, Any?>): Diagnostic {
     return Diagnostic(
         uri = uri,
         range = location?.toRange() ?: Range(Position(0, 0), Position(0, 0)),
-        severity = DiagnosticSeverity.ERROR,
+        // dsl-kotlin marks non-blocking problems, such as a deprecated keyword, with severity WARNING.
+        severity = if (problem["severity"] == "WARNING") DiagnosticSeverity.WARNING else DiagnosticSeverity.ERROR,
         message = problem["message"] as? String ?: "Unknown problem",
         code = path,
         data = buildMap {
