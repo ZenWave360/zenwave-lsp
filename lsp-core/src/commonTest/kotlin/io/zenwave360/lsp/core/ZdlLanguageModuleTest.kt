@@ -42,6 +42,18 @@ class ZdlLanguageModuleTest {
     }
 
     @Test
+    fun deprecatedPoliciesKeywordIsAWarningAndRulesIsClean() {
+        val body = " (Order) {\n  minimumAmount \"At least 10 EUR\"\n}\nentity Order {\n  name String\n}\n"
+        val policies = module.diagnostics(zdlSnapshot("file:///workspace/models/policies.zdl", "policies$body"))
+        assertEquals(1, policies.size, policies.toString())
+        assertEquals(io.zenwave360.lsp.core.contracts.DiagnosticSeverity.WARNING, policies.single().severity)
+        assertEquals(0, policies.single().range.start.line)
+
+        val rules = module.diagnostics(zdlSnapshot("file:///workspace/models/rules.zdl", "rules$body"))
+        assertEquals(emptyList(), rules)
+    }
+
+    @Test
     fun idlessServiceTransitionsProduceNoDiagnostics() {
         val text = """
             @aggregate
