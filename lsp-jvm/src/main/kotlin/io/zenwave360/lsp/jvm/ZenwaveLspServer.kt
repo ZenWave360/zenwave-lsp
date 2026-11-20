@@ -272,6 +272,7 @@ class ZenwaveLspServer(
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>>> =
         CompletableFuture.completedFuture(
             server.codeActions(params.textDocument.uri, DtoMapper.fromLspRange(params.range))
+                .filter { DtoMapper.kindRequested(it.kind, params.context?.only) }
                 .map { Either.forRight<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>(DtoMapper.toCodeAction(it)) }
         )
 

@@ -140,7 +140,15 @@ internal fun completionItemToJson(item: io.zenwave360.lsp.core.contracts.Complet
         "detail" to item.detail,
         "insertText" to item.insertText,
         "documentation" to item.documentation?.let { jsonObject("kind" to "markdown", "value" to it) },
+        "textEdit" to item.textEdit?.let { jsonObject("range" to rangeToJson(it.range), "newText" to it.newText) },
     )
+
+/** Whether a code action of [kind] is wanted when the client asks for [only] (a JS array of kinds): no filter, the kind itself or one of its parents. */
+internal fun codeActionKindRequested(kind: String, only: dynamic): Boolean {
+    if (only == null || (only.length as Int) == 0) return true
+    val kinds = (0 until (only.length as Int)).map { only[it] as String }
+    return kinds.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
+}
 
 internal fun codeActionToJson(action: io.zenwave360.lsp.core.contracts.CodeAction): dynamic {
     val changes: dynamic = js("({})")

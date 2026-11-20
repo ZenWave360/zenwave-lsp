@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.rules
 
 import io.zenwave360.lsp.core.contracts.CompletionItem
+import io.zenwave360.lsp.core.contracts.CompletionTextEdit
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
 
@@ -16,8 +17,15 @@ internal enum class TokenKind { IDENT, STRING, NUMBER, PUNCT }
 internal data class RuleToken(val text: String, val start: Int, val end: Int, val kind: TokenKind)
 
 /** Lexes ZDL or ZFL text well enough to find rule syntax: comments are skipped, a string is one token, `-` belongs to a name. */
-internal fun tokenize(text: String): List<RuleToken> {
+internal fun tokenize(text: String): List<RuleToken> = scan(text).first
+
+/** Whether [text] ends inside a comment: after a `//` with no line end yet, or inside an unclosed block comment. */
+internal fun endsInsideComment(text: String): Boolean = scan(text).second
+
+/** The tokens of [text], and whether the text ends inside a comment. Strings are `"..."`, `'...'` and ZDL `"""..."""`, as in Zdl.g4 and Zfl.g4. */
+private fun scan(text: String): Pair<List<RuleToken>, Boolean> {
     val tokens = mutableListOf<RuleToken>()
+    var inComment = false
     var i = 0
     while (i < text.length) {
         val c = text[i]
@@ -25,14 +33,22 @@ internal fun tokenize(text: String): List<RuleToken> {
             c.isWhitespace() -> i++
             c == '/' && text.startsWith("//", i) -> {
                 while (i < text.length && text[i] != '\n') i++
+                if (i >= text.length) inComment = true
             }
             c == '/' && text.startsWith("/*", i) -> {
                 val close = text.indexOf("*/", i + 2)
+                if (close < 0) inComment = true
                 i = if (close < 0) text.length else close + 2
             }
-            c == '"' -> {
+            c == '"' && text.startsWith("\"\"\"", i) -> {
+                val close = text.indexOf("\"\"\"", i + 3)
+                val j = if (close < 0) text.length else close + 3
+                tokens += RuleToken(text.substring(i, j), i, j, TokenKind.STRING)
+                i = j
+            }
+            c == '"' || c == '\'' -> {
                 var j = i + 1
-                while (j < text.length && text[j] != '"') j += if (text[j] == '\\') 2 else 1
+                while (j < text.length && text[j] != c) j += if (text[j] == '\\') 2 else 1
                 j = if (j < text.length) j + 1 else text.length
                 tokens += RuleToken(text.substring(i, j), i, j, TokenKind.STRING)
                 i = j
@@ -55,7 +71,18 @@ internal fun tokenize(text: String): List<RuleToken> {
             }
         }
     }
-    return tokens
+    return tokens to inComment
+}
+
+/** The UTF-16 offset in [text] of the [codePoints]th code point; ANTLR counts code points, Kotlin strings and LSP count UTF-16 units. */
+internal fun codePointsToUtf16(text: String, codePoints: Int): Int {
+    var i = 0
+    var n = 0
+    while (n < codePoints && i < text.length) {
+        i += if (text[i].isHighSurrogate() && i + 1 < text.length && text[i + 1].isLowSurrogate()) 2 else 1
+        n++
+    }
+    return i
 }
 
 /** Offsets to line and character positions. */
@@ -87,8 +114,12 @@ internal fun Range.containsInclusive(position: Position): Boolean {
     return !position.before(start) && !end.before(position)
 }
 
-internal fun RuleToken.unquoted(): String =
-    if (kind == TokenKind.STRING) text.removePrefix("\"").removeSuffix("\"") else text
+internal fun RuleToken.unquoted(): String = when {
+    kind != TokenKind.STRING -> text
+    text.length >= 6 && text.startsWith("\"\"\"") && text.endsWith("\"\"\"") -> text.substring(3, text.length - 3)
+    text.length >= 2 && text.endsWith(text[0]) -> text.substring(1, text.length - 1)
+    else -> text.drop(1)
+}
 
 /** A name written in `@rules(...)` (or `@policy(...)` in ZDL). [range] covers the token, quotes included. */
 internal data class RuleReference(val name: String, val range: Range, val annotation: String)
@@ -127,12 +158,17 @@ private fun annotationOpen(tokens: List<RuleToken>, i: Int, annotations: Set<Str
     return i + 2
 }
 
-/** A cursor inside `@rules(` ... `)`: what has been typed of the name. */
-internal data class RuleCompletionContext(val prefix: String, val quoted: Boolean)
+/**
+ * A cursor inside `@rules(` ... `)`: what has been typed of the name. [replaceStart] and [replaceEnd] are the offsets the chosen
+ * name replaces: the typed prefix with its opening quote, and the closing quote when one follows the cursor.
+ */
+internal data class RuleCompletionContext(val prefix: String, val quoted: Boolean, val replaceStart: Int, val replaceEnd: Int, val quote: Char = '"')
 
-/** The completion context of [offset], or null when it is not inside such an annotation's argument list. */
+/** The completion context of [offset], or null when it is not inside such an annotation's argument list, or inside a comment. */
 internal fun ruleCompletionContext(text: String, offset: Int, annotations: Set<String>): RuleCompletionContext? {
-    val tokens = tokenize(text.substring(0, offset.coerceIn(0, text.length)))
+    val before = text.substring(0, offset.coerceIn(0, text.length))
+    if (endsInsideComment(before)) return null
+    val tokens = tokenize(before)
     var open = -1
     for (i in tokens.indices) {
         annotationOpen(tokens, i, annotations)?.let { open = it }
@@ -140,16 +176,21 @@ internal fun ruleCompletionContext(text: String, offset: Int, annotations: Set<S
     if (open < 0 || tokens.drop(open + 1).any { it.text == ")" }) return null
     val last = tokens.last()
     val separators = listOf("(", ",", "[")
-    if (last.end == offset && (last.kind == TokenKind.IDENT || (last.kind == TokenKind.STRING && !last.text.closed()))) {
+    val here = before.length
+    if (last.end == here && (last.kind == TokenKind.IDENT || (last.kind == TokenKind.STRING && !last.text.closed()))) {
         val previous = tokens.getOrNull(tokens.size - 2)?.text
         if (previous !in separators) return null
-        return RuleCompletionContext(last.text.removePrefix("\""), last.kind == TokenKind.STRING)
+        if (last.kind == TokenKind.IDENT) return RuleCompletionContext(last.text, false, last.start, here)
+        if (last.text.startsWith("\"\"\"")) return null
+        val quote = last.text[0]
+        val end = if (text.getOrNull(here) == quote) here + 1 else here
+        return RuleCompletionContext(last.text.drop(1), true, last.start, end, quote)
     }
     // After `(`, `,` or `[`: a new name starts.
-    return if (last.text in separators) RuleCompletionContext("", false) else null
+    return if (last.text in separators && last.end <= here) RuleCompletionContext("", false, here, here) else null
 }
 
-private fun String.closed(): Boolean = length >= 2 && endsWith("\"")
+private fun String.closed(): Boolean = length >= 2 && endsWith(this[0]) && !startsWith("\"\"\"")
 
 /** A rule as declared: its [key] is `<aggregate>.<name>` or `<name>`, as dsl-kotlin keys `rules`. */
 internal data class RuleDeclaration(
@@ -296,18 +337,24 @@ internal fun ruleHoverMarkdown(declarations: List<RuleDeclaration>): String =
     }
 
 /** One completion item per distinct declared name that starts with what was typed. A name with `-` is written quoted. */
-internal fun ruleCompletionItems(declarations: List<RuleDeclaration>, context: RuleCompletionContext): List<CompletionItem> =
+internal fun ruleCompletionItems(declarations: List<RuleDeclaration>, context: RuleCompletionContext, index: LineIndex): List<CompletionItem> =
     declarations
         .filter { it.name.startsWith(context.prefix, ignoreCase = true) }
         .distinctBy { it.name }
         .sortedBy { it.name.lowercase() }
         .map { rule ->
-            val needsQuotes = rule.name.contains('-') && !context.quoted
+            val quote = context.quote
+            val text = when {
+                context.quoted -> "$quote${rule.name}$quote"
+                rule.name.contains('-') -> "\"${rule.name}\""
+                else -> rule.name
+            }
             CompletionItem(
                 label = rule.name,
                 kind = "rule",
                 detail = listOfNotNull(rule.aggregate?.let { "($it)" }, rule.value?.lineSequence()?.firstOrNull()).joinToString(" ").ifBlank { null },
-                insertText = if (needsQuotes) "\"${rule.name}\"" else rule.name,
+                insertText = if (context.quoted) rule.name else text,
                 documentation = rule.value,
+                textEdit = CompletionTextEdit(index.range(context.replaceStart, context.replaceEnd), text),
             )
         }

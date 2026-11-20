@@ -18,6 +18,7 @@ import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
 import org.eclipse.lsp4j.SymbolKind
 import org.eclipse.lsp4j.TextEdit
+import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range as LspRange
@@ -46,8 +47,13 @@ internal object DtoMapper {
             kind = CompletionItemKind.EnumMember
             detail = item.detail
             insertText = item.insertText
+            item.textEdit?.let { edit -> textEdit = Either.forLeft(TextEdit(requireNotNull(toLspRange(edit.range)), edit.newText)) }
             item.documentation?.let { setDocumentation(MarkupContent(MarkupKind.MARKDOWN, it)) }
         }
+
+    /** Whether a code action of [kind] is wanted when the client asks for [only]: no filter, the kind itself or one of its parents. */
+    fun kindRequested(kind: String, only: List<String>?): Boolean =
+        only.isNullOrEmpty() || only.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
 
     fun toCodeAction(action: io.zenwave360.lsp.core.contracts.CodeAction): CodeAction =
         CodeAction(action.title).apply {

@@ -211,6 +211,48 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun codeActionsHonourTheRequestedKindsAndCompletionCarriesItsEdit() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { stock-first \"Stock\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(\"stock-fi\")",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+
+        val items = recording.call(
+            "onCompletion",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to 5, "character" to 20)),
+        ) as Array<dynamic>
+        assertEquals("\"stock-first\"", items[0].textEdit.newText)
+        assertEquals(11, items[0].textEdit.range.start.character)
+        assertEquals(21, items[0].textEdit.range.end.character)
+
+        fun actions(only: Array<String>?): Int {
+            val context = if (only == null) jsonObject("diagnostics" to emptyArray<Any>()) else jsonObject("diagnostics" to emptyArray<Any>(), "only" to only)
+            return (recording.call(
+                "onCodeAction",
+                jsonObject(
+                    "textDocument" to jsonObject("uri" to uri),
+                    "range" to jsonObject("start" to jsonObject("line" to 0, "character" to 0), "end" to jsonObject("line" to 0, "character" to 8)),
+                    "context" to context,
+                ),
+            ) as Array<dynamic>).size
+        }
+        assertEquals(1, actions(null))
+        assertEquals(1, actions(arrayOf("quickfix")))
+        assertEquals(1, actions(arrayOf("refactor", "quickfix")))
+        assertEquals(0, actions(arrayOf("refactor")))
+        assertEquals(0, actions(arrayOf("quickfix.sub")))
+    }
+
+    @Test
     fun servesAnOpenedZdlDocument(): Promise<Unit> {
         val (_, recording) = listening()
 

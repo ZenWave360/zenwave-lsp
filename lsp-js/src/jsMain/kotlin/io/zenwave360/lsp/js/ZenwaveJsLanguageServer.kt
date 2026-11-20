@@ -378,7 +378,7 @@ class ZenwaveJsLanguageServer(
         return server.codeActions(
             params.textDocument.uri as String,
             Range(positionFromJson(range.start), positionFromJson(range.end)),
-        ).map(::codeActionToJson).toTypedArray()
+        ).filter { codeActionKindRequested(it.kind, params.context?.only) }.map(::codeActionToJson).toTypedArray()
     }
 
     fun references(params: dynamic): dynamic {

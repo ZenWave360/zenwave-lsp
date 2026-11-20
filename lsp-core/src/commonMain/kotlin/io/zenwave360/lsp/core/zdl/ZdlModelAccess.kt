@@ -130,9 +130,12 @@ internal fun resolveRelativeUri(baseUri: String, relative: String): String {
 
 /** The range the first two ints of a location, the start and exclusive end offsets, cover in [text]; null when they do not fit it. */
 private fun IntArray.toExactRange(text: String): Range? {
-    val start = getOrNull(0) ?: return null
-    val end = getOrNull(1) ?: return null
-    if (start < 0 || end < start || end > text.length) return null
-    val index = io.zenwave360.lsp.core.rules.LineIndex(text)
-    return index.range(start, end)
+    val codePointStart = getOrNull(0) ?: return null
+    val codePointEnd = getOrNull(1) ?: return null
+    // The parser counts code points; LSP positions count UTF-16 units.
+    val codePoints = text.length - text.zipWithNext().count { (a, b) -> a.isHighSurrogate() && b.isLowSurrogate() }
+    if (codePointStart < 0 || codePointEnd < codePointStart || codePointEnd > codePoints) return null
+    val start = io.zenwave360.lsp.core.rules.codePointsToUtf16(text, codePointStart)
+    val end = io.zenwave360.lsp.core.rules.codePointsToUtf16(text, codePointEnd)
+    return io.zenwave360.lsp.core.rules.LineIndex(text).range(start, end)
 }

@@ -70,7 +70,7 @@ internal class ZdlRules(private val uri: String, private val text: String) {
 
     fun completion(position: Position): List<CompletionItem> {
         val context = ruleCompletionContext(text, index.offset(position), ANNOTATIONS) ?: return emptyList()
-        return ruleCompletionItems(declarations, context)
+        return ruleCompletionItems(declarations, context, index)
     }
 
     /** One `rules` section with an entry per declared rule, whichever keyword declared it. */

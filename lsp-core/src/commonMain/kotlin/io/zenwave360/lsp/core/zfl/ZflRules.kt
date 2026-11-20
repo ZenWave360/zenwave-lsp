@@ -69,7 +69,7 @@ internal class ZflRules(private val uri: String, private val text: String) {
     fun completion(position: Position): List<CompletionItem> {
         val context = ruleCompletionContext(text, index.offset(position), setOf("rules")) ?: return emptyList()
         val flow = flowAt(position) ?: return emptyList()
-        return ruleCompletionItems(rulesOf(flow), context)
+        return ruleCompletionItems(rulesOf(flow), context, index)
     }
 
     /** The outline entries of a flow's rules. */

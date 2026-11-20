@@ -183,8 +183,10 @@ class ZflLanguageModule(
         return diagnostics.filter { it.severity != DslSeverity.ERROR }.mapNotNull { diagnostic ->
             val ref = diagnostic.sourceRef ?: return@mapNotNull null
             val line = ref.line - 1
-            val start = ref.column - 1
-            val end = tokenEnd(lines.getOrNull(line).orEmpty(), start)
+            val lineText = lines.getOrNull(line).orEmpty()
+            // The parser counts code points; LSP positions count UTF-16 units.
+            val start = io.zenwave360.lsp.core.rules.codePointsToUtf16(lineText, ref.column - 1)
+            val end = tokenEnd(lineText, start)
             Diagnostic(
                 uri = snapshot.ref.uri,
                 range = Range(Position(line, start), Position(line, end)),
@@ -199,8 +201,8 @@ class ZflLanguageModule(
     /** The end of the name or quoted string that starts at [start] of [line]; one character when none does. */
     private fun tokenEnd(line: String, start: Int): Int {
         if (start >= line.length) return start
-        if (line[start] == '"') {
-            val close = line.indexOf('"', start + 1)
+        if (line[start] == '"' || line[start] == '\'') {
+            val close = line.indexOf(line[start], start + 1)
             return if (close < 0) line.length else close + 1
         }
         var end = start
