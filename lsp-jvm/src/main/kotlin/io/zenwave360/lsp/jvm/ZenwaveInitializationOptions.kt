@@ -20,7 +20,6 @@ private val gson = Gson()
  * [remoteManifestNameWarning] is what the server logs.
  */
 data class ZenwaveInitializationOptions(
-    val configUri: String? = null,
     val projectManifestUri: String? = null,
     val remoteManifestName: String = DEFAULT_REMOTE_MANIFEST_NAME,
     val allowedDomains: List<String> = emptyList(),
@@ -30,16 +29,14 @@ data class ZenwaveInitializationOptions(
 internal fun parseZenwaveInitializationOptions(initializationOptions: Any?): ZenwaveInitializationOptions? {
     val root = initializationOptions.asJsonObject() ?: return null
     val zenwave = root["zenwave"].asJsonObject() ?: return null
-    val configUri = zenwave["configUri"].asStringOrNull()
     val projectManifestUri = zenwave["projectManifestUri"].asStringOrNull()
     val requestedName = zenwave["remoteManifestName"].asStringOrNull()
     val allowedDomains = zenwave["allowedDomains"].asStringListOrNull()
-    if (configUri == null && projectManifestUri == null && requestedName == null && allowedDomains == null) {
+    if (projectManifestUri == null && requestedName == null && allowedDomains == null) {
         return null
     }
     val name = resolveRemoteManifestName(requestedName)
     return ZenwaveInitializationOptions(
-        configUri = configUri,
         projectManifestUri = projectManifestUri,
         remoteManifestName = name.name,
         allowedDomains = allowedDomains.orEmpty(),

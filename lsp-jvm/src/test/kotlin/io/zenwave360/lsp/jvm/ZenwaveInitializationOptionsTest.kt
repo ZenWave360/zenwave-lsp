@@ -12,13 +12,11 @@ class ZenwaveInitializationOptionsTest {
         val options = parseZenwaveInitializationOptions(
             mapOf(
                 "zenwave" to mapOf(
-                    "configUri" to "file:///workspace/.zenwave/config.yml",
                     "projectManifestUri" to "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml",
                 )
             )
         )
 
-        assertEquals("file:///workspace/.zenwave/config.yml", options?.configUri)
         assertEquals(
             "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml",
             options?.projectManifestUri
@@ -29,11 +27,10 @@ class ZenwaveInitializationOptionsTest {
     fun parsesZenwaveInitializationOptionsFromTheJsonLsp4jReadsOffTheWire() {
         val options = parseZenwaveInitializationOptions(
             com.google.gson.JsonParser.parseString(
-                """{"zenwave":{"configUri":"file:///workspace/.zenwave/config.yml","projectManifestUri":"file:///workspace/zenwave-architecture.yml"}}"""
+                """{"zenwave":{"projectManifestUri":"file:///workspace/zenwave-architecture.yml"}}"""
             )
         )
 
-        assertEquals("file:///workspace/.zenwave/config.yml", options?.configUri)
         assertEquals("file:///workspace/zenwave-architecture.yml", options?.projectManifestUri)
     }
 
