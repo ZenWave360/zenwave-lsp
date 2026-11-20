@@ -6,6 +6,10 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
 import com.google.gson.JsonElement
+import org.eclipse.lsp4j.CodeAction
+import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionItemKind
+import org.eclipse.lsp4j.WorkspaceEdit
 import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DocumentSymbol
 import org.eclipse.lsp4j.DiagnosticSeverity as LspDiagnosticSeverity
@@ -14,6 +18,7 @@ import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
 import org.eclipse.lsp4j.SymbolKind
 import org.eclipse.lsp4j.TextEdit
+import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range as LspRange
@@ -31,6 +36,34 @@ internal object DtoMapper {
             LspRange(
                 LspPosition(it.start.line, it.start.character),
                 LspPosition(it.end.line, it.end.character)
+            )
+        }
+
+    fun fromLspRange(range: LspRange): Range =
+        Range(toPosition(range.start), toPosition(range.end))
+
+    fun toCompletionItem(item: io.zenwave360.lsp.core.contracts.CompletionItem): CompletionItem =
+        CompletionItem(item.label).apply {
+            kind = CompletionItemKind.EnumMember
+            detail = item.detail
+            insertText = item.insertText
+            item.textEdit?.let { edit -> textEdit = Either.forLeft(TextEdit(requireNotNull(toLspRange(edit.range)), edit.newText)) }
+            item.documentation?.let { setDocumentation(MarkupContent(MarkupKind.MARKDOWN, it)) }
+        }
+
+    /** Whether a code action of [kind] is wanted when the client asks for [only]: no filter, the kind itself or one of its parents. */
+    fun kindRequested(kind: String, only: List<String>?): Boolean =
+        only.isNullOrEmpty() || only.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
+
+    fun toCodeAction(action: io.zenwave360.lsp.core.contracts.CodeAction): CodeAction =
+        CodeAction(action.title).apply {
+            kind = action.kind
+            isPreferred = action.isPreferred
+            diagnostics = action.diagnostics.map { toLspDiagnostic(it) }
+            edit = WorkspaceEdit(
+                action.edits.groupBy { it.uri }.mapValues { (_, edits) ->
+                    edits.map { TextEdit(requireNotNull(toLspRange(it.range)), it.newText) }
+                }
             )
         }
 
@@ -54,20 +87,18 @@ internal object DtoMapper {
         )
 
     fun toPublishDiagnostics(uri: String, diagnostics: List<io.zenwave360.lsp.core.contracts.Diagnostic>): PublishDiagnosticsParams =
-        PublishDiagnosticsParams(
-            uri,
-            diagnostics.map { diagnostic ->
-                Diagnostic(
-                    requireNotNull(toLspRange(diagnostic.range)),
-                    diagnostic.message
-                ).apply {
-                    severity = diagnostic.severity.toLspSeverity()
-                    source = diagnostic.source
-                    setCode(diagnostic.code)
-                    data = diagnostic.data
-                }
-            }
-        )
+        PublishDiagnosticsParams(uri, diagnostics.map(::toLspDiagnostic))
+
+    fun toLspDiagnostic(diagnostic: io.zenwave360.lsp.core.contracts.Diagnostic): Diagnostic =
+        Diagnostic(
+            requireNotNull(toLspRange(diagnostic.range)),
+            diagnostic.message
+        ).apply {
+            severity = diagnostic.severity.toLspSeverity()
+            source = diagnostic.source
+            setCode(diagnostic.code)
+            data = diagnostic.data
+        }
 
     private fun DiagnosticSeverity.toLspSeverity(): LspDiagnosticSeverity =
         when (this) {
@@ -83,6 +114,7 @@ internal object DtoMapper {
             "service" -> SymbolKind.Interface
             "method", "command" -> SymbolKind.Method
             "event" -> SymbolKind.Event
+            "rule" -> SymbolKind.Constant
             "field" -> SymbolKind.Field
             "flow" -> SymbolKind.Function
             "domain", "subdomain" -> SymbolKind.Package

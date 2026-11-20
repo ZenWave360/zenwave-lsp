@@ -31,7 +31,7 @@ internal class RecordingConnection {
         listOf(
             "onInitialize", "onShutdown", "onDidOpenTextDocument", "onDidChangeTextDocument",
             "onDidCloseTextDocument", "onHover", "onDefinition", "onReferences", "onDocumentSymbol",
-            "onDocumentFormatting",
+            "onDocumentFormatting", "onCompletion", "onCodeAction",
         ).forEach { name ->
             connection[name] = { handler: dynamic -> handlers[name] = handler }
         }
@@ -185,6 +185,84 @@ class ZenwaveJsLanguageServerTest {
             assertEquals(io.zenwave360.lsp.core.platform.WorkspaceState.FAILED, server.workspaceStatus().state)
             assertEquals("http://127.0.0.1:1/zenwave-architecture.yml", server.workspaceStatus().manifestUri)
         }
+    }
+
+    @Test
+    fun servesRuleCompletionAndQuickFix() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { audit \"Audited\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(au)",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+
+        val items = recording.call(
+            "onCompletion",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to 5, "character" to 12)),
+        ) as Array<dynamic>
+        assertEquals(1, items.size)
+        assertEquals("audit", items[0].label)
+
+        val actions = recording.call(
+            "onCodeAction",
+            jsonObject(
+                "textDocument" to jsonObject("uri" to uri),
+                "range" to jsonObject("start" to jsonObject("line" to 0, "character" to 0), "end" to jsonObject("line" to 0, "character" to 8)),
+                "context" to jsonObject("diagnostics" to emptyArray<Any>()),
+            ),
+        ) as Array<dynamic>
+        assertEquals(1, actions.size)
+        assertEquals("quickfix", actions[0].kind)
+        assertEquals("rules", actions[0].edit.changes[uri][0].newText)
+    }
+
+    @Test
+    fun codeActionsHonourTheRequestedKindsAndCompletionCarriesItsEdit() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { stock-first \"Stock\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(\"stock-fi\")",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+
+        val items = recording.call(
+            "onCompletion",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to 5, "character" to 20)),
+        ) as Array<dynamic>
+        assertEquals("\"stock-first\"", items[0].textEdit.newText)
+        assertEquals(11, items[0].textEdit.range.start.character)
+        assertEquals(21, items[0].textEdit.range.end.character)
+
+        fun actions(only: Array<String>?): Int {
+            val context = if (only == null) jsonObject("diagnostics" to emptyArray<Any>()) else jsonObject("diagnostics" to emptyArray<Any>(), "only" to only)
+            return (recording.call(
+                "onCodeAction",
+                jsonObject(
+                    "textDocument" to jsonObject("uri" to uri),
+                    "range" to jsonObject("start" to jsonObject("line" to 0, "character" to 0), "end" to jsonObject("line" to 0, "character" to 8)),
+                    "context" to context,
+                ),
+            ) as Array<dynamic>).size
+        }
+        assertEquals(1, actions(null))
+        assertEquals(1, actions(arrayOf("quickfix")))
+        assertEquals(1, actions(arrayOf("refactor", "quickfix")))
+        assertEquals(0, actions(arrayOf("refactor")))
+        assertEquals(0, actions(arrayOf("quickfix.sub")))
     }
 
     @Test

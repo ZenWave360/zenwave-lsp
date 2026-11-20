@@ -130,6 +130,83 @@ class ZenwaveLspServerTest {
     }
 
     @Test
+    fun completionAndQuickFixForRules() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        val capabilities = server.initialize(InitializeParams()).get().capabilities
+        assertNotNull(capabilities.completionProvider)
+        assertNotNull(capabilities.codeActionProvider)
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { audit \"Audited\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(au)",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        server.didOpen(DidOpenTextDocumentParams(TextDocumentItem(uri, "zdl", 1, text)))
+
+        val items = server.completion(
+            org.eclipse.lsp4j.CompletionParams(TextDocumentIdentifier(uri), Position(5, 12))
+        ).get().left
+        assertEquals(listOf("audit"), items.map { it.label })
+        assertEquals("audit", items.single().insertText)
+
+        val range = org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8))
+        val actions = server.codeAction(
+            org.eclipse.lsp4j.CodeActionParams(
+                TextDocumentIdentifier(uri), range, org.eclipse.lsp4j.CodeActionContext(emptyList())
+            )
+        ).get()
+        val fix = actions.single().right
+        assertEquals("Replace 'policies' with 'rules'", fix.title)
+        assertEquals("quickfix", fix.kind)
+        val edit = fix.edit.changes.getValue(uri).single()
+        assertEquals("rules", edit.newText)
+        assertEquals(org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8)), edit.range)
+        assertEquals(org.eclipse.lsp4j.DiagnosticSeverity.Warning, fix.diagnostics.single().severity)
+    }
+
+    @Test
+    fun codeActionsHonourTheRequestedKindsAndCompletionCarriesItsEdit() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.initialize(InitializeParams()).get()
+        val uri = "file:///workspace/rules-kinds.zdl"
+        val text = listOf(
+            "policies { stock-first \"Stock\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(\"stock-fi\")",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        server.didOpen(DidOpenTextDocumentParams(TextDocumentItem(uri, "zdl", 1, text)))
+
+        val item = server.completion(
+            org.eclipse.lsp4j.CompletionParams(TextDocumentIdentifier(uri), Position(5, 20))
+        ).get().left.single()
+        val edit = item.textEdit.left
+        assertEquals("\"stock-first\"", edit.newText)
+        assertEquals(org.eclipse.lsp4j.Range(Position(5, 11), Position(5, 21)), edit.range)
+
+        fun actions(only: List<String>?): Int {
+            val context = org.eclipse.lsp4j.CodeActionContext(emptyList()).also { it.only = only }
+            return server.codeAction(
+                org.eclipse.lsp4j.CodeActionParams(TextDocumentIdentifier(uri), org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8)), context)
+            ).get().size
+        }
+        assertEquals(1, actions(null))
+        assertEquals(1, actions(listOf("quickfix")))
+        assertEquals(1, actions(listOf("refactor", "quickfix")))
+        assertEquals(0, actions(listOf("refactor")))
+        assertEquals(0, actions(listOf("quickfix.sub")))
+    }
+
+    @Test
     fun hierarchyCustomRequestReturnsDocumentTree() {
         val server = ZenwaveLspServer(defaultCoreLanguageServer())
         server.didOpen(

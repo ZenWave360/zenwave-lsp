@@ -121,6 +121,7 @@ internal fun symbolKind(kind: String): Int =
         "service" -> 11 // Interface
         "method", "command" -> 6 // Method
         "event" -> 24 // Event
+        "rule" -> 14 // Constant
         "field" -> 8 // Field
         "flow" -> 12 // Function
         "domain", "subdomain" -> 4 // Package
@@ -130,6 +131,38 @@ internal fun symbolKind(kind: String): Int =
         "consumer" -> 13 // Variable
         else -> 19 // Object
     }
+
+/** LSP `CompletionItemKind.EnumMember`, which is how a rule name is offered. */
+internal fun completionItemToJson(item: io.zenwave360.lsp.core.contracts.CompletionItem): dynamic =
+    jsonObject(
+        "label" to item.label,
+        "kind" to 20,
+        "detail" to item.detail,
+        "insertText" to item.insertText,
+        "documentation" to item.documentation?.let { jsonObject("kind" to "markdown", "value" to it) },
+        "textEdit" to item.textEdit?.let { jsonObject("range" to rangeToJson(it.range), "newText" to it.newText) },
+    )
+
+/** Whether a code action of [kind] is wanted when the client asks for [only] (a JS array of kinds): no filter, the kind itself or one of its parents. */
+internal fun codeActionKindRequested(kind: String, only: dynamic): Boolean {
+    if (only == null || (only.length as Int) == 0) return true
+    val kinds = (0 until (only.length as Int)).map { only[it] as String }
+    return kinds.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
+}
+
+internal fun codeActionToJson(action: io.zenwave360.lsp.core.contracts.CodeAction): dynamic {
+    val changes: dynamic = js("({})")
+    action.edits.groupBy { it.uri }.forEach { (uri, edits) ->
+        changes[uri] = edits.map { jsonObject("range" to rangeToJson(it.range), "newText" to it.newText) }.toTypedArray()
+    }
+    return jsonObject(
+        "title" to action.title,
+        "kind" to action.kind,
+        "isPreferred" to action.isPreferred,
+        "diagnostics" to action.diagnostics.map(::diagnosticToJson).toTypedArray(),
+        "edit" to jsonObject("changes" to changes),
+    )
+}
 
 internal fun documentSymbolToJson(node: HierarchyNode): dynamic =
     jsonObject(

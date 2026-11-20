@@ -59,14 +59,17 @@ internal fun IntArray.toRange(): Range =
         end = Position((getOrNull(4) ?: 1) - 1, getOrNull(5) ?: 0)
     )
 
-internal fun toDiagnostic(uri: String, problem: Map<String, Any?>): Diagnostic {
+internal fun toDiagnostic(uri: String, problem: Map<String, Any?>, text: String? = null): Diagnostic {
     val path = problem["path"] as? String
     val location = problem["location"] as? IntArray
+    val warning = problem["severity"] == "WARNING"
     return Diagnostic(
         uri = uri,
-        range = location?.toRange() ?: Range(Position(0, 0), Position(0, 0)),
+        // The end column of a range of several tokens is where its last token starts; the offsets are exact.
+        range = location?.let { if (warning && text != null) it.toExactRange(text) else null }
+            ?: location?.toRange() ?: Range(Position(0, 0), Position(0, 0)),
         // dsl-kotlin marks non-blocking problems, such as a deprecated keyword, with severity WARNING.
-        severity = if (problem["severity"] == "WARNING") DiagnosticSeverity.WARNING else DiagnosticSeverity.ERROR,
+        severity = if (warning) DiagnosticSeverity.WARNING else DiagnosticSeverity.ERROR,
         message = problem["message"] as? String ?: "Unknown problem",
         code = path,
         data = buildMap {
@@ -124,3 +127,15 @@ internal fun resolveRelativeUri(baseUri: String, relative: String): String {
     return "file://${segments.joinToString("/")}"
 }
 
+
+/** The range the first two ints of a location, the start and exclusive end offsets, cover in [text]; null when they do not fit it. */
+private fun IntArray.toExactRange(text: String): Range? {
+    val codePointStart = getOrNull(0) ?: return null
+    val codePointEnd = getOrNull(1) ?: return null
+    // The parser counts code points; LSP positions count UTF-16 units.
+    val codePoints = text.length - text.zipWithNext().count { (a, b) -> a.isHighSurrogate() && b.isLowSurrogate() }
+    if (codePointStart < 0 || codePointEnd < codePointStart || codePointEnd > codePoints) return null
+    val start = io.zenwave360.lsp.core.rules.codePointsToUtf16(text, codePointStart)
+    val end = io.zenwave360.lsp.core.rules.codePointsToUtf16(text, codePointEnd)
+    return io.zenwave360.lsp.core.rules.LineIndex(text).range(start, end)
+}

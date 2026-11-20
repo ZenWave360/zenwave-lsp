@@ -38,6 +38,15 @@ interface LanguageModule {
     fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<HierarchyNode> =
         hierarchy(snapshot, parsedArtifact)
 
+    /** Completion candidates at a position. Only modules that report `supportsCompletion` need to answer. */
+    fun completion(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<CompletionItem> = emptyList()
+
+    /**
+     * Code actions for [diagnostics], the diagnostics of this document that intersect the range the client
+     * asked about. Only modules that report `supportsCodeActions` need to answer.
+     */
+    fun codeActions(snapshot: DocumentSnapshot, diagnostics: List<Diagnostic>, parsedArtifact: Any?): List<CodeAction> = emptyList()
+
     fun format(snapshot: DocumentSnapshot): String?
 
     fun crossReferenceContributions(snapshot: DocumentSnapshot): List<CrossReferenceContribution>

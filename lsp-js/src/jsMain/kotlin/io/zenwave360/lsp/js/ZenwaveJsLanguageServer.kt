@@ -3,6 +3,7 @@ package io.zenwave360.lsp.js
 import io.zenwave360.lsp.core.avro.AvroLanguageModule
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
@@ -241,6 +242,8 @@ class ZenwaveJsLanguageServer(
         connection.onReferences { params: dynamic -> references(params) }
         connection.onDocumentSymbol { params: dynamic -> documentSymbol(params) }
         connection.onDocumentFormatting { params: dynamic -> formatting(params) }
+        connection.onCompletion { params: dynamic -> completion(params) }
+        connection.onCodeAction { params: dynamic -> codeAction(params) }
         customRequests.forEach { (method, handler) ->
             connection.onRequest(method) { params: dynamic -> handler(params) }
         }
@@ -365,6 +368,18 @@ class ZenwaveJsLanguageServer(
         server.definition(params.textDocument.uri as String, positionFromJson(params.position))
             .mapNotNull(::locationToJson).toTypedArray()
 
+    fun completion(params: dynamic): dynamic =
+        server.completion(params.textDocument.uri as String, positionFromJson(params.position))
+            .map(::completionItemToJson).toTypedArray()
+
+    fun codeAction(params: dynamic): dynamic {
+        val range = params.range
+        return server.codeActions(
+            params.textDocument.uri as String,
+            Range(positionFromJson(range.start), positionFromJson(range.end)),
+        ).filter { codeActionKindRequested(it.kind, params.context?.only) }.map(::codeActionToJson).toTypedArray()
+    }
+
     fun references(params: dynamic): dynamic {
         val uri = params.textDocument.uri as String
         val semanticId = server.hover(uri, positionFromJson(params.position))?.documentSymbol?.referenceId
@@ -394,6 +409,16 @@ class ZenwaveJsLanguageServer(
             "referencesProvider" to moduleCapabilities.any { it.supportsReferences },
             "documentSymbolProvider" to moduleCapabilities.any { it.supportsHierarchy },
             "documentFormattingProvider" to moduleCapabilities.any { it.supportsFormatting },
+            "completionProvider" to if (moduleCapabilities.any { it.supportsCompletion }) {
+                jsonObject("resolveProvider" to false, "triggerCharacters" to arrayOf("(", ",", "\"", " "))
+            } else {
+                null
+            },
+            "codeActionProvider" to if (moduleCapabilities.any { it.supportsCodeActions }) {
+                jsonObject("codeActionKinds" to arrayOf("quickfix"))
+            } else {
+                null
+            },
             "experimental" to jsonObject(
                 "moduleSelectors" to moduleCapabilities.map {
                     jsonObject("languageId" to it.languageId, "extensions" to it.extensions.toTypedArray())

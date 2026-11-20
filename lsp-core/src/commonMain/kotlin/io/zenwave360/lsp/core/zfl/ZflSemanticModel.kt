@@ -12,7 +12,7 @@ import io.zenwave360.language.zfl.ZflModel  // from dsl-kotlin
  * This provides a consistent API for LSP operations across both ZDL and ZFL.
  */
 class ZflSemanticModel(
-    private val model: ZflModel
+    internal val model: ZflModel
 ) : SemanticModel {
 
     override val data: Map<String, Any?>

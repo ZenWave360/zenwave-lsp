@@ -1,6 +1,8 @@
 package io.zenwave360.lsp.core.zdl
 
 import io.zenwave360.language.zdl.formatter.ZdlFormatter
+import io.zenwave360.lsp.core.contracts.CodeAction
+import io.zenwave360.lsp.core.contracts.CompletionItem
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
@@ -37,11 +39,12 @@ class ZdlLanguageModule(
             extensions = listOf(extension),
             supportsHover = true,
             supportsDefinition = true,
-            supportsCompletion = false,
+            supportsCompletion = true,
             supportsDiagnostics = true,
             supportsHierarchy = true,
             supportsReferences = true,
-            supportsFormatting = true
+            supportsFormatting = true,
+            supportsCodeActions = true
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
@@ -50,17 +53,17 @@ class ZdlLanguageModule(
         return ParseResult(
             documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = semanticModel,
-            diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
+            diagnostics = diagnosticsFromModel(snapshot, model)
         )
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
         val model = parseModel(snapshot).asZdlMap()
-        return diagnosticsFromModel(snapshot.ref.uri, model)
+        return diagnosticsFromModel(snapshot, model)
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> =
-        diagnosticsFromModel(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+        diagnosticsFromModel(snapshot, (parsedArtifact as SemanticModel).asZdlMap())
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val semanticModel = parseModel(snapshot)
@@ -68,6 +71,7 @@ class ZdlLanguageModule(
     }
 
     override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? {
+        ZdlRules(snapshot.ref.uri, snapshot.text).let { rules -> if (rules.isRuleSite(position)) return rules.hover(position) }
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position) ?: return null
         val model = semanticModel.asZdlMap()
@@ -85,6 +89,7 @@ class ZdlLanguageModule(
     }
 
     override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
+        ZdlRules(snapshot.ref.uri, snapshot.text).definition(position)?.let { return it }
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position)
         val model = semanticModel.asZdlMap()
@@ -127,10 +132,17 @@ class ZdlLanguageModule(
     }
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
+        hierarchy(snapshot, parseModel(snapshot))
 
     override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap()) +
+            listOfNotNull(ZdlRules(snapshot.ref.uri, snapshot.text).hierarchy())
+
+    override fun completion(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<CompletionItem> =
+        ZdlRules(snapshot.ref.uri, snapshot.text).completion(position)
+
+    override fun codeActions(snapshot: DocumentSnapshot, diagnostics: List<Diagnostic>, parsedArtifact: Any?): List<CodeAction> =
+        ZdlRules(snapshot.ref.uri, snapshot.text).codeActions(diagnostics)
 
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
@@ -154,8 +166,8 @@ class ZdlLanguageModule(
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
 
-    private fun diagnosticsFromModel(uri: String, model: Map<String, Any?>): List<Diagnostic> =
-        model["problems"].asList().map { toDiagnostic(uri, it.asMap()) }
+    private fun diagnosticsFromModel(snapshot: DocumentSnapshot, model: Map<String, Any?>): List<Diagnostic> =
+        model["problems"].asList().map { toDiagnostic(snapshot.ref.uri, it.asMap(), snapshot.text) }
 
     private fun resolvePathAtPosition(
         snapshot: DocumentSnapshot,
