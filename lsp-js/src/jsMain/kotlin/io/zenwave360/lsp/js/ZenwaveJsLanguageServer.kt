@@ -44,7 +44,6 @@ fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
     )
 
 data class ZenwaveInitializationOptions(
-    val configUri: String? = null,
     val projectManifestUri: String? = null,
     val remoteManifestName: String = io.zenwave360.lsp.core.resource.DEFAULT_REMOTE_MANIFEST_NAME,
     val allowedDomains: List<String> = emptyList(),
@@ -480,14 +479,12 @@ internal fun parseInitializationOptions(initializationOptions: dynamic): Zenwave
     if (!isPresent(initializationOptions) || jsTypeOf(initializationOptions) != "object") return null
     val zenwave = initializationOptions.zenwave
     if (!isPresent(zenwave) || jsTypeOf(zenwave) != "object") return null
-    val configUri = stringOrNull(zenwave.configUri)
     val projectManifestUri = stringOrNull(zenwave.projectManifestUri)
     val requestedName = stringOrNull(zenwave.remoteManifestName)
     val allowedDomains = stringListOrNull(zenwave.allowedDomains)
-    if (configUri == null && projectManifestUri == null && requestedName == null && allowedDomains == null) return null
+    if (projectManifestUri == null && requestedName == null && allowedDomains == null) return null
     val name = resolveRemoteManifestName(requestedName)
     return ZenwaveInitializationOptions(
-        configUri = configUri,
         projectManifestUri = projectManifestUri,
         remoteManifestName = name.name,
         allowedDomains = allowedDomains.orEmpty(),

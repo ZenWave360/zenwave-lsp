@@ -1,5 +1,9 @@
 package io.zenwave360.lsp.core.config
 
+/**
+ * A `.zenwave/config.yml`. No longer read by the server or by VS Code (DEC/2, D18); kept only because the IntelliJ
+ * plugin still compiles against it, and removed with IJ-D4.
+ */
 data class ZenwaveWorkspaceConfig(
     val configUri: String,
     val projectManifest: String,

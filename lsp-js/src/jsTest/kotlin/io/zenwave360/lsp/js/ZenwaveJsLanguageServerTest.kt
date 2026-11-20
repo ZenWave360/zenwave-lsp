@@ -112,14 +112,12 @@ class ZenwaveJsLanguageServerTest {
             jsonObject(
                 "initializationOptions" to jsonObject(
                     "zenwave" to jsonObject(
-                        "configUri" to "file:///workspace/.zenwave/config.yml",
                         "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
                     )
                 )
             ),
         )
 
-        assertEquals("file:///workspace/.zenwave/config.yml", server.initializationOptions?.configUri)
         assertEquals("file:///workspace/zenwave-architecture.yml", server.initializationOptions?.projectManifestUri)
         assertNull(parseInitializationOptions(jsonObject("other" to 1)))
     }

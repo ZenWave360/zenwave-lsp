@@ -124,7 +124,7 @@ The worker bundle carries elkjs for the flow layout. elkjs' in-process layout wo
 the Web Worker's `onmessage` when it detects a worker global; `build.mjs` disables that detection when bundling,
 and the build fails if an elkjs upgrade changes it.
 
-Initialization options take the form `{ zenwave: { configUri?, projectManifestUri? }, pluginCatalogue? }`.
+Initialization options take the form `{ zenwave: { projectManifestUri? }, pluginCatalogue? }`.
 
 ## Building
 

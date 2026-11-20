@@ -208,7 +208,7 @@ class ZenwaveLspWireTest {
     }
 
     @Test
-    fun initializeOpensTheManifestNamedInInitializationOptions() {
+    fun initializeOpensTheManifestNamedInInitializationOptionsAndIgnoresAStaleConfigUri() {
         val manifestUri = "file:///workspace/missing/zenwave-architecture.yml"
 
         initialize("""{"zenwave":{"configUri":"file:///workspace/.zenwave/config.yml","projectManifestUri":"$manifestUri"}}""")

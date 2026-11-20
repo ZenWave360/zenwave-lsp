@@ -67,7 +67,6 @@ class ZenwaveLspServerTest {
         val params = InitializeParams().apply {
             initializationOptions = mapOf(
                 "zenwave" to mapOf(
-                    "configUri" to "file:///workspace/.zenwave/config.yml",
                     "projectManifestUri" to "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml"
                 )
             )
@@ -75,7 +74,6 @@ class ZenwaveLspServerTest {
 
         server.initialize(params).get()
 
-        assertEquals("file:///workspace/.zenwave/config.yml", server.initializationOptions?.configUri)
         assertEquals(
             "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml",
             server.initializationOptions?.projectManifestUri
