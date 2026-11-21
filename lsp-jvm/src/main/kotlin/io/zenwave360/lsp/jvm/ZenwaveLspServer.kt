@@ -277,10 +277,9 @@ class ZenwaveLspServer(
         )
 
     override fun definition(params: DefinitionParams): CompletableFuture<Either<List<org.eclipse.lsp4j.Location>, List<org.eclipse.lsp4j.LocationLink>>> {
-        val locations = server.definition(
-            params.textDocument.uri,
-            DtoMapper.toPosition(params.position)
-        ).map(DtoMapper::toLocation)
+        val locations = runBlocking {
+            server.definitionReading(params.textDocument.uri, DtoMapper.toPosition(params.position))
+        }.mapNotNull(DtoMapper::toLocation)
         return CompletableFuture.completedFuture(Either.forLeft(locations))
     }
 
@@ -293,7 +292,7 @@ class ZenwaveLspServer(
             documentSymbol.uri,
             "${documentSymbol.uri}#${documentSymbol.semanticPath}",
         )
-        return CompletableFuture.completedFuture(refs.map(DtoMapper::toLocation))
+        return CompletableFuture.completedFuture(refs.mapNotNull(DtoMapper::toLocation))
     }
 
     override fun documentSymbol(params: DocumentSymbolParams): CompletableFuture<List<Either<org.eclipse.lsp4j.SymbolInformation, org.eclipse.lsp4j.DocumentSymbol>>> =

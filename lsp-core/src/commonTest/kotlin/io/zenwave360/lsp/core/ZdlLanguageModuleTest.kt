@@ -290,6 +290,68 @@ class ZdlLanguageModuleTest {
         assertEquals("openapi.yml", definition.label)
     }
 
+    private val asyncApiText = """
+        asyncapi: 3.0.0
+        info:
+          title: Orders
+          version: 1.0.0
+        channels:
+          OrderCreatedChannel:
+            address: orders.created
+    """.trimIndent()
+
+    private val openApiText = """
+        openapi: 3.0.3
+        info:
+          title: Orders
+          version: 1.0.0
+        paths:
+          /customer/{id}:
+            get:
+              operationId: getCustomer
+              responses:
+                '200':
+                  description: ok
+    """.trimIndent()
+
+    private fun definitionWithRelated(needle: String, offset: Int, vararg related: Pair<String, String>): io.zenwave360.lsp.core.contracts.NavigationTarget {
+        val text = apiNavigationText
+        val index = text.indexOf(needle)
+        val before = text.substring(0, index + offset)
+        val position = Position(before.count { it == '\n' }, before.length - (before.lastIndexOf('\n') + 1))
+        val snapshot = zdlSnapshot("file:///workspace/models/orders.zdl", text)
+        val parsed = module.parse(snapshot).model
+        val documents = related.associate { (uri, body) ->
+            uri to DocumentSnapshot(DocumentRef(uri, "", 1), body)
+        }
+        assertEquals(documents.keys.toList(), module.definitionDependencies(snapshot, position, parsed).filter { it in documents })
+        return module.definition(snapshot, position, parsed, io.zenwave360.lsp.core.contracts.RelatedDocuments(documents)).single()
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationLandsOnTheChannelWhenTheDocumentIsAvailable() {
+        val definition = definitionWithRelated("channel:", 3, "file:///workspace/models/apis/asyncapi.yml" to asyncApiText)
+
+        assertEquals("file:///workspace/models/apis/asyncapi.yml", definition.uri)
+        assertEquals(6, definition.range?.start?.line)
+    }
+
+    @Test
+    fun definitionOfRestAnnotationLandsOnTheOperationWhenTheDocumentIsAvailable() {
+        val definition = definitionWithRelated("@get", 2, "file:///workspace/models/apis/openapi.yml" to openApiText)
+
+        assertEquals("file:///workspace/models/apis/openapi.yml", definition.uri)
+        assertEquals(7, definition.range?.start?.line)
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationKeepsNoRangeWhenTheChannelIsNotInTheDocument() {
+        val definition = definitionWithRelated("channel:", 3, "file:///workspace/models/apis/asyncapi.yml" to asyncApiText.replace("OrderCreatedChannel", "Other"))
+
+        assertEquals("file:///workspace/models/apis/asyncapi.yml", definition.uri)
+        assertEquals(null, definition.range)
+    }
+
     private fun zdlSnapshot(uri: String, text: String) =
         DocumentSnapshot(
             ref = DocumentRef(uri = uri, languageId = "zdl", version = 1),

@@ -364,9 +364,11 @@ class ZenwaveJsLanguageServer(
         )
     }
 
-    fun definition(params: dynamic): dynamic =
-        server.definition(params.textDocument.uri as String, positionFromJson(params.position))
-            .map(::locationToJson).toTypedArray()
+    // A promise: the ZDL a ZFL command belongs to may have to be read.
+    fun definition(params: dynamic): dynamic = answer {
+        server.definitionReading(params.textDocument.uri as String, positionFromJson(params.position))
+            .mapNotNull(::locationToJson).toTypedArray()
+    }
 
     fun completion(params: dynamic): dynamic =
         server.completion(params.textDocument.uri as String, positionFromJson(params.position))
@@ -384,7 +386,7 @@ class ZenwaveJsLanguageServer(
         val uri = params.textDocument.uri as String
         val semanticId = server.hover(uri, positionFromJson(params.position))?.documentSymbol?.referenceId
             ?: return emptyArray<Any>()
-        return server.reverseReferences(uri, semanticId).map(::locationToJson).toTypedArray()
+        return server.reverseReferences(uri, semanticId).mapNotNull(::locationToJson).toTypedArray()
     }
 
     fun documentSymbol(params: dynamic): dynamic =
