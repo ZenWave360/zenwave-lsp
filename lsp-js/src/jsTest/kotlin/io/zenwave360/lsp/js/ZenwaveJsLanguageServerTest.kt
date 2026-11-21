@@ -349,6 +349,38 @@ class ZenwaveJsLanguageServerTest {
         }
     }
 
+    /** NAV-R7: a `@zdl` that names a document that cannot be reached is a warning at its string. */
+    @Test
+    fun aMissingZdlIsAWarningAtItsLink(): Promise<Unit> {
+        val (server, recording) = listening()
+        val zflUri = "file:///workspace/missing/checkout.zfl"
+        val zfl = """
+            systems {
+                @zdl("orders/nowhere.zdl")
+                Orders {
+                    service OrderService
+                }
+            }
+
+            flow F {
+                start S {
+                }
+
+                end {
+                    completed: S
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+
+        return server.linksPublishing!!.then {
+            val link = recording.diagnostics.filter { it.uri == zflUri }
+                .flatMap { (it.diagnostics as Array<dynamic>).toList() }.single { it.code == "zfl.zdl-not-found" }
+            assertEquals(2, link.severity)
+            assertEquals(1, link.range.start.line)
+        }
+    }
+
     @Test
     fun answersSymbolAtWithWhatTheReferenceRequestsTake(): Promise<Unit> {
         val (_, recording) = listening()

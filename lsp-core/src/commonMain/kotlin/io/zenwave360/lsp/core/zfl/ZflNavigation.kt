@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
@@ -35,7 +37,72 @@ internal class ZflNavigation(
     }
 
     private fun cursor(position: Position): ZflCursorContext? =
-        locateZflContext(text, model, position, uri)?.takeIf { it.kind in navigable }
+        locateZflContext(text, model, position, uri)?.takeIf { it.kind in navigable } ?: commandDeclarationAt(position)
+
+    /** A command named in the `commands:` list of a service in `systems {}`, with the system and service it is declared in. */
+    private fun commandDeclarationAt(position: Position): ZflCursorContext? {
+        val line = text.lines().getOrNull(position.line) ?: return null
+        val list = Regex("""\bcommands\s*:\s*""").find(line) ?: return null
+        val from = list.range.last + 1
+        val name = Regex("""[A-Za-z_]\w*""").findAll(line.substring(from)).firstOrNull { word ->
+            position.character in (from + word.range.first)..(from + word.range.last + 1)
+        } ?: return null
+        val locations = model.locationTable()
+        model.mapAt("systems").forEach { (system, rawSystem) ->
+            rawSystem.asZflMap().mapAt("services").keys.forEach { service ->
+                val range = locations["systems.$system.services.$service"]?.toRange() ?: return@forEach
+                if (position.line in range.start.line..range.end.line) {
+                    val start = from + name.range.first
+                    return ZflCursorContext(
+                        semanticPath = "systems.$system.services.$service.commands.${name.value}",
+                        name = name.value,
+                        kind = "command",
+                        range = Range(Position(position.line, start), Position(position.line, start + name.value.length)),
+                        markdown = "",
+                        system = system,
+                        service = service,
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    /** The systems whose services emit the event under the cursor: the `when` it is emitted in, or those that emit a trigger. */
+    private fun eventSystems(context: ZflCursorContext): Set<String> {
+        val whens = context.flowName?.let { flow -> model.mapAt("flows")[flow].asZflMap()["whens"].asZflList().map { it.normalizedWhen() } }
+            ?: return emptySet()
+        val owners = if (context.kind == "event") listOfNotNull(context.whenIndex?.let(whens::getOrNull))
+        else whens.filter { context.name in it.events }
+        return owners.mapNotNull { it.system }.toSet()
+    }
+
+    /**
+     * NAV-R7: the `@zdl` of a system whose ZDL is not among [related] is a warning at its string. The ZFL still
+     * navigates by what it declares itself.
+     */
+    fun missingZdlDiagnostics(related: RelatedDocuments): List<Diagnostic> {
+        val lines = text.lines()
+        val locations = model.locationTable()
+        return zdlBySystem.mapNotNull { (system, zdl) ->
+            if (related.get(zdl) != null) return@mapNotNull null
+            val nameLine = locations["systems.$system.name"]?.toRange()?.start?.line ?: return@mapNotNull null
+            for (index in nameLine downTo maxOf(0, nameLine - 4)) {
+                val match = zdlString.find(lines[index]) ?: continue
+                val reference = match.groupValues[2]
+                val close = match.range.last
+                return@mapNotNull Diagnostic(
+                    uri = uri,
+                    range = Range(Position(index, close - reference.length), Position(index, close)),
+                    severity = DiagnosticSeverity.WARNING,
+                    message = "ZDL of system $system not found: $reference",
+                    code = "zfl.zdl-not-found",
+                    data = mapOf("language" to "zfl"),
+                )
+            }
+            null
+        }
+    }
 
     /** The ZDL documents [definition] at [position] reads. */
     fun dependencies(position: Position): List<String> {
@@ -66,8 +133,12 @@ internal class ZflNavigation(
 
     /** The ZDLs to look in: the one of the command's system (NAV-R13), or every system's when it has none. */
     private fun candidateZdls(context: ZflCursorContext): List<String> =
-        if (context.kind == "command" && context.system != null) listOfNotNull(zdlBySystem[context.system])
-        else zdlBySystem.values.distinct()
+        when {
+            context.kind == "command" && context.system != null -> listOfNotNull(zdlBySystem[context.system])
+            context.kind != "command" ->
+                eventSystems(context).mapNotNull { zdlBySystem[it] }.distinct().ifEmpty { zdlBySystem.values.distinct() }
+            else -> zdlBySystem.values.distinct()
+        }
 
     private fun declarations(zdl: String, zdlText: String, zdlModel: Map<String, Any?>, context: ZflCursorContext): List<NavigationTarget> {
         val locations = zdlModel.zdlLocationTable()

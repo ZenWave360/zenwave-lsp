@@ -510,6 +510,26 @@ class ZenwaveLspWireTest {
         assertEquals(0, string[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
     }
 
+    /** NAV-R7: a `@zdl` that names a missing file gets a warning at its string, published after the first diagnostics. */
+    @Test
+    fun aMissingZdlIsAWarningAtItsLinkOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-missing")
+        val zflUri = dir.resolve("checkout.zfl").toUri().toString()
+        initialize()
+        open(zflUri, "zfl", CHECKOUT_ZFL)
+
+        var link: JsonObject? = null
+        while (link == null) {
+            val notification = client.notifications.poll(30, TimeUnit.SECONDS) ?: fail("no link diagnostic for $zflUri")
+            if (notification["method"].asString != "textDocument/publishDiagnostics") continue
+            val published = notification["params"].asJsonObject
+            if (published["uri"].asString != zflUri) continue
+            link = published["diagnostics"].asJsonArray.map { it.asJsonObject }.firstOrNull { it["code"]?.asString == "zfl.zdl-not-found" }
+        }
+        assertEquals(2, link["severity"].asInt, "warning")
+        assertEquals(1, link["range"].asJsonObject["start"].asJsonObject["line"].asInt, "the line of @zdl")
+    }
+
     @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()

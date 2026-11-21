@@ -215,6 +215,7 @@ class ZenwaveLspServer(
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
         publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didChange(params: DidChangeTextDocumentParams) {
@@ -234,6 +235,7 @@ class ZenwaveLspServer(
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
         publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didClose(params: DidCloseTextDocumentParams) {
@@ -496,6 +498,19 @@ class ZenwaveLspServer(
                 }
             } catch (failure: Exception) {
                 client?.logMessage(MessageParams(MessageType.Warning, "Could not read the imports of $uri: ${failure.message}"))
+            }
+        }
+    }
+
+    /** NAV-R7: a link to a document that cannot be reached (a ZFL `@zdl`) gets a diagnostic once the server has tried to read it. */
+    private fun publishLinkDiagnostics(uri: String) {
+        if (!uri.endsWith(".zfl")) return
+        CompletableFuture.runAsync {
+            try {
+                val diagnostics = runBlocking { server.diagnosticsWithLinks(uri) } ?: return@runAsync
+                client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, diagnostics))
+            } catch (failure: Exception) {
+                client?.logMessage(MessageParams(MessageType.Warning, "Could not check the links of $uri: ${failure.message}"))
             }
         }
     }

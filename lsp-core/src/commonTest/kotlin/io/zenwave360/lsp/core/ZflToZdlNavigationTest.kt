@@ -241,4 +241,51 @@ class ZflToZdlNavigationTest {
 
         assertTrue(server.definitionReading(zfl, at(text, "\"orders/nowhere.zdl\"", "nowhere")).isEmpty())
     }
+
+    @Test
+    fun aCommandInTheCommandsListOfASystemGoesToItsZdlMethod() = runTest {
+        val text = flow("orders/orders.zdl")
+        val zdl = writeTestFile("nav/declared/orders/orders.zdl", orders)
+        val zfl = writeTestFile("nav/declared/checkout.zfl", text)
+        val server = server().opened(zfl, text).opened(zdl, orders)
+
+        val target = server.both(zfl, at(text, "commands: createOrder", "createOrder")).single()
+
+        assertEquals(zdl, target.uri)
+        assertEquals(lineOf(orders, "createOrder("), target.range!!.start.line)
+    }
+
+    @Test
+    fun anEventIsLookedUpOnlyInTheZdlOfTheSystemThatOwnsIt() = runTest {
+        val paymentsWithEvent = payments + "\n\nevent OrderCreated {\n    id String\n}\n"
+        val text = flow("orders/orders.zdl", "payments/payments.zdl")
+        val ordersZdl = writeTestFile("nav/eventscope/orders/orders.zdl", orders)
+        val paymentsZdl = writeTestFile("nav/eventscope/payments/payments.zdl", paymentsWithEvent)
+        val zfl = writeTestFile("nav/eventscope/checkout.zfl", text)
+        val server = server().opened(zfl, text).opened(ordersZdl, orders).opened(paymentsZdl, paymentsWithEvent)
+
+        // createOrder belongs to Orders and emits OrderCreated; Payments declares an event of the same name.
+        val emitted = server.both(zfl, at(text, "emits OrderCreated", "OrderCreated")).single()
+        assertEquals(ordersZdl, emitted.uri)
+        val trigger = server.both(zfl, at(text, "when OrderCreated", "OrderCreated")).single()
+        assertEquals(ordersZdl, trigger.uri, "a trigger is looked up where it is emitted")
+    }
+
+    @Test
+    fun aZdlThatCannotBeReachedIsAWarningAtItsLinkAndAReachableOneIsNot() = runTest {
+        val missingText = flow("orders/nowhere.zdl")
+        val missing = writeTestFile("nav/diagnostic/missing/checkout.zfl", missingText)
+        val reachable = flow("orders/orders.zdl")
+        val reachableUri = writeTestFile("nav/diagnostic/ok/checkout.zfl", reachable)
+        writeTestFile("nav/diagnostic/ok/orders/orders.zdl", orders)
+        val server = server().opened(missing, missingText).opened(reachableUri, reachable)
+
+        val diagnostics = server.diagnosticsWithLinks(missing)!!.filter { it.code == "zfl.zdl-not-found" }.single()
+        assertEquals(io.zenwave360.lsp.core.contracts.DiagnosticSeverity.WARNING, diagnostics.severity)
+        assertEquals("ZDL of system Orders not found: orders/nowhere.zdl", diagnostics.message)
+        val line = missingText.lines()[diagnostics.range.start.line]
+        assertEquals("orders/nowhere.zdl", line.substring(diagnostics.range.start.character, diagnostics.range.end.character))
+
+        assertEquals(null, server.diagnosticsWithLinks(reachableUri))
+    }
 }

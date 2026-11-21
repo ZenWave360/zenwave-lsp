@@ -87,6 +87,10 @@ class ZenwaveJsLanguageServer(
 
     internal fun workspaceStatus() = server.workspaceStatus()
 
+    /** The latest check of a ZFL's links, for tests to await. */
+    internal var linksPublishing: Promise<Unit>? = null
+        private set
+
     /** The latest reading of the imports of a `zenwave:` document, for tests to await. */
     internal var importsPublishing: Promise<Unit>? = null
         private set
@@ -330,6 +334,7 @@ class ZenwaveJsLanguageServer(
         logProcessingFailure(uri)
         publishDiagnosticsIfHandled(snapshot)
         publishImportDiagnostics(uri)
+        publishLinkDiagnostics(uri)
     }
 
     fun didChange(params: dynamic) {
@@ -344,6 +349,7 @@ class ZenwaveJsLanguageServer(
         logProcessingFailure(uri)
         publishDiagnosticsIfHandled(DocumentSnapshot(DocumentRef(uri, "", version), nextText))
         publishImportDiagnostics(uri)
+        publishLinkDiagnostics(uri)
     }
 
     fun didClose(params: dynamic) {
@@ -457,6 +463,21 @@ class ZenwaveJsLanguageServer(
         publishing.catch { error: dynamic ->
             val console = connection.console
             if (isPresent(console)) console.warn("Could not read the imports of $uri: ${error?.message ?: error}")
+        }
+    }
+
+    /** NAV-R7: a link to a document that cannot be reached (a ZFL `@zdl`) gets a diagnostic once the server has tried to read it. */
+    private fun publishLinkDiagnostics(uri: String) {
+        if (!uri.endsWith(".zfl")) return
+        val publishing: Promise<Unit> = GlobalScope.promise {
+            server.diagnosticsWithLinks(uri)?.let { diagnostics ->
+                connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray()))
+            }
+        }
+        linksPublishing = publishing
+        publishing.catch { error: dynamic ->
+            val console = connection.console
+            if (isPresent(console)) console.warn("Could not check the links of $uri: ${error?.message ?: error}")
         }
     }
 
