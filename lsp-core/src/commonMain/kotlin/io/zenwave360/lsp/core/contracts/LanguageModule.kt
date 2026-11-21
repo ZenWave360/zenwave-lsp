@@ -23,6 +23,15 @@ interface LanguageModule {
     fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> =
         definition(snapshot, position)
 
+    /**
+     * Other documents [definition] at [position] draws on, such as the ZDLs a ZFL system names. The server obtains
+     * each (open content first, otherwise by reading it) and passes what it could reach to the `related` overload.
+     */
+    fun definitionDependencies(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<String> = emptyList()
+
+    fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?, related: RelatedDocuments): List<NavigationTarget> =
+        definition(snapshot, position, parsedArtifact)
+
     fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode>
 
     fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =

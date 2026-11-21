@@ -294,6 +294,61 @@ class ZenwaveJsLanguageServerTest {
         }
     }
 
+    /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL through the connection's definition handler. */
+    @Test
+    fun definitionFromAZflReachesTheZdlItNames(): Promise<Unit> {
+        val (_, recording) = listening()
+        val zflUri = "file:///workspace/checkout.zfl"
+        val zdlUri = "file:///workspace/orders/model.zdl"
+        val zfl = """
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent()
+        val zdl = "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdl))
+        val lines = zfl.lines()
+        fun definitionAt(line: Int, character: Int): Promise<dynamic> = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to zflUri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        return definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(5, locations[0].range.start.line)
+            definitionAt(stringLine, lines[stringLine].indexOf("orders/model.zdl") + 3)
+        }.then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(0, locations[0].range.start.line)
+        }
+    }
+
     @Test
     fun answersSymbolAtWithWhatTheReferenceRequestsTake(): Promise<Unit> {
         val (_, recording) = listening()

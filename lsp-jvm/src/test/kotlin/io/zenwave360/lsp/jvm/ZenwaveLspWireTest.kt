@@ -480,6 +480,36 @@ class ZenwaveLspWireTest {
         )
     }
 
+    /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL, which nobody opened, through the wire. */
+    @Test
+    fun definitionFromAZflReachesTheZdlItNamesOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-nav")
+        val zdl = dir.resolve("orders").also { java.nio.file.Files.createDirectories(it) }.resolve("model.zdl")
+        java.nio.file.Files.writeString(zdl, "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n")
+        val zfl = dir.resolve("checkout.zfl")
+        val zdlUri = zdl.toUri().toString()
+        val zflUri = zfl.toUri().toString()
+        initialize()
+        open(zflUri, "zfl", CHECKOUT_ZFL)
+        val lines = CHECKOUT_ZFL.lines()
+        fun definitionAt(line: Int, character: Int) = request(
+            "textDocument/definition",
+            """{"textDocument":{"uri":"$zflUri"},"position":{"line":$line,"character":$character}}""",
+        ).asJsonArray
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val command = definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2)
+        assertEquals(1, command.size(), "$command")
+        assertEquals(zdlUri, command[0].asJsonObject["uri"].asString)
+        assertEquals(5, command[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        val string = definitionAt(stringLine, lines[stringLine].indexOf("orders/model.zdl") + 3)
+        assertEquals(1, string.size(), "$string")
+        assertEquals(zdlUri, string[0].asJsonObject["uri"].asString)
+        assertEquals(0, string[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+    }
+
     @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()

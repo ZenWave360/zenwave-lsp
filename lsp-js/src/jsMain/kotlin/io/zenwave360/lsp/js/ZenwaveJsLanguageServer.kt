@@ -364,9 +364,11 @@ class ZenwaveJsLanguageServer(
         )
     }
 
-    fun definition(params: dynamic): dynamic =
-        server.definition(params.textDocument.uri as String, positionFromJson(params.position))
+    // A promise: the ZDL a ZFL command belongs to may have to be read.
+    fun definition(params: dynamic): dynamic = answer {
+        server.definitionReading(params.textDocument.uri as String, positionFromJson(params.position))
             .mapNotNull(::locationToJson).toTypedArray()
+    }
 
     fun completion(params: dynamic): dynamic =
         server.completion(params.textDocument.uri as String, positionFromJson(params.position))
