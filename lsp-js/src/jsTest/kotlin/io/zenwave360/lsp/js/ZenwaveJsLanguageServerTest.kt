@@ -70,6 +70,116 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/openapi.yml", locations[0].uri as String)
+            assertEquals(0, locations[0].range.start.line as Int)
+            assertEquals(0, locations[0].range.start.character as Int)
+            assertEquals(0, locations[0].range.end.line as Int)
+            assertEquals(0, locations[0].range.end.character as Int)
+    
+        }
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationLandsOnTheChannelOfTheOpenDocument(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call(
+            "onDidOpenTextDocument",
+            textDocumentItem("file:///workspace/models/apis/asyncapi.yml", "yaml", 1, """
+            asyncapi: 3.0.0
+            info:
+              title: Orders
+              version: 1.0.0
+            channels:
+              OrderCreatedChannel:
+                address: orders.created
+""".trimIndent()),
+        )
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("channel:") }
+        val character = text.lines()[line].indexOf("channel:") + 3
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/asyncapi.yml", locations[0].uri as String)
+            assertEquals(6, locations[0].range.start.line as Int)
+    
+        }
+    }
+
+    @Test
     fun registersEveryHandlerAndListens() {
         val (server, recording) = listening()
 

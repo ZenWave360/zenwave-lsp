@@ -51,6 +51,22 @@ internal fun resolveRestOperationTarget(
     )
 }
 
+internal data class ZdlAsyncApiChannelTarget(val api: ZdlApiDescriptor, val channel: String)
+
+/** The API named by `api`, or the provider `default`, and the channel the annotation names. */
+internal fun resolveAsyncApiChannelTarget(
+    ownerUri: String,
+    model: Map<String, Any?>,
+    asyncapi: Map<String, Any?>
+): ZdlAsyncApiChannelTarget? {
+    val apis = zdlApiDescriptors(ownerUri, model)
+    val named = asyncapi["api"].asString()
+    val api = if (named != null) apis.firstOrNull { it.name == named }
+    else apis.firstOrNull { it.name == "default" && it.role == "provider" }
+    val channel = asyncapi["channel"].asString() ?: return null
+    return api?.let { ZdlAsyncApiChannelTarget(it, channel) }
+}
+
 private fun selectDefaultProviderOpenApi(apis: List<ZdlApiDescriptor>): ZdlApiDescriptor? =
     apis.firstOrNull { it.type == "openapi" && it.role == "provider" && it.name == "default" }
         ?: apis.firstOrNull { it.type == "openapi" && it.role == "provider" }
