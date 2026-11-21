@@ -95,25 +95,7 @@ class ZdlLanguageModule(
         val model = semanticModel.asZdlMap()
         val locations = model.locationTable()
 
-        val restMatch = Regex("""^services\.([^.]+)\.methods\.([^.]+)(?:\..+)?$""")
-            .matchEntire(path ?: "")
-        if (restMatch != null) {
-            val serviceName = restMatch.groupValues[1]
-            val methodName = restMatch.groupValues[2]
-            val target = resolveRestOperationTarget(snapshot.ref.uri, model, serviceName, methodName)
-            if (target != null) {
-                return listOf(
-                    NavigationTarget(
-                        targetKind = "definition",
-                        label = target.operationId,
-                        uri = target.api.uri,
-                        range = null,
-                        category = "openapi",
-                        relationType = "rest-operation"
-                    )
-                )
-            }
-        }
+        navigationToApis(snapshot.ref.uri, model, path)?.let { return it }
 
         val targetPath = path?.let { resolveDefinitionPath(model, it) }
             ?: resolveNamedType(model, tokenAtPosition(snapshot.text, position))
@@ -223,6 +205,36 @@ class ZdlLanguageModule(
             }
             ?.first
     }
+
+    /** `apis` locations, `@asyncapi` and the HTTP annotations of a method go to their API document; a type inside a method does not. */
+    private fun navigationToApis(uri: String, model: Map<String, Any?>, path: String?): List<NavigationTarget>? {
+        path ?: return null
+        Regex("""^apis\.([^.]+)\.uri$""").matchEntire(path)?.let { match ->
+            val api = zdlApiDescriptors(uri, model).firstOrNull { it.name == match.groupValues[1] } ?: return emptyList()
+            return listOf(apiTarget(api.uri, api.uri.substringAfterLast('/'), api.type, "references"))
+        }
+        Regex("""^((?:events\.[^.]+)|(?:services\.[^.]+\.methods\.[^.]+))\.options\.asyncapi(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val options = findNodeAtPath(model, match.groupValues[1]).asMap().mapAt("options")
+            val target = resolveAsyncApiChannelTarget(uri, model, options.mapAt("asyncapi")) ?: return emptyList()
+            return listOf(apiTarget(target.api.uri, target.channel, "asyncapi", "publishes"))
+        }
+        Regex("""^services\.([^.]+)\.methods\.([^.]+)\.options\.(?:get|post|put|delete|patch)(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val target = resolveRestOperationTarget(uri, model, match.groupValues[1], match.groupValues[2]) ?: return emptyList()
+            return listOf(apiTarget(target.api.uri, target.operationId, "openapi", "rest-operation"))
+        }
+        return null
+    }
+
+    /** No range is known inside the API document: the transports open it at the start. */
+    private fun apiTarget(uri: String, label: String, category: String?, relationType: String) =
+        NavigationTarget(
+            targetKind = "definition",
+            label = label,
+            uri = uri,
+            range = null,
+            category = category,
+            relationType = relationType
+        )
 
     private fun resolveDefinitionPath(model: Map<String, Any?>, path: String): String? {
         val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)(?:\.type)?$""").matchEntire(path)

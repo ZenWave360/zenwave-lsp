@@ -73,8 +73,9 @@ internal object DtoMapper {
     fun toFullDocumentEdit(text: String, replacement: String): TextEdit =
         TextEdit(fullDocumentRange(text), replacement)
 
-    fun toLocation(target: NavigationTarget): Location? =
-        toLspRange(target.range)?.let { range -> Location(target.uri, range) }
+    /** A target with no range opens its document at the start. */
+    fun toLocation(target: NavigationTarget): Location =
+        Location(target.uri, toLspRange(target.range) ?: LspRange(LspPosition(0, 0), LspPosition(0, 0)))
 
     fun toDocumentSymbol(node: HierarchyNode): DocumentSymbol =
         DocumentSymbol(

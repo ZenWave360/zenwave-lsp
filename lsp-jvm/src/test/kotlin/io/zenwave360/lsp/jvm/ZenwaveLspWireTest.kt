@@ -481,6 +481,46 @@ class ZenwaveLspWireTest {
     }
 
     @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile() {
+        initialize()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        open(uri, "zdl", text)
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        val locations = request("textDocument/definition", """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":6}}""").asJsonArray
+
+        assertEquals(1, locations.size(), locations.toString())
+        val location = locations.first().asJsonObject
+        assertEquals("file:///workspace/models/apis/openapi.yml", location["uri"].asString)
+        assertEquals("""{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}""", location["range"].toString())
+    }
+
+    @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()
         open(CHECKOUT_URI, "zfl", CHECKOUT_ZFL)

@@ -70,6 +70,52 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        val locations = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        ).unsafeCast<Array<dynamic>>()
+
+        assertEquals(1, locations.size)
+        assertEquals("file:///workspace/models/apis/openapi.yml", locations[0].uri as String)
+        assertEquals(0, locations[0].range.start.line as Int)
+        assertEquals(0, locations[0].range.start.character as Int)
+        assertEquals(0, locations[0].range.end.line as Int)
+        assertEquals(0, locations[0].range.end.character as Int)
+    }
+
+    @Test
     fun registersEveryHandlerAndListens() {
         val (server, recording) = listening()
 

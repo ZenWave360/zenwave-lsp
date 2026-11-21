@@ -203,6 +203,93 @@ class ZdlLanguageModuleTest {
         assertEquals("rest-operation", definition.first().relationType)
     }
 
+    private val apiNavigationText = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+
+    private fun definitionAt(text: String, needle: String, offset: Int = 1, occurrence: Int = 0): List<io.zenwave360.lsp.core.contracts.NavigationTarget> {
+        var index = -1
+        repeat(occurrence + 1) { index = text.indexOf(needle, index + 1) }
+        val before = text.substring(0, index + offset)
+        val line = before.count { it == '\n' }
+        val character = before.length - (before.lastIndexOf('\n') + 1)
+        return module.definition(zdlSnapshot("file:///workspace/models/orders.zdl", text), Position(line, character))
+    }
+
+    @Test
+    fun definitionResolvesAsyncApiAnnotationToItsApiDocument() {
+        val definition = definitionAt(apiNavigationText, "channel:", 3).single()
+
+        assertEquals("file:///workspace/models/apis/asyncapi.yml", definition.uri)
+        assertEquals("OrderCreatedChannel", definition.label)
+        assertEquals("asyncapi", definition.category)
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationWithoutApiUsesTheDefaultProvider() {
+        val text = apiNavigationText.replace("api: OrdersAsyncAPI, ", "").replace("OrdersAsyncAPI {", "default {").replace("openapi(provider) default", "openapi(provider) rest")
+        val definition = definitionAt(text, "channel:", 3).single()
+
+        assertEquals("file:///workspace/models/apis/asyncapi.yml", definition.uri)
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationNamingNoApiIsEmpty() {
+        val text = apiNavigationText.replace("api: OrdersAsyncAPI", "api: Missing")
+
+        assertEquals(emptyList(), definitionAt(text, "channel:", 3))
+    }
+
+    @Test
+    fun definitionOfATypeInsideARestMethodGoesToTheTypeNotTheOpenApiFile() {
+        val parameter = definitionAt(apiNavigationText, "getCustomer(OrderIn)", 15).single()
+        val returned = definitionAt(apiNavigationText, "Order?", 2).single()
+
+        assertEquals("file:///workspace/models/orders.zdl", parameter.uri)
+        assertEquals("OrderIn", parameter.label)
+        assertNotNull(parameter.range)
+        assertEquals("file:///workspace/models/orders.zdl", returned.uri)
+        assertEquals("Order", returned.label)
+    }
+
+    @Test
+    fun definitionOfARestAnnotationStillGoesToTheOpenApiOperation() {
+        val definition = definitionAt(apiNavigationText, "@get", 2).single()
+
+        assertEquals("file:///workspace/models/apis/openapi.yml", definition.uri)
+        assertEquals("getCustomer", definition.label)
+    }
+
+    @Test
+    fun definitionOfAnApisLocationOpensTheDocumentItNames() {
+        val definition = definitionAt(apiNavigationText, "apis/openapi.yml", 3).single()
+
+        assertEquals("file:///workspace/models/apis/openapi.yml", definition.uri)
+        assertEquals("openapi.yml", definition.label)
+    }
+
     private fun zdlSnapshot(uri: String, text: String) =
         DocumentSnapshot(
             ref = DocumentRef(uri = uri, languageId = "zdl", version = 1),
