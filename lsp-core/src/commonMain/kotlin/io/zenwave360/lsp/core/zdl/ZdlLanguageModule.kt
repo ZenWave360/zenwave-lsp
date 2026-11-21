@@ -14,6 +14,10 @@ import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
+import io.zenwave360.lsp.core.jsonpath.SemanticPointerEvaluator
+import io.zenwave360.lsp.core.spec.parseSpecDocument
+import io.zenwave360.lsp.core.spec.specDeclarationRange
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
@@ -88,32 +92,30 @@ class ZdlLanguageModule(
         return definition(snapshot, position, semanticModel)
     }
 
-    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> =
+        definition(snapshot, position, parsedArtifact, RelatedDocuments.NONE)
+
+    /** The API document an `@asyncapi` or HTTP annotation at [position] points into, so the server can supply it. */
+    override fun definitionDependencies(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<String> {
+        val semanticModel = parsedArtifact as? SemanticModel ?: return emptyList()
+        val path = resolvePathAtPosition(snapshot, semanticModel, position)
+        val navigation = apiNavigation(snapshot.ref.uri, semanticModel.asZdlMap(), path)
+        return listOfNotNull(navigation?.takeIf { it.semanticPath != null }?.target?.uri)
+    }
+
+    override fun definition(
+        snapshot: DocumentSnapshot,
+        position: Position,
+        parsedArtifact: Any?,
+        related: RelatedDocuments
+    ): List<NavigationTarget> {
         ZdlRules(snapshot.ref.uri, snapshot.text).definition(position)?.let { return it }
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position)
         val model = semanticModel.asZdlMap()
         val locations = model.locationTable()
 
-        val restMatch = Regex("""^services\.([^.]+)\.methods\.([^.]+)(?:\..+)?$""")
-            .matchEntire(path ?: "")
-        if (restMatch != null) {
-            val serviceName = restMatch.groupValues[1]
-            val methodName = restMatch.groupValues[2]
-            val target = resolveRestOperationTarget(snapshot.ref.uri, model, serviceName, methodName)
-            if (target != null) {
-                return listOf(
-                    NavigationTarget(
-                        targetKind = "definition",
-                        label = target.operationId,
-                        uri = target.api.uri,
-                        range = null,
-                        category = "openapi",
-                        relationType = "rest-operation"
-                    )
-                )
-            }
-        }
+        navigationToApis(snapshot.ref.uri, model, path, related)?.let { return it }
 
         val targetPath = path?.let { resolveDefinitionPath(model, it) }
             ?: resolveNamedType(model, tokenAtPosition(snapshot.text, position))
@@ -223,6 +225,62 @@ class ZdlLanguageModule(
             }
             ?.first
     }
+
+    private val NO_TARGET = NavigationTarget("definition", "", "", null, null, "")
+
+    private class ApiNavigation(val target: NavigationTarget, val semanticPath: String?)
+
+    /**
+     * `apis` locations, `@asyncapi` and the HTTP annotations of a method go to their API document; a type inside a method
+     * does not. [semanticPath] is where in that document the target is declared, when the annotation names it.
+     */
+    private fun apiNavigation(uri: String, model: Map<String, Any?>, path: String?): ApiNavigation? {
+        path ?: return null
+        Regex("""^apis\.([^.]+)\.uri$""").matchEntire(path)?.let { match ->
+            val api = zdlApiDescriptors(uri, model).firstOrNull { it.name == match.groupValues[1] }
+                ?: return ApiNavigation(NO_TARGET, null)
+            return ApiNavigation(apiTarget(api.uri, api.uri.substringAfterLast('/'), api.type, "references", null), null)
+        }
+        Regex("""^((?:events\.[^.]+)|(?:services\.[^.]+\.methods\.[^.]+))\.options\.asyncapi(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val options = findNodeAtPath(model, match.groupValues[1]).asMap().mapAt("options")
+            val target = resolveAsyncApiChannelTarget(uri, model, options.mapAt("asyncapi")) ?: return ApiNavigation(NO_TARGET, null)
+            val semanticPath = SemanticPointerEvaluator.appendProperty("$.channels", target.channel)
+            return ApiNavigation(apiTarget(target.api.uri, target.channel, "asyncapi", "publishes", null), semanticPath)
+        }
+        Regex("""^services\.([^.]+)\.methods\.([^.]+)\.options\.(?:get|post|put|delete|patch)(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val target = resolveRestOperationTarget(uri, model, match.groupValues[1], match.groupValues[2]) ?: return ApiNavigation(NO_TARGET, null)
+            return ApiNavigation(apiTarget(target.api.uri, target.operationId, "openapi", "rest-operation", null), target.semanticPath)
+        }
+        return null
+    }
+
+    private fun navigationToApis(uri: String, model: Map<String, Any?>, path: String?, related: RelatedDocuments): List<NavigationTarget>? {
+        val navigation = apiNavigation(uri, model, path) ?: return null
+        if (navigation.target === NO_TARGET) return emptyList()
+        val range = navigation.semanticPath?.let { declaredRange(related.get(navigation.target.uri), it) }
+        // Without the document or the node there is no range: the transports open the file at the start.
+        return listOf(if (range == null) navigation.target else navigation.target.copy(range = range))
+    }
+
+    private fun declaredRange(document: DocumentSnapshot?, semanticPath: String): Range? {
+        document ?: return null
+        return try {
+            val spec = parseSpecDocument(document)
+            specDeclarationRange(spec, "${spec.model.uri}#$semanticPath")
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun apiTarget(uri: String, label: String, category: String?, relationType: String, range: Range?) =
+        NavigationTarget(
+            targetKind = "definition",
+            label = label,
+            uri = uri,
+            range = range,
+            category = category,
+            relationType = relationType
+        )
 
     private fun resolveDefinitionPath(model: Map<String, Any?>, path: String): String? {
         val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)(?:\.type)?$""").matchEntire(path)

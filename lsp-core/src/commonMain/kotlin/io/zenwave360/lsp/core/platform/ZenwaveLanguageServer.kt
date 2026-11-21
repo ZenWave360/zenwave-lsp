@@ -131,10 +131,52 @@ class ZenwaveLanguageServer(
             entry.module?.takeUnless { entry.processingFailure != null }?.hover(snapshot, position, entry.parsedArtifact)
         }
 
+    /** Definition with the other documents it draws on taken from the open ones only; [definitionReading] also reads. */
     fun definition(uri: String, position: Position): List<NavigationTarget> =
         withEntry(uri) { entry, snapshot ->
-            entry.module?.takeUnless { entry.processingFailure != null }?.definition(snapshot, position, entry.parsedArtifact)
+            val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return@withEntry null
+            val related = module.definitionDependencies(snapshot, position, entry.parsedArtifact).distinct().filter { it != uri }
+                .mapNotNull { dependency -> sessionStore.get(dependency)?.let { dependency to it } }.toMap()
+            module.definition(snapshot, position, entry.parsedArtifact, RelatedDocuments(related))
         } ?: emptyList()
+
+    /**
+     * Definition for `textDocument/definition`: the documents it draws on (the ZDL a ZFL command belongs to) come from
+     * the editor when open and are otherwise read, as for [conceptualHierarchy]. One that cannot be reached is absent.
+     */
+    suspend fun definitionReading(uri: String, position: Position): List<NavigationTarget> {
+        val snapshot = sessionStore.get(uri) ?: return emptyList()
+        val entry = getOrBuildCacheEntry(snapshot)
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return emptyList()
+        val related = module.definitionDependencies(snapshot, position, entry.parsedArtifact).distinct().filter { it != uri }
+            .mapNotNull { dependency ->
+                val document = sessionStore.get(dependency)
+                    ?: readUnopened(dependency)?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+                document?.let { dependency to it }
+            }.toMap()
+        return module.definition(snapshot, position, entry.parsedArtifact, RelatedDocuments(related))
+    }
+
+    /**
+     * The diagnostics of an open document with those for its links to documents that cannot be reached (a ZFL `@zdl`
+     * naming a missing ZDL, NAV-R7), or null when there are none or the document changed while the links were read.
+     * Reading is why this is apart from [diagnostics], which answers at once.
+     */
+    suspend fun diagnosticsWithLinks(uri: String): List<Diagnostic>? {
+        val snapshot = sessionStore.get(uri) ?: return null
+        val entry = getOrBuildCacheEntry(snapshot)
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return null
+        val dependencies = module.linkDependencies(snapshot, entry.parsedArtifact).distinct().filter { it != uri }
+        if (dependencies.isEmpty()) return null
+        val related = dependencies.mapNotNull { dependency ->
+            val document = sessionStore.get(dependency)
+                ?: readUnopened(dependency)?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+            document?.let { dependency to it }
+        }.toMap()
+        val links = module.linkDiagnostics(snapshot, entry.parsedArtifact, RelatedDocuments(related))
+        if (links.isEmpty() || sessionStore.get(uri)?.ref?.version != snapshot.ref.version) return null
+        return entry.diagnostics + links
+    }
 
     fun completion(uri: String, position: Position): List<CompletionItem> =
         withEntry(uri) { entry, snapshot ->

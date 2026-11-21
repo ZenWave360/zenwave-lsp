@@ -480,6 +480,145 @@ class ZenwaveLspWireTest {
         )
     }
 
+    /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL, which nobody opened, through the wire. */
+    @Test
+    fun definitionFromAZflReachesTheZdlItNamesOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-nav")
+        val zdl = dir.resolve("orders").also { java.nio.file.Files.createDirectories(it) }.resolve("model.zdl")
+        java.nio.file.Files.writeString(zdl, "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n")
+        val zfl = dir.resolve("checkout.zfl")
+        val zdlUri = zdl.toUri().toString()
+        val zflUri = zfl.toUri().toString()
+        initialize()
+        open(zflUri, "zfl", CHECKOUT_ZFL)
+        val lines = CHECKOUT_ZFL.lines()
+        fun definitionAt(line: Int, character: Int) = request(
+            "textDocument/definition",
+            """{"textDocument":{"uri":"$zflUri"},"position":{"line":$line,"character":$character}}""",
+        ).asJsonArray
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val command = definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2)
+        assertEquals(1, command.size(), "$command")
+        assertEquals(zdlUri, command[0].asJsonObject["uri"].asString)
+        assertEquals(5, command[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        val string = definitionAt(stringLine, lines[stringLine].indexOf("orders/model.zdl") + 3)
+        assertEquals(1, string.size(), "$string")
+        assertEquals(zdlUri, string[0].asJsonObject["uri"].asString)
+        assertEquals(0, string[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+    }
+
+    /** NAV-R7: a `@zdl` that names a missing file gets a warning at its string, published after the first diagnostics. */
+    @Test
+    fun aMissingZdlIsAWarningAtItsLinkOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-missing")
+        val zflUri = dir.resolve("checkout.zfl").toUri().toString()
+        initialize()
+        open(zflUri, "zfl", CHECKOUT_ZFL)
+
+        var link: JsonObject? = null
+        while (link == null) {
+            val notification = client.notifications.poll(30, TimeUnit.SECONDS) ?: fail("no link diagnostic for $zflUri")
+            if (notification["method"].asString != "textDocument/publishDiagnostics") continue
+            val published = notification["params"].asJsonObject
+            if (published["uri"].asString != zflUri) continue
+            link = published["diagnostics"].asJsonArray.map { it.asJsonObject }.firstOrNull { it["code"]?.asString == "zfl.zdl-not-found" }
+        }
+        assertEquals(2, link["severity"].asInt, "warning")
+        assertEquals(1, link["range"].asJsonObject["start"].asJsonObject["line"].asInt, "the line of @zdl")
+    }
+
+    @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile() {
+        initialize()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        open(uri, "zdl", text)
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        val locations = request("textDocument/definition", """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":6}}""").asJsonArray
+
+        assertEquals(1, locations.size(), locations.toString())
+        val location = locations.first().asJsonObject
+        assertEquals("file:///workspace/models/apis/openapi.yml", location["uri"].asString)
+        assertEquals("""{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}""", location["range"].toString())
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationLandsOnTheChannelOfTheOpenDocument() {
+        initialize()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        open("file:///workspace/models/apis/asyncapi.yml", "yaml", """
+            asyncapi: 3.0.0
+            info:
+              title: Orders
+              version: 1.0.0
+            channels:
+              OrderCreatedChannel:
+                address: orders.created
+""".trimIndent())
+        open(uri, "zdl", text)
+        val line = text.lines().indexOfFirst { it.contains("channel:") }
+        val col = text.lines()[line].indexOf("channel:") + 3
+
+        val locations = request("textDocument/definition", """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":$col}}""").asJsonArray
+
+        val location = locations.single().asJsonObject
+        assertEquals("file:///workspace/models/apis/asyncapi.yml", location["uri"].asString)
+        assertEquals(6, location["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+    }
+
     @Test
     fun hierarchyNodesSerialiseRecursivelyOverTheWire() {
         initialize()

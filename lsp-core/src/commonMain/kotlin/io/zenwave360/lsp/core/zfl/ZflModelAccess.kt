@@ -283,7 +283,7 @@ internal fun declaredZdlUris(uri: String, model: Map<String, Any?>): Map<String,
     }.toMap()
 
 /** `file:` documents keep their established resolution; other schemes (`http:`, `vscode-vfs:`) resolve generically. */
-private fun resolveZdlUri(uri: String, reference: String): String =
+internal fun resolveZdlUri(uri: String, reference: String): String =
     if (uri.startsWith("file:") || !io.zenwave360.lsp.core.config.ResourceReferenceResolver.hasScheme(uri)) {
         resolveRelativeUri(uri, reference)
     } else {

@@ -215,6 +215,7 @@ class ZenwaveLspServer(
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
         publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didChange(params: DidChangeTextDocumentParams) {
@@ -234,6 +235,7 @@ class ZenwaveLspServer(
         logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
         publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didClose(params: DidCloseTextDocumentParams) {
@@ -277,10 +279,9 @@ class ZenwaveLspServer(
         )
 
     override fun definition(params: DefinitionParams): CompletableFuture<Either<List<org.eclipse.lsp4j.Location>, List<org.eclipse.lsp4j.LocationLink>>> {
-        val locations = server.definition(
-            params.textDocument.uri,
-            DtoMapper.toPosition(params.position)
-        ).mapNotNull(DtoMapper::toLocation)
+        val locations = runBlocking {
+            server.definitionReading(params.textDocument.uri, DtoMapper.toPosition(params.position))
+        }.mapNotNull(DtoMapper::toLocation)
         return CompletableFuture.completedFuture(Either.forLeft(locations))
     }
 
@@ -497,6 +498,19 @@ class ZenwaveLspServer(
                 }
             } catch (failure: Exception) {
                 client?.logMessage(MessageParams(MessageType.Warning, "Could not read the imports of $uri: ${failure.message}"))
+            }
+        }
+    }
+
+    /** NAV-R7: a link to a document that cannot be reached (a ZFL `@zdl`) gets a diagnostic once the server has tried to read it. */
+    private fun publishLinkDiagnostics(uri: String) {
+        if (!uri.endsWith(".zfl")) return
+        CompletableFuture.runAsync {
+            try {
+                val diagnostics = runBlocking { server.diagnosticsWithLinks(uri) } ?: return@runAsync
+                client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, diagnostics))
+            } catch (failure: Exception) {
+                client?.logMessage(MessageParams(MessageType.Warning, "Could not check the links of $uri: ${failure.message}"))
             }
         }
     }

@@ -100,6 +100,24 @@ class ZflLanguageModule(
         )
     }
 
+    override fun linkDependencies(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<String> =
+        declaredZdlUris(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.distinct()
+
+    override fun linkDiagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<Diagnostic> =
+        ZflNavigation(snapshot.ref.uri, snapshot.text, (parsedArtifact as SemanticModel).asZflMap()).missingZdlDiagnostics(related)
+
+    override fun definitionDependencies(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<String> {
+        if (ZflRules(snapshot.ref.uri, snapshot.text).isRuleSite(position)) return emptyList()
+        return ZflNavigation(snapshot.ref.uri, snapshot.text, (parsedArtifact as SemanticModel).asZflMap()).dependencies(position)
+    }
+
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?, related: RelatedDocuments): List<NavigationTarget> {
+        if (ZflRules(snapshot.ref.uri, snapshot.text).isRuleSite(position)) return definition(snapshot, position, parsedArtifact)
+        val model = (parsedArtifact as SemanticModel).asZflMap()
+        return ZflNavigation(snapshot.ref.uri, snapshot.text, model).definition(position, related)
+            ?: definition(snapshot, position, parsedArtifact)
+    }
+
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZflMap(), snapshot.text)
 

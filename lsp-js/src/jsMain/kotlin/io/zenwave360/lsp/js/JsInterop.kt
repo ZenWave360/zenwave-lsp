@@ -67,8 +67,9 @@ internal fun positionToJson(position: Position): dynamic =
 internal fun rangeToJson(range: Range): dynamic =
     jsonObject("start" to positionToJson(range.start), "end" to positionToJson(range.end))
 
-internal fun locationToJson(target: NavigationTarget): dynamic? =
-    target.range?.let { range -> jsonObject("uri" to target.uri, "range" to rangeToJson(range)) }
+/** A target with no range opens its document at the start. */
+internal fun locationToJson(target: NavigationTarget): dynamic =
+    jsonObject("uri" to target.uri, "range" to rangeToJson(target.range ?: Range(Position(0, 0), Position(0, 0))))
 
 internal fun navigationTargetToJson(target: NavigationTarget): dynamic =
     jsonObject(

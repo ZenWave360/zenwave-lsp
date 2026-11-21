@@ -70,6 +70,116 @@ class ZenwaveJsLanguageServerTest {
     }
 
     @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/openapi.yml", locations[0].uri as String)
+            assertEquals(0, locations[0].range.start.line as Int)
+            assertEquals(0, locations[0].range.start.character as Int)
+            assertEquals(0, locations[0].range.end.line as Int)
+            assertEquals(0, locations[0].range.end.character as Int)
+    
+        }
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationLandsOnTheChannelOfTheOpenDocument(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call(
+            "onDidOpenTextDocument",
+            textDocumentItem("file:///workspace/models/apis/asyncapi.yml", "yaml", 1, """
+            asyncapi: 3.0.0
+            info:
+              title: Orders
+              version: 1.0.0
+            channels:
+              OrderCreatedChannel:
+                address: orders.created
+""".trimIndent()),
+        )
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("channel:") }
+        val character = text.lines()[line].indexOf("channel:") + 3
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/asyncapi.yml", locations[0].uri as String)
+            assertEquals(6, locations[0].range.start.line as Int)
+    
+        }
+    }
+
+    @Test
     fun registersEveryHandlerAndListens() {
         val (server, recording) = listening()
 
@@ -291,6 +401,93 @@ class ZenwaveJsLanguageServerTest {
             assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
             assertEquals(ORDERS_URI, hierarchy.first().sourceUri)
             assertTrue(isPresent(hierarchy.first().viewNodeIds))
+        }
+    }
+
+    /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL through the connection's definition handler. */
+    @Test
+    fun definitionFromAZflReachesTheZdlItNames(): Promise<Unit> {
+        val (_, recording) = listening()
+        val zflUri = "file:///workspace/checkout.zfl"
+        val zdlUri = "file:///workspace/orders/model.zdl"
+        val zfl = """
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent()
+        val zdl = "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdl))
+        val lines = zfl.lines()
+        fun definitionAt(line: Int, character: Int): Promise<dynamic> = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to zflUri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        return definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(5, locations[0].range.start.line)
+            definitionAt(stringLine, lines[stringLine].indexOf("orders/model.zdl") + 3)
+        }.then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(0, locations[0].range.start.line)
+        }
+    }
+
+    /** NAV-R7: a `@zdl` that names a document that cannot be reached is a warning at its string. */
+    @Test
+    fun aMissingZdlIsAWarningAtItsLink(): Promise<Unit> {
+        val (server, recording) = listening()
+        val zflUri = "file:///workspace/missing/checkout.zfl"
+        val zfl = """
+            systems {
+                @zdl("orders/nowhere.zdl")
+                Orders {
+                    service OrderService
+                }
+            }
+
+            flow F {
+                start S {
+                }
+
+                end {
+                    completed: S
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+
+        return server.linksPublishing!!.then {
+            val link = recording.diagnostics.filter { it.uri == zflUri }
+                .flatMap { (it.diagnostics as Array<dynamic>).toList() }.single { it.code == "zfl.zdl-not-found" }
+            assertEquals(2, link.severity)
+            assertEquals(1, link.range.start.line)
         }
     }
 
