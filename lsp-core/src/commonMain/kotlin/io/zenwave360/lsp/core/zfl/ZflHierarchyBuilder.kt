@@ -268,6 +268,40 @@ internal class ZflHierarchyBuilder(
                         children = policyChildren
                     )
                 }
+                val viewNodes = flow.views.map { view ->
+                    HierarchyNode(
+                        id = zflSemanticId(uri, view.sourcePath),
+                        label = view.name,
+                        kind = "view",
+                        language = "zfl",
+                        source = locations.findSource(uri, view.sourcePath),
+                        children = view.members.mapIndexed { index, member ->
+                            HierarchyNode(
+                                id = zflSemanticId(uri, "${view.sourcePath}.members[$index]"),
+                                label = member,
+                                kind = "aggregate",
+                                language = "zfl",
+                                source = locations.findSource(uri, "${view.sourcePath}.members[$index]"),
+                                children = emptyList()
+                            )
+                        }
+                    )
+                }
+                val timerNodes = flow.timers.map { timer ->
+                    HierarchyNode(
+                        id = zflSemanticId(uri, timer.sourcePath),
+                        label = timer.label,
+                        kind = "policy",
+                        language = "zfl",
+                        source = locations.findSource(uri, timer.sourcePath),
+                        viewNodeIds = viewIds.present(timer.command?.let { "policy:${timer.triggers.joinToString(",")}:$it" }),
+                        uiHints = buildMap {
+                            timer.command?.takeIf { it.isNotBlank() }?.let { put("command", it) }
+                            if (timer.triggers.isNotEmpty()) put("triggers", timer.triggers.joinToString(","))
+                        },
+                        children = emptyList()
+                    )
+                }
                 val endNode = HierarchyNode(
                     id = zflSemanticId(uri, flow.end.sourcePath),
                     label = "end",
@@ -301,7 +335,7 @@ internal class ZflHierarchyBuilder(
                     kind = "flow",
                     language = "zfl",
                     source = locations.findSource(uri, flow.sourcePath),
-                    children = rules?.hierarchy(flow.name).orEmpty() + startNodes + whenNodes + endNode
+                    children = viewNodes + rules?.hierarchy(flow.name).orEmpty() + startNodes + whenNodes + timerNodes + endNode
                 )
             }
         )

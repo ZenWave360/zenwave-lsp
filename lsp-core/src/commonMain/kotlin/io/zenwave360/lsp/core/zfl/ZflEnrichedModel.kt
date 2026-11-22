@@ -31,6 +31,22 @@ internal data class EnrichedFlow(
     val starts: List<String>,
     val whens: List<EnrichedWhen>,
     val end: EnrichedEnd,
+    val sourcePath: String,
+    /** Experimental `view` blocks and `timer` steps. */
+    val views: List<EnrichedView> = emptyList(),
+    val timers: List<EnrichedTimer> = emptyList(),
+)
+
+internal data class EnrichedView(
+    val name: String,
+    val members: List<String>,
+    val sourcePath: String
+)
+
+internal data class EnrichedTimer(
+    val label: String,
+    val command: String?,
+    val triggers: List<String>,
     val sourcePath: String
 )
 

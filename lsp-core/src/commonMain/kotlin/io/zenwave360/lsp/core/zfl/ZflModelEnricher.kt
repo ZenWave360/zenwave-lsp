@@ -33,7 +33,25 @@ internal class ZflModelEnricher {
                     outcomes = flow["end"].endOutcomes().mapValues { (_, rawValue) -> normalizeStrings(rawValue) },
                     sourcePath = "flows.$flowName.end"
                 ),
-                sourcePath = "flows.$flowName"
+                sourcePath = "flows.$flowName",
+                views = flow["views"].asZflList().mapIndexed { index, rawView ->
+                    val view = rawView.asZflMap()
+                    EnrichedView(
+                        name = view["name"]?.toString().orEmpty(),
+                        members = view["members"].asZflList().map { it.asZflMap()["aggregate"]?.toString().orEmpty() },
+                        sourcePath = "flows.$flowName.views[$index]"
+                    )
+                },
+                timers = flow["timers"].asZflList().mapIndexed { index, rawTimer ->
+                    val timer = rawTimer.asZflMap()
+                    val after = timer["after"]?.toString()
+                    EnrichedTimer(
+                        label = after?.let { "timer after $it" } ?: "timer at ${timer["at"]}",
+                        command = timer["action"]?.toString(),
+                        triggers = listOfNotNull(after),
+                        sourcePath = "flows.$flowName.timers[$index]"
+                    )
+                }
             )
         }
 
