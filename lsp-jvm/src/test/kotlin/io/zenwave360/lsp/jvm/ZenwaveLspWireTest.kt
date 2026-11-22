@@ -797,7 +797,7 @@ class ZenwaveLspWireTest {
 
         val views = request("zenwave/eventFlowViews", """{"textDocument":{"uri":"$CHECKOUT_URI"}}""").asJsonObject
 
-        assertEquals(setOf("flowGraph", "serviceGraph", "variants"), views.keySet())
+        assertEquals(setOf("flowGraph", "serviceGraph", "variants", "variantTree"), views.keySet())
         assertEquals(listOf("sequence:completed:0", "sequence:rejected:1"), views["variants"].asJsonArray.map { it.asJsonObject["id"].asString })
         val flowGraph = views["flowGraph"].asJsonObject
         assertEquals("zfl.eventflow.view@1", flowGraph["schema"].asString)
@@ -915,13 +915,25 @@ class ZenwaveLspWireTest {
         assertEquals(listOf("flowchart", "sequence:completed:0", "sequence:rejected:1"), representations.map { it["id"].asString })
         assertEquals("sequence:completed:0", zfl["defaultRepresentationId"].asString)
         representations.forEach { representation ->
-            assertEquals(setOf("id", "title", "format", "content"), representation.keySet())
+            val sequence = representation["id"].asString != "flowchart"
+            assertEquals(if (sequence) setOf("id", "title", "format", "content", "outcome") else setOf("id", "title", "format", "content"), representation.keySet())
             assertEquals("MERMAID", representation["format"].asString)
         }
+        assertEquals(false, zfl.has("sequenceTree"))
         assertEquals("Flowchart", representations.first()["title"].asString)
 
         val separate = request("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"sequenceRenderMode":"SEPARATE_VARIANTS"}""")
         assertEquals("flowchart", separate.asJsonObject["representations"].asJsonArray.first().asJsonObject["id"].asString)
+        assertEquals(false, separate.asJsonObject.has("sequenceTree"))
+
+        val tree = request("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"sequenceRenderMode":"SEPARATE_VARIANTS","sequenceTree":true}""").asJsonObject
+        assertEquals(listOf("completed", "rejected"), tree["sequenceTree"].asJsonArray.map { it.asJsonObject["outcome"].asString })
+        assertEquals("sequence:completed:0", tree["sequenceTree"].asJsonArray.first().asJsonObject["nodes"].asJsonArray.first().asJsonObject["id"].asString)
+        val one = request("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"sequenceRenderMode":"SEPARATE_VARIANTS","representationId":"sequence:rejected:1"}""").asJsonObject
+        assertEquals(listOf("sequence:rejected:1"), one["representations"].asJsonArray.map { it.asJsonObject["id"].asString })
+        assertEquals(-32602, requestError("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"sequenceTree":"yes"}""").first)
+        assertEquals(-32602, requestError("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"representationId":3}""").first)
+        assertEquals(-32602, requestError("zenwave/preview", """{"textDocument":{"uri":"$CHECKOUT_URI"},"representationId":"nope"}""").first)
 
         val zdl = request("zenwave/preview", """{"textDocument":{"uri":"$ORDERS_URI"}}""").asJsonObject
         val domain = zdl["representations"].asJsonArray.single().asJsonObject

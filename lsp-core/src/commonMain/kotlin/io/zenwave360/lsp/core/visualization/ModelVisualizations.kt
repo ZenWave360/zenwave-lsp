@@ -8,6 +8,7 @@ import io.zenwave360.language.eventflow.application.FlowPositionsReason
 import io.zenwave360.language.eventflow.application.FlowPositionsResult
 import io.zenwave360.language.eventflow.application.FlowVariantViewResult
 import io.zenwave360.language.eventflow.view.FlowLanes
+import io.zenwave360.language.eventflow.view.FlowVariantNode
 import io.zenwave360.language.eventflow.view.Point
 import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
 import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
@@ -44,7 +45,7 @@ import org.antlr.v4.kotlinruntime.Recognizer
  */
 class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = PluginCatalogues()) {
 
-    fun preview(document: VisualizedDocument, sequenceRenderMode: String?, previewMode: String?): PreviewResult {
+    fun preview(document: VisualizedDocument, sequenceRenderMode: String?, previewMode: String?, sequenceTree: Boolean = false, representationId: String? = null): PreviewResult {
         val sequenceMode = parseSequenceRenderMode(sequenceRenderMode)
         val mode = parsePreviewMode(previewMode)
         return when (document.languageId) {
@@ -53,7 +54,7 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                 PreviewMode.DIAGRAMS -> zdlDiagramsPreview(document)
             }
             ZW -> zwPreview(document)
-            ZFL -> zflPreview(document, sequenceMode)
+            ZFL -> zflPreview(document, sequenceMode, sequenceTree, representationId)
             else -> throw unsupported(document, "zenwave/preview covers ZDL, ZW and ZFL documents")
         }
     }
@@ -94,6 +95,7 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                 flowGraph = flowGraph,
                 serviceGraph = GenerateServiceViewFromZfl().execute(text),
                 variants = generator.variants(text),
+                variantTree = generator.variantTree(text),
                 savedPositions = savedPositions,
                 lanes = requestedLanes,
             )
@@ -170,8 +172,9 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
         )
     }
 
-    private fun zflPreview(document: VisualizedDocument, mode: MermaidSequenceRenderMode): PreviewResult {
+    private fun zflPreview(document: VisualizedDocument, mode: MermaidSequenceRenderMode, withTree: Boolean, representationId: String?): PreviewResult {
         requireReadable(document)
+        if (representationId != null) return zflBranchPreview(document, representationId)
         val diagrams = generating(document) { GenerateMermaidFromZfl().execute(document.snapshot.text, mode) }
         val flowchart = PreviewRepresentation(
             id = FLOWCHART_ID,
@@ -185,12 +188,38 @@ class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = Plugi
                 title = "Sequence: ${sequence.title.ifBlank { sequence.endOutcome }}",
                 format = PreviewFormat.MERMAID,
                 content = sequence.mermaid,
+                outcome = sequence.endOutcome,
             )
+        }
+        // spec:zenwave-platform-vscode/model-preview#mp-r36: a tree only over separate variants, whose ids are the variants'
+        val tree = if (withTree && mode == MermaidSequenceRenderMode.SEPARATE_VARIANTS) {
+            generating(document) { GenerateFlowViewFromZfl().variantTree(document.snapshot.text) }
+        } else {
+            null
         }
         return PreviewResult(
             representations = listOf(flowchart) + sequences,
             defaultRepresentationId = sequences.firstOrNull()?.id ?: FLOWCHART_ID,
+            sequenceTree = tree,
         )
+    }
+
+    /**
+     * One representation by id (`representationId` of `zenwave/preview`): the alt-block sequence of a variant tree line,
+     * which the tree request leaves out so its answer stays the size of the leaves. The document is parsed once.
+     */
+    private fun zflBranchPreview(document: VisualizedDocument, representationId: String): PreviewResult {
+        val generated = generating(document) { GenerateMermaidFromZfl().variantsWithTree(document.snapshot.text, representationId) }
+            ?: throw InvalidRequestParamsException("unknown representation: $representationId")
+        val (diagram, node) = generated
+        val representation = PreviewRepresentation(
+            id = node.id,
+            title = "Sequence: ${node.title}" + if (node.variantIds.size > 1) " (${node.variantIds.size} variants)" else "",
+            format = PreviewFormat.MERMAID,
+            content = diagram.mermaid,
+            outcome = diagram.endOutcome,
+        )
+        return PreviewResult(representations = listOf(representation), defaultRepresentationId = representation.id)
     }
 
     private fun requireReadable(document: VisualizedDocument) {
