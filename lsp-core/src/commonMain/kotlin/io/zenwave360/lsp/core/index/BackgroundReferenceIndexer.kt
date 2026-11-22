@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.index
 
+import io.zenwave360.lsp.core.platform.FileUris
 import io.zenwave360.lsp.core.platform.PlatformReadWriteLock
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CancellationException
@@ -25,10 +26,23 @@ class BackgroundIndexSettings(
 enum class IndexState { IDLE, INDEXING, READY }
 
 /**
- * What `zenwave/indexStatus` reports: [files] closed or open files whose references are in the index, [candidates]
- * the files the scan found, and [partial] when some candidates are not indexed yet (beyond the cap of the first pass).
+ * What `zenwave/indexStatus` reports.
+ *
+ * [files] are the files whose references are in the index, [candidates] the files the scan and the file watcher found.
+ * [skipped] counts candidates left out because they are too long, cannot be read or could not be processed.
+ * [partial] is true while candidates beyond the cap of the first pass wait to be opened or referenced, and when a
+ * candidate could not be read or processed; a file left out only for its size does not make the index partial, and
+ * neither does a file no language module handles (a `package.json`).
  */
-data class IndexStatus(val state: IndexState, val files: Int, val candidates: Int, val partial: Boolean)
+data class IndexStatus(val state: IndexState, val files: Int, val candidates: Int, val partial: Boolean, val skipped: Int = 0)
+
+/** The result of reading a closed file, ready to be applied to the index in one short step. */
+internal class PreparedClosedIndex(
+    /** The documents the references point at. */
+    val targets: List<String>,
+    /** Puts the references into the index; false when an editor opened the file meanwhile and nothing was applied. */
+    val apply: () -> Boolean,
+)
 
 /** What the indexer asks of the language server. */
 internal interface ClosedFileIndexing {
@@ -37,8 +51,11 @@ internal interface ClosedFileIndexing {
     /** The text of [uri], or null when it cannot be read. */
     suspend fun read(uri: String): String?
 
-    /** Replaces the references [uri] contributes with those of [text]. Null when no module handles it; else the target documents. */
-    fun indexClosed(uri: String, text: String): List<String>?
+    /**
+     * Parses [text] and works out the references of [uri] without touching the index or taking the server's lock.
+     * Null when no module handles it; throws when it cannot be processed.
+     */
+    fun prepare(uri: String, text: String): PreparedClosedIndex?
 
     fun forget(uri: String)
 }
@@ -49,6 +66,7 @@ internal interface ClosedFileIndexing {
  *
  * Work runs in [scope] in slices of [BackgroundIndexSettings.sliceMillis], so a single thread (JS) answers requests in
  * between. An open document is never read from disk: its snapshot is the authority and it indexes itself.
+ * Files are told apart by [FileUris.key], so `file:///C:/x` and `file:///c%3A/x` are one file.
  */
 internal class BackgroundReferenceIndexer(
     private val scope: CoroutineScope,
@@ -57,15 +75,23 @@ internal class BackgroundReferenceIndexer(
     private val host: ClosedFileIndexing,
     private val settings: BackgroundIndexSettings,
 ) {
+    private class Job(val uri: String, val keepOnFailure: Boolean)
+
     private val lock = PlatformReadWriteLock()
     private var folders = emptyList<String>()
-    private val queue = linkedSetOf<String>()
-    private val pending = linkedSetOf<String>()
+    private val queue = linkedMapOf<String, Job>()
+    private val pending = linkedMapOf<String, String>()
+
+    /** Every file the scan or the watcher found, by key. */
+    private val known = mutableSetOf<String>()
     private val indexed = mutableSetOf<String>()
 
-    /** Files deleted on disk; a read that finished after the deletion must not bring their references back. */
+    /** Files that could not be read or processed, and files too long to index. */
+    private val failed = mutableSetOf<String>()
+    private val oversized = mutableSetOf<String>()
+
+    /** Files deleted on disk; an open one is dropped from the index when it is closed, and a read that finished after the deletion is discarded. */
     private val deleted = mutableSetOf<String>()
-    private var candidates = 0
     private var started = false
     private var scanning = false
     private var working = false
@@ -84,14 +110,15 @@ internal class BackgroundReferenceIndexer(
             val budget = Slice()
             try {
                 val scanner = WorkspaceScanner(directories, extensions)
-                val found = roots.flatMap { scanner.scan(it) { budget.tick() } }.distinct()
+                val found = roots.flatMap { scanner.scan(it) { budget.tick() } }.distinctBy { FileUris.key(it) }
                 // Models first: a ZDL or ZFL says more about who uses what than a spec, and the cap cuts the tail.
                 val ordered = found.sortedBy { if (isModel(it)) 0 else 1 }
                 lock.write {
-                    candidates += ordered.size
                     for (uri in ordered) {
-                        if (host.isOpen(uri) || uri in indexed) continue
-                        if (indexed.size + queue.size < settings.maxFiles) queue += uri else pending += uri
+                        val key = FileUris.key(uri)
+                        known += key
+                        if (host.isOpen(uri) || key in indexed) continue
+                        if (indexed.size + queue.size < settings.maxFiles) queue[key] = Job(uri, false) else pending[key] = uri
                     }
                 }
             } finally {
@@ -103,44 +130,66 @@ internal class BackgroundReferenceIndexer(
 
     /** An editor opened [uri]: its snapshot indexes it from now on. */
     fun opened(uri: String) {
+        val key = FileUris.key(uri)
         lock.write {
-            queue.remove(uri)
-            deleted.remove(uri)
-            if (pending.remove(uri) || uri.startsWith("file:")) indexed += uri
+            queue.remove(key)
+            deleted.remove(key)
+            failed.remove(key)
+            oversized.remove(key)
+            pending.remove(key)
+            if (uri.startsWith("file:")) {
+                indexed += key
+                known += key
+            }
         }
     }
 
-    /** An editor closed [uri]: its references stay, and the file on disk is read again for what the editor discarded. */
+    /**
+     * An editor closed [uri]: its references stay, and the file on disk is read again for what the editor discarded.
+     * A file deleted while it was open leaves the index instead.
+     */
     fun closed(uri: String) {
-        lock.write {
-            deleted.remove(uri)
-            queue += uri
+        val key = FileUris.key(uri)
+        val gone = lock.write {
+            if (key in deleted) {
+                indexed.remove(key)
+                known.remove(key)
+                true
+            } else {
+                queue[key] = Job(uri, true)
+                false
+            }
         }
-        launchWorker()
+        if (gone) host.forget(uri) else launchWorker()
     }
 
     /** [uri] was created or changed on disk. Files outside the workspace folders or of no supported kind are ignored. */
     fun changedOnDisk(uri: String) {
+        val key = FileUris.key(uri)
         val accepted = lock.write {
             if (folders.none { WorkspaceFileRules.accepts(it, uri, extensions) }) return@write false
-            deleted.remove(uri)
-            if (uri !in indexed && indexed.size + queue.size >= settings.maxFiles) {
-                if (pending.add(uri)) candidates += 1
-            } else {
-                queue += uri
-            }
+            deleted.remove(key)
+            known += key
+            if (key !in indexed && indexed.size + queue.size >= settings.maxFiles) pending[key] = uri else queue[key] = Job(uri, false)
             true
         }
         if (accepted) launchWorker()
     }
 
     fun deletedOnDisk(uri: String) {
+        val key = FileUris.key(uri)
+        val open = host.isOpen(uri)
         lock.write {
-            queue.remove(uri)
-            if (pending.remove(uri)) candidates -= 1
-            indexed.remove(uri)
-            deleted += uri
-            host.forget(uri)
+            deleted += key
+            if (!open) {
+                queue.remove(key)
+                pending.remove(key)
+                indexed.remove(key)
+                known.remove(key)
+                failed.remove(key)
+                oversized.remove(key)
+                host.forget(uri)
+            }
         }
     }
 
@@ -150,7 +199,7 @@ internal class BackgroundReferenceIndexer(
             scanning || working || queue.isNotEmpty() -> IndexState.INDEXING
             else -> IndexState.READY
         }
-        IndexStatus(state, indexed.size, candidates, pending.isNotEmpty())
+        IndexStatus(state, indexed.size, known.size, pending.isNotEmpty() || failed.isNotEmpty(), failed.size + oversized.size)
     }
 
     private fun isModel(uri: String) = listOf(".zdl", ".zfl", ".zw").any { uri.endsWith(it, ignoreCase = true) }
@@ -170,13 +219,17 @@ internal class BackgroundReferenceIndexer(
     private suspend fun drain() {
         val budget = Slice()
         while (true) {
-            val uri = lock.write {
-                val next = queue.firstOrNull()
-                if (next == null) working = false else queue.remove(next)
-                next
+            val job = lock.write {
+                val nextKey = queue.keys.firstOrNull()
+                if (nextKey == null) {
+                    working = false
+                    null
+                } else {
+                    nextKey to queue.remove(nextKey)!!
+                }
             } ?: return
             try {
-                index(uri)
+                index(job.first, job.second)
             } catch (e: CancellationException) {
                 lock.write { working = false }
                 throw e
@@ -191,19 +244,59 @@ internal class BackgroundReferenceIndexer(
         }
     }
 
-    private suspend fun index(uri: String) {
-        if (host.isOpen(uri)) return
-        val text = host.read(uri)?.takeIf { it.length <= settings.maxFileChars } ?: return
-        // Under the lock, so a deletion reported meanwhile is not undone by this read.
+    /** Takes a file out of the index and records why, for a file that cannot be indexed now. */
+    private fun leave(key: String, uri: String, failedToRead: Boolean) {
         lock.write {
-            if (uri in deleted) return@write
-            val targets = host.indexClosed(uri, text)
-            if (targets == null) {
-                indexed.remove(uri)
-            } else {
-                indexed += uri
-                // A file a closed one points at is wanted by someone: index it now instead of waiting to be opened.
-                for (target in targets) if (pending.remove(target)) queue += target
+            if (key in deleted) return@write
+            indexed.remove(key)
+            if (failedToRead) failed += key else oversized += key
+            host.forget(uri)
+        }
+    }
+
+    private suspend fun index(key: String, job: Job) {
+        val uri = job.uri
+        if (host.isOpen(uri)) return
+        val text = host.read(uri)
+        if (text == null) {
+            // After a close the editor's last text was the authority: a file that is not on disk keeps its references.
+            if (!job.keepOnFailure) leave(key, uri, failedToRead = true)
+            return
+        }
+        if (text.length > settings.maxFileChars) {
+            leave(key, uri, failedToRead = false)
+            return
+        }
+        // Parsed outside every lock, so a request waits for this file's parse at most, not for the lock as well.
+        val prepared = try {
+            host.prepare(uri, text)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (e is Error && e !is NotImplementedError) throw e
+            leave(key, uri, failedToRead = true)
+            return
+        }
+        // Applied under the lock, so a deletion reported meanwhile is not undone by this read.
+        lock.write {
+            if (key in deleted) return@write
+            if (prepared == null) {
+                indexed.remove(key)
+                failed.remove(key)
+                oversized.remove(key)
+                host.forget(uri)
+                return@write
+            }
+            if (!prepared.apply()) return@write
+            indexed += key
+            failed.remove(key)
+            oversized.remove(key)
+            pending.remove(key)
+            // A file a closed one points at is wanted by someone: index it now instead of waiting to be opened.
+            for (target in prepared.targets) {
+                val targetKey = FileUris.key(target)
+                val waiting = pending.remove(targetKey)
+                if (waiting != null) queue[targetKey] = Job(waiting, false)
             }
         }
     }
@@ -220,7 +313,7 @@ internal class BackgroundReferenceIndexer(
     }
 }
 
-/** The JSON both servers send for `zenwave/indexStatus`: `{state, files, candidates, partial}`. */
+/** The JSON both servers send for `zenwave/indexStatus`: `{state, files, candidates, partial, skipped}`. */
 object IndexStatusJson {
     fun status(status: IndexStatus): String =
         buildJsonObject {
@@ -228,5 +321,6 @@ object IndexStatusJson {
             put("files", status.files)
             put("candidates", status.candidates)
             put("partial", status.partial)
+            put("skipped", status.skipped)
         }.toString()
 }

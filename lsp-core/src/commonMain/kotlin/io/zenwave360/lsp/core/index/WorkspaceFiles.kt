@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.index
 
+import io.zenwave360.lsp.core.platform.FileUris
 import io.zenwave360.lsp.core.platform.LoaderDocumentReader
 
 /** One entry of a directory. Symbolic links are reported as neither directories nor followed. */
@@ -30,11 +31,12 @@ object WorkspaceFileRules {
     fun hasSupportedExtension(name: String, extensions: Set<String>): Boolean =
         extensions.any { name.endsWith(it, ignoreCase = true) }
 
-    /** The path of [uri] below [folderUri] when it is a `file:` URI inside it, else null. */
+    /** The path of [uri] below [folderUri] when it is a `file:` URI inside it, else null. Both are compared as [FileUris.key] writes them. */
     fun relativePath(folderUri: String, uri: String): String? {
-        val prefix = folderUri.trimEnd('/') + "/"
-        if (!uri.startsWith("file:") || !uri.startsWith(prefix) || uri.length == prefix.length) return null
-        return uri.substring(prefix.length)
+        val prefix = FileUris.key(folderUri).trimEnd('/') + "/"
+        val key = FileUris.key(uri)
+        if (!key.startsWith("file:") || !key.startsWith(prefix) || key.length == prefix.length) return null
+        return key.substring(prefix.length)
     }
 
     /** True when [uri] is a supported file under [folderUri] that no skipped directory contains. */
@@ -44,16 +46,7 @@ object WorkspaceFileRules {
         return segments.dropLast(1).none(::skipsDirectory) && hasSupportedExtension(segments.last(), extensions)
     }
 
-    /** A path segment as `encodeURIComponent` writes it, which is how VS Code writes the URIs it sends. */
-    fun encodeSegment(name: String): String = buildString {
-        for (byte in name.encodeToByteArray()) {
-            val c = byte.toInt() and 0xFF
-            if (c < 0x80 && (c.toChar().isLetterOrDigit() || c.toChar() in "-_.!~*'()")) append(c.toChar())
-            else append('%').append(HEX[c shr 4]).append(HEX[c and 0xF])
-        }
-    }
-
-    private const val HEX = "0123456789ABCDEF"
+    fun encodeSegment(name: String): String = FileUris.encodeSegment(name)
 }
 
 /** Lists the supported files under a workspace folder, giving way through [tick] between directories. */
@@ -71,6 +64,7 @@ internal class WorkspaceScanner(
             tick()
             val entries = directories.entries(path)?.sortedBy { it.name } ?: continue
             for (entry in entries) {
+                tick()
                 val childPath = "$path/${entry.name}"
                 val childUri = "$uri/${WorkspaceFileRules.encodeSegment(entry.name)}"
                 if (entry.isDirectory) {

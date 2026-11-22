@@ -50,6 +50,7 @@ import io.zenwave360.lsp.core.index.BackgroundIndexSettings
 import io.zenwave360.lsp.core.index.BackgroundReferenceIndexer
 import io.zenwave360.lsp.core.index.ClosedFileIndexing
 import io.zenwave360.lsp.core.index.IndexStatus
+import io.zenwave360.lsp.core.index.PreparedClosedIndex
 import io.zenwave360.lsp.core.index.WorkspaceDirectories
 import io.zenwave360.lsp.core.index.platformWorkspaceDirectories
 import kotlinx.coroutines.CoroutineScope
@@ -112,7 +113,7 @@ class ZenwaveLanguageServer(
 
             override suspend fun read(uri: String) = readUnopened(uri)
 
-            override fun indexClosed(uri: String, text: String) = indexClosedDocument(uri, text)
+            override fun prepare(uri: String, text: String) = prepareClosedDocument(uri, text)
 
             override fun forget(uri: String) = crossReferenceIndex.remove(uri)
         },
@@ -138,7 +139,7 @@ class ZenwaveLanguageServer(
     fun close(uri: String) {
         sessionStore.close(uri)
         lock.write {
-            parsedCache.remove(uri)
+            parsedCache.remove(FileUris.key(uri))
             importRuns.remove(uri)
         }
         // NAV-R20: a closed local file keeps the references it contributes; the file on disk is read again for
@@ -153,12 +154,15 @@ class ZenwaveLanguageServer(
      */
     fun startBackgroundIndex(workspaceFolders: List<String>) = indexer.start(workspaceFolders)
 
-    /** Files created, changed (`created` or `changed`) or deleted on disk, from `workspace/didChangeWatchedFiles`. */
+    /**
+     * Files created, changed or deleted on disk, from `workspace/didChangeWatchedFiles`. An open document is never
+     * re-read, but a deletion is remembered so its references leave the index when it is closed.
+     */
     fun workspaceFilesChanged(changes: List<WatchedFileChange>) {
         for (change in changes) {
             when (change.kind) {
-                WatchedFileChangeKind.DELETED -> if (sessionStore.get(change.uri) == null) indexer.deletedOnDisk(change.uri)
-                else -> if (sessionStore.get(change.uri) == null) indexer.changedOnDisk(change.uri)
+                WatchedFileChangeKind.DELETED -> indexer.deletedOnDisk(change.uri)
+                else -> indexer.changedOnDisk(change.uri)
             }
         }
     }
@@ -167,29 +171,24 @@ class ZenwaveLanguageServer(
     fun indexStatus(): IndexStatus = indexer.status()
 
     /**
-     * Replaces the references [uri] contributes with those of [text], read from disk, without keeping what the parse
-     * produced. Null when no module handles it; else the documents the references point at.
+     * Works out the references of [uri] from [text], read from disk, without the server's lock and without keeping
+     * what the parse produced. Null when no module handles it; throws when the document cannot be processed.
+     * The result is put into the index under the write lock, unless an editor opened the file meanwhile.
      */
-    private fun indexClosedDocument(uri: String, text: String): List<String>? {
+    private fun prepareClosedDocument(uri: String, text: String): PreparedClosedIndex? {
         val snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
-        // The write lock keeps requests off the parser; the JVM parses one document at a time, as it does for open ones.
-        return lock.write {
-            val entry = buildCacheEntry(snapshot)
-            val module = entry.module ?: return@write null
-            if (entry.processingFailure != null) return@write null
-            val contributions = try {
-                module.crossReferenceContributions(snapshot, entry.parsedArtifact)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                if (e is Error && e !is NotImplementedError) throw e
-                return@write null
+        val entry = buildCacheEntry(snapshot)
+        val module = entry.module ?: return null
+        entry.processingFailure?.let { throw IllegalStateException(it) }
+        val contributions = module.crossReferenceContributions(snapshot, entry.parsedArtifact)
+        return PreparedClosedIndex(contributions.map { it.targetUri }.distinct()) {
+            lock.write {
+                // An editor may have opened the file since it was read: its snapshot indexes it.
+                if (sessionStore.get(uri) != null) return@write false
+                crossReferenceIndex.remove(uri)
+                if (contributions.isNotEmpty()) crossReferenceIndex.index(contributions)
+                true
             }
-            // An editor may have opened the file since it was read: its snapshot indexes it.
-            if (sessionStore.get(uri) != null) return@write emptyList()
-            crossReferenceIndex.remove(uri)
-            if (contributions.isNotEmpty()) crossReferenceIndex.index(contributions)
-            contributions.map { it.targetUri }.distinct()
         }
     }
 
@@ -872,17 +871,17 @@ class ZenwaveLanguageServer(
         run {
             if (!forceRefresh) {
                 lock.read {
-                    parsedCache[snapshot.ref.uri]
+                    parsedCache[FileUris.key(snapshot.ref.uri)]
                         ?.takeIf { it.version == snapshot.ref.version }
                 }?.let { return it }
             }
             lock.write {
                 if (!forceRefresh) {
-                    parsedCache[snapshot.ref.uri]
+                    parsedCache[FileUris.key(snapshot.ref.uri)]
                         ?.takeIf { it.version == snapshot.ref.version }
                         ?.let { return@write it }
                 }
-                buildCacheEntry(snapshot).also { parsedCache[snapshot.ref.uri] = it }
+                buildCacheEntry(snapshot).also { parsedCache[FileUris.key(snapshot.ref.uri)] = it }
             }
         }
 

@@ -7,6 +7,8 @@ import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
 import io.zenwave360.lsp.core.platform.DocumentReader
+import io.zenwave360.lsp.core.platform.FileUris
+import io.zenwave360.lsp.core.platform.LoaderDocumentReader
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
 import io.zenwave360.lsp.core.platform.WatchedFileChange
 import io.zenwave360.lsp.core.platform.WatchedFileChangeKind
@@ -34,11 +36,16 @@ private const val FLOW = "$FOLDER/checkout.zfl"
 private class FakeDisk(files: Map<String, String> = emptyMap()) : WorkspaceDirectories, DocumentReader {
     val texts = files.toMutableMap()
     var reads = 0
-    var onRead: () -> Unit = {}
+    var onRead: (String) -> Unit = {}
+    var onEntries: () -> Unit = {}
+    val unreadable = mutableSetOf<String>()
+
+    private fun paths() = texts.keys.map { LoaderDocumentReader.loaderLocation(it) }
 
     override suspend fun entries(path: String): List<DirectoryEntry>? {
+        onEntries()
         val prefix = path.trimEnd('/') + "/"
-        val below = texts.keys.map { it.removePrefix("file://") }.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) }
+        val below = paths().filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) }
         if (below.isEmpty()) return null
         return below.map { it.substringBefore('/') }.distinct().map { name ->
             DirectoryEntry(name, below.any { it.startsWith("$name/") })
@@ -47,8 +54,15 @@ private class FakeDisk(files: Map<String, String> = emptyMap()) : WorkspaceDirec
 
     override suspend fun read(uri: String): String {
         reads += 1
-        onRead()
-        return texts[uri] ?: throw IllegalStateException("$uri does not exist")
+        onRead(uri)
+        val wanted = FileUris.key(uri)
+        if (unreadable.any { FileUris.key(it) == wanted }) throw IllegalStateException("$uri cannot be read")
+        return texts.entries.firstOrNull { FileUris.key(it.key) == wanted }?.value
+            ?: throw IllegalStateException("$uri does not exist")
+    }
+
+    fun remove(uri: String) {
+        texts.keys.removeAll { FileUris.key(it) == FileUris.key(uri) }
     }
 }
 
@@ -83,10 +97,10 @@ class BackgroundIndexTest {
     private fun workspace() = FakeDisk(mapOf(ZDL to ORDERS_MODEL_ZDL, FLOW to CHECKOUT_FLOW_ZFL))
 
     /** The id of `createOrder` in the ZDL, which the flow uses. */
-    private fun ZenwaveLanguageServer.createOrder(): Pair<String, String> {
-        open(DocumentSnapshot(DocumentRef(ZDL, "zdl", 1), ORDERS_MODEL_ZDL))
+    private fun ZenwaveLanguageServer.createOrder(zdl: String = ZDL): Pair<String, String> {
+        open(DocumentSnapshot(DocumentRef(zdl, "zdl", 1), ORDERS_MODEL_ZDL))
         val line = ORDERS_MODEL_ZDL.lines().indexOfFirst { "createOrder" in it }
-        val symbol = symbolAt(ZDL, Position(line, 6))!!
+        val symbol = symbolAt(zdl, Position(line, 6))!!
         return symbol.uri to symbol.semanticId
     }
 
@@ -165,7 +179,7 @@ class BackgroundIndexTest {
         val disk = workspace()
         (1..12).forEach { disk.texts["$FOLDER/flow$it.zfl"] = CHECKOUT_FLOW_ZFL }
         var now = 0.0
-        disk.onRead = { now += 1.0 }
+        disk.onRead = { _ -> now += 1.0 }
         var yields = 0
         val settings = BackgroundIndexSettings(clock = { now }, yielder = { yields += 1; yield() })
         val server = server(disk, settings)
@@ -243,7 +257,7 @@ class BackgroundIndexTest {
         val target = server.createOrder()
         assertEquals(listOf(FLOW), server.usesOf(target))
 
-        disk.texts.remove(FLOW)
+        disk.remove(FLOW)
         server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.DELETED)))
 
         assertEquals(emptyList(), server.usesOf(target))
@@ -274,5 +288,141 @@ class BackgroundIndexTest {
         server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
         settle(server)
         assertEquals(listOf(other), server.usesOf(target))
+    }
+
+    @Test
+    fun theSpellingsOfAWindowsFileUriAreOneKey() {
+        val spellings = listOf(
+            "file:///C:/ws/a b.zdl", "file:///c:/ws/a%20b.zdl", "file:///c%3A/ws/a%20b.zdl",
+            "file:///C%3a/ws/a b.zdl", "file://C:/ws/a b.zdl", "file://localhost/c:/ws/a%20b.zdl",
+        )
+        assertEquals(setOf("file:///c:/ws/a%20b.zdl"), spellings.map { FileUris.key(it) }.toSet())
+        assertEquals("file:///tmp/A/x.zdl#entities.A", FileUris.key("file:///tmp/A/x.zdl#entities.A"))
+        assertEquals("zenwave:/a/b.zdl", FileUris.key("zenwave:/a/b.zdl"))
+        val store = InMemoryDocumentSessionStore()
+        store.open(DocumentSnapshot(DocumentRef("file:///c%3A/ws/x.zdl", "zdl", 1), "entity A {}"))
+        assertEquals("file:///c%3A/ws/x.zdl", store.get("file:///C:/ws/x.zdl")?.ref?.uri, "the snapshot keeps the client's spelling")
+        store.close("file:///C:/ws/x.zdl")
+        assertEquals(null, store.get("file:///c%3A/ws/x.zdl"))
+    }
+
+    @Test
+    fun aFileOpenedUnderAnotherSpellingIsNotIndexedTwice() = runTest {
+        val folder = "file:///C:/ws"
+        val disk = FakeDisk(mapOf("$folder/orders/model.zdl" to ORDERS_MODEL_ZDL, "$folder/checkout.zfl" to CHECKOUT_FLOW_ZFL))
+        val server = server(disk)
+        server.startBackgroundIndex(listOf(folder))
+        settle(server)
+        val zdl = "file:///c%3A/ws/orders/model.zdl"
+        val target = server.createOrder(zdl)
+        assertEquals(listOf("$folder/checkout.zfl"), server.usesOf(target), "found by the disk spelling")
+
+        val flow = "file:///c%3A/ws/checkout.zfl"
+        server.open(DocumentSnapshot(DocumentRef(flow, "zfl", 1), CHECKOUT_FLOW_ZFL.replace("createOrder", "cancelOrder")))
+
+        assertEquals(emptyList(), server.usesOf(target), "the open document replaced the disk version")
+        assertEquals(2, server.indexStatus().files)
+        server.workspaceFilesChanged(listOf(WatchedFileChange("$folder/checkout.zfl", WatchedFileChangeKind.CHANGED)))
+        settle(server)
+        assertEquals(emptyList(), server.usesOf(target), "a change on disk does not replace an open document")
+    }
+
+    @Test
+    fun aFileIndexedAfterWaitingBeyondTheCapIsNoLongerPending() = runTest {
+        val disk = FakeDisk(mapOf("$FOLDER/a.zdl" to "entity A {}", "$FOLDER/b.zdl" to "entity B {}", "$FOLDER/c.zdl" to "entity C {}"))
+        val server = server(disk, testSettings(maxFiles = 2))
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        assertEquals(true, server.indexStatus().partial)
+        assertEquals(3, server.indexStatus().candidates)
+
+        disk.remove("$FOLDER/a.zdl")
+        server.workspaceFilesChanged(listOf(WatchedFileChange("$FOLDER/a.zdl", WatchedFileChangeKind.DELETED)))
+        val changed = WatchedFileChange("$FOLDER/c.zdl", WatchedFileChangeKind.CHANGED)
+        server.workspaceFilesChanged(listOf(changed, changed))
+        settle(server)
+
+        assertEquals(IndexStatus(IndexState.READY, 2, 2, false, 0), server.indexStatus())
+    }
+
+    @Test
+    fun aFileThatCannotBeReadOrIsTooLongLosesItsReferencesAndIsCounted() = runTest {
+        val disk = workspace()
+        val settings = BackgroundIndexSettings(maxFileChars = CHECKOUT_FLOW_ZFL.length + 10, clock = { 0.0 }, yielder = { yield() })
+        val server = server(disk, settings)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        val target = server.createOrder()
+        assertEquals(listOf(FLOW), server.usesOf(target))
+
+        disk.texts[FLOW] = CHECKOUT_FLOW_ZFL + " ".repeat(100)
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+        assertEquals(emptyList(), server.usesOf(target), "too long: forgotten")
+        assertEquals(1, server.indexStatus().skipped)
+        assertEquals(false, server.indexStatus().partial, "a file skipped for its size does not make the index partial")
+
+        disk.texts[FLOW] = CHECKOUT_FLOW_ZFL
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+        assertEquals(listOf(FLOW), server.usesOf(target))
+        assertEquals(0, server.indexStatus().skipped)
+
+        disk.unreadable += FLOW
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+        assertEquals(emptyList(), server.usesOf(target), "unreadable: forgotten")
+        assertEquals(1, server.indexStatus().skipped)
+        assertTrue(server.indexStatus().partial, "a file that could not be read leaves the index partial")
+    }
+
+    @Test
+    fun aFileDeletedWhileOpenLeavesTheIndexWhenItIsClosed() = runTest {
+        val disk = workspace()
+        val server = server(disk)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        val target = server.createOrder()
+        server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), CHECKOUT_FLOW_ZFL))
+
+        disk.remove(FLOW)
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.DELETED)))
+        assertEquals(listOf(FLOW), server.usesOf(target), "still open")
+        server.close(FLOW)
+        runCurrent()
+
+        assertEquals(emptyList(), server.usesOf(target))
+        assertEquals(1, server.indexStatus().files)
+    }
+
+    @Test
+    fun aFileOpenedWhileItWasBeingParsedKeepsTheEditorsReferences() = runTest {
+        val disk = workspace()
+        val server = server(disk)
+        disk.onRead = { uri ->
+            if (uri == FLOW) {
+                server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), CHECKOUT_FLOW_ZFL.replace("createOrder", "cancelOrder")))
+            }
+        }
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+
+        assertEquals(emptyList(), server.usesOf(server.createOrder()), "the disk result was discarded")
+    }
+
+    @Test
+    fun theDirectoryScanYieldsBeforeTheFirstFileIsRead() = runTest {
+        val disk = FakeDisk((1..30).associate { "$FOLDER/dir/f$it.zdl" to "entity E$it {}" })
+        var now = 0.0
+        disk.onEntries = { now += 1.0 }
+        var yields = 0
+        var yieldsAtFirstRead = -1
+        disk.onRead = { _ -> if (yieldsAtFirstRead < 0) yieldsAtFirstRead = yields }
+        val server = server(disk, BackgroundIndexSettings(clock = { now.also { now += 0.5 } }, yielder = { yields += 1; yield() }))
+
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+
+        assertTrue(yieldsAtFirstRead >= 2, "the scan of 30 entries yielded $yieldsAtFirstRead times before reading")
     }
 }
