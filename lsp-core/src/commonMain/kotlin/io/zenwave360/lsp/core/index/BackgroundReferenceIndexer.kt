@@ -44,12 +44,23 @@ internal class PreparedClosedIndex(
     val apply: () -> Boolean,
 )
 
+/** The outcome of reading a closed file. */
+internal sealed class ClosedRead {
+    class Text(val text: String) : ClosedRead()
+
+    /** The file is not there: never saved, or deleted. Not a problem of the index. */
+    object Missing : ClosedRead()
+
+    /** The file is there and could not be read (permission, I/O). */
+    object Failed : ClosedRead()
+}
+
 /** What the indexer asks of the language server. */
 internal interface ClosedFileIndexing {
     fun isOpen(uri: String): Boolean
 
-    /** The text of [uri], or null when it cannot be read. */
-    suspend fun read(uri: String): String?
+    /** The text of [uri], or why there is none. */
+    suspend fun read(uri: String): ClosedRead
 
     /**
      * Parses [text] and works out the references of [uri] without touching the index or taking the server's lock.
@@ -75,7 +86,9 @@ internal class BackgroundReferenceIndexer(
     private val host: ClosedFileIndexing,
     private val settings: BackgroundIndexSettings,
 ) {
-    private class Job(val uri: String, val keepOnFailure: Boolean)
+    private class Job(val uri: String)
+
+    private enum class Skip { FAILED, OVERSIZED }
 
     private val lock = PlatformReadWriteLock()
     private var folders = emptyList<String>()
@@ -86,9 +99,8 @@ internal class BackgroundReferenceIndexer(
     private val known = mutableSetOf<String>()
     private val indexed = mutableSetOf<String>()
 
-    /** Files that could not be read or processed, and files too long to index. */
-    private val failed = mutableSetOf<String>()
-    private val oversized = mutableSetOf<String>()
+    /** Why a file is left out, if it is. A file has at most one current reason. */
+    private val skips = mutableMapOf<String, Skip>()
 
     /** Files deleted on disk; an open one is dropped from the index when it is closed, and a read that finished after the deletion is discarded. */
     private val deleted = mutableSetOf<String>()
@@ -110,16 +122,24 @@ internal class BackgroundReferenceIndexer(
             val budget = Slice()
             try {
                 val scanner = WorkspaceScanner(directories, extensions)
-                val found = roots.flatMap { scanner.scan(it) { budget.tick() } }.distinctBy { FileUris.key(it) }
                 // Models first: a ZDL or ZFL says more about who uses what than a spec, and the cap cuts the tail.
-                val ordered = found.sortedBy { if (isModel(it)) 0 else 1 }
-                lock.write {
-                    for (uri in ordered) {
+                val models = mutableListOf<String>()
+                val others = mutableListOf<String>()
+                val seen = mutableSetOf<String>()
+                for (root in roots) {
+                    for (uri in scanner.scan(root) { budget.tick() }) {
+                        if (seen.add(FileUris.key(uri))) (if (isModel(uri)) models else others) += uri
+                        budget.tick()
+                    }
+                }
+                for (uri in models + others) {
+                    lock.write {
                         val key = FileUris.key(uri)
                         known += key
-                        if (host.isOpen(uri) || key in indexed) continue
-                        if (indexed.size + queue.size < settings.maxFiles) queue[key] = Job(uri, false) else pending[key] = uri
+                        if (host.isOpen(uri) || key in indexed) return@write
+                        if (indexed.size + queue.size < settings.maxFiles) queue[key] = Job(uri) else pending[key] = uri
                     }
+                    budget.tick()
                 }
             } finally {
                 lock.write { scanning = false }
@@ -134,8 +154,7 @@ internal class BackgroundReferenceIndexer(
         lock.write {
             queue.remove(key)
             deleted.remove(key)
-            failed.remove(key)
-            oversized.remove(key)
+            skips.remove(key)
             pending.remove(key)
             if (uri.startsWith("file:")) {
                 indexed += key
@@ -156,7 +175,7 @@ internal class BackgroundReferenceIndexer(
                 known.remove(key)
                 true
             } else {
-                queue[key] = Job(uri, true)
+                queue[key] = Job(uri)
                 false
             }
         }
@@ -170,7 +189,7 @@ internal class BackgroundReferenceIndexer(
             if (folders.none { WorkspaceFileRules.accepts(it, uri, extensions) }) return@write false
             deleted.remove(key)
             known += key
-            if (key !in indexed && indexed.size + queue.size >= settings.maxFiles) pending[key] = uri else queue[key] = Job(uri, false)
+            if (key !in indexed && indexed.size + queue.size >= settings.maxFiles) pending[key] = uri else queue[key] = Job(uri)
             true
         }
         if (accepted) launchWorker()
@@ -178,16 +197,15 @@ internal class BackgroundReferenceIndexer(
 
     fun deletedOnDisk(uri: String) {
         val key = FileUris.key(uri)
-        val open = host.isOpen(uri)
+        // Decided under the lock that [closed] takes too, so a close racing with this deletion ends with the file removed.
         lock.write {
             deleted += key
-            if (!open) {
+            if (!host.isOpen(uri)) {
                 queue.remove(key)
                 pending.remove(key)
                 indexed.remove(key)
                 known.remove(key)
-                failed.remove(key)
-                oversized.remove(key)
+                skips.remove(key)
                 host.forget(uri)
             }
         }
@@ -199,7 +217,7 @@ internal class BackgroundReferenceIndexer(
             scanning || working || queue.isNotEmpty() -> IndexState.INDEXING
             else -> IndexState.READY
         }
-        IndexStatus(state, indexed.size, known.size, pending.isNotEmpty() || failed.isNotEmpty(), failed.size + oversized.size)
+        IndexStatus(state, indexed.size, known.size, pending.isNotEmpty() || Skip.FAILED in skips.values, skips.size)
     }
 
     private fun isModel(uri: String) = listOf(".zdl", ".zfl", ".zw").any { uri.endsWith(it, ignoreCase = true) }
@@ -244,12 +262,20 @@ internal class BackgroundReferenceIndexer(
         }
     }
 
-    /** Takes a file out of the index and records why, for a file that cannot be indexed now. */
-    private fun leave(key: String, uri: String, failedToRead: Boolean) {
+    /**
+     * Takes a file out of the index because it cannot be indexed now, and records why ([why] null: the file is gone).
+     * A file an editor has opened meanwhile is not touched: its snapshot is the authority.
+     */
+    private fun leave(key: String, uri: String, why: Skip?) {
         lock.write {
-            if (key in deleted) return@write
+            if (key in deleted || host.isOpen(uri)) return@write
             indexed.remove(key)
-            if (failedToRead) failed += key else oversized += key
+            skips.remove(key)
+            if (why != null) skips[key] = why
+            if (why == null) {
+                known.remove(key)
+                pending.remove(key)
+            }
             host.forget(uri)
         }
     }
@@ -257,16 +283,12 @@ internal class BackgroundReferenceIndexer(
     private suspend fun index(key: String, job: Job) {
         val uri = job.uri
         if (host.isOpen(uri)) return
-        val text = host.read(uri)
-        if (text == null) {
-            // After a close the editor's last text was the authority: a file that is not on disk keeps its references.
-            if (!job.keepOnFailure) leave(key, uri, failedToRead = true)
-            return
+        val text = when (val read = host.read(uri)) {
+            is ClosedRead.Text -> read.text
+            ClosedRead.Missing -> return leave(key, uri, null)
+            ClosedRead.Failed -> return leave(key, uri, Skip.FAILED)
         }
-        if (text.length > settings.maxFileChars) {
-            leave(key, uri, failedToRead = false)
-            return
-        }
+        if (text.length > settings.maxFileChars) return leave(key, uri, Skip.OVERSIZED)
         // Parsed outside every lock, so a request waits for this file's parse at most, not for the lock as well.
         val prepared = try {
             host.prepare(uri, text)
@@ -274,7 +296,7 @@ internal class BackgroundReferenceIndexer(
             throw e
         } catch (e: Throwable) {
             if (e is Error && e !is NotImplementedError) throw e
-            leave(key, uri, failedToRead = true)
+            leave(key, uri, Skip.FAILED)
             return
         }
         // Applied under the lock, so a deletion reported meanwhile is not undone by this read.
@@ -282,21 +304,19 @@ internal class BackgroundReferenceIndexer(
             if (key in deleted) return@write
             if (prepared == null) {
                 indexed.remove(key)
-                failed.remove(key)
-                oversized.remove(key)
+                skips.remove(key)
                 host.forget(uri)
                 return@write
             }
             if (!prepared.apply()) return@write
             indexed += key
-            failed.remove(key)
-            oversized.remove(key)
+            skips.remove(key)
             pending.remove(key)
             // A file a closed one points at is wanted by someone: index it now instead of waiting to be opened.
             for (target in prepared.targets) {
                 val targetKey = FileUris.key(target)
                 val waiting = pending.remove(targetKey)
-                if (waiting != null) queue[targetKey] = Job(waiting, false)
+                if (waiting != null) queue[targetKey] = Job(waiting)
             }
         }
     }

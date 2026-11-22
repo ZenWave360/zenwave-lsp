@@ -211,7 +211,7 @@ class BackgroundIndexTest {
     }
 
     @Test
-    fun closingADocumentKeepsItsReferencesWhenTheFileCannotBeRead() = runTest {
+    fun closingADocumentWhoseFileIsGoneForgetsItsReferencesWithoutMakingTheIndexPartial() = runTest {
         val server = server(FakeDisk())
         server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), CHECKOUT_FLOW_ZFL))
         val target = server.createOrder()
@@ -219,7 +219,25 @@ class BackgroundIndexTest {
         server.close(FLOW)
         runCurrent()
 
-        assertEquals(listOf(FLOW), server.usesOf(target))
+        assertEquals(emptyList(), server.usesOf(target))
+        assertEquals(false, server.indexStatus().partial)
+        assertEquals(0, server.indexStatus().skipped)
+    }
+
+    @Test
+    fun closingADocumentWhoseFileCannotBeReadForgetsItsReferencesAndCountsIt() = runTest {
+        val disk = workspace()
+        val server = server(disk)
+        server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        val target = server.createOrder()
+        disk.unreadable += FLOW
+
+        server.close(FLOW)
+        runCurrent()
+
+        assertEquals(emptyList(), server.usesOf(target))
+        assertEquals(1, server.indexStatus().skipped)
+        assertTrue(server.indexStatus().partial)
     }
 
     @Test
@@ -424,5 +442,122 @@ class BackgroundIndexTest {
         settle(server)
 
         assertTrue(yieldsAtFirstRead >= 2, "the scan of 30 entries yielded $yieldsAtFirstRead times before reading")
+    }
+
+    @Test
+    fun aFileUnreadableForTheIndexDoesNotEraseTheReferencesOfAnEditorThatOpenedIt() = runTest {
+        val disk = workspace()
+        val server = server(disk)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        val target = server.createOrder()
+        disk.unreadable += FLOW
+        disk.onRead = { uri ->
+            if (uri == FLOW) server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), CHECKOUT_FLOW_ZFL))
+        }
+
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+
+        assertEquals(listOf(FLOW), server.usesOf(target), "the open document keeps its references")
+        assertEquals(0, server.indexStatus().skipped)
+    }
+
+    @Test
+    fun aFileHasOneSkipReasonAtATime() = runTest {
+        val disk = workspace()
+        val settings = BackgroundIndexSettings(maxFileChars = CHECKOUT_FLOW_ZFL.length + 10, clock = { 0.0 }, yielder = { yield() })
+        val server = server(disk, settings)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        disk.texts[FLOW] = CHECKOUT_FLOW_ZFL + " ".repeat(100)
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+        assertEquals(1, server.indexStatus().skipped)
+
+        disk.unreadable += FLOW
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.CHANGED)))
+        settle(server)
+
+        val status = server.indexStatus()
+        assertEquals(2, status.candidates)
+        assertEquals(1, status.skipped, "unreadable replaced too long")
+        assertTrue(status.partial)
+    }
+
+    @Test
+    fun theScanAfterListingYieldsWhileItSortsAndQueuesTheCandidates() = runTest {
+        val disk = FakeDisk((1..60).associate { "$FOLDER/dir/f$it.zdl" to "entity E$it {}" })
+        var now = 0.0
+        var yields = 0
+        var yieldsAtFirstRead = -1
+        disk.onRead = { _ -> if (yieldsAtFirstRead < 0) yieldsAtFirstRead = yields }
+        // One millisecond per look at the clock: a yield every fourth tick. The listing and the dedup alone make 121 ticks.
+        val server = server(disk, BackgroundIndexSettings(clock = { now += 1.0; now }, yielder = { yields += 1; yield() }))
+
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+
+        assertTrue(yieldsAtFirstRead >= 44, "yielded $yieldsAtFirstRead times before the first read; the queueing ticks are the rest")
+    }
+
+    @Test
+    fun aUncAuthorityIsNotTheLocalMachine() {
+        assertTrue(FileUris.key("file://server/share/a.zdl") != FileUris.key("file:///server/share/a.zdl"))
+        assertEquals(FileUris.key("file://server/share/a.zdl"), FileUris.key("file://SERVER/share/a.zdl"))
+        assertEquals(FileUris.key("file:///server/share/a.zdl"), FileUris.key("file://localhost/server/share/a.zdl"))
+        assertEquals(FileUris.key("file:///c:/a.zdl"), FileUris.key("file://C:/a.zdl"))
+    }
+
+    /** The indexer alone, with a host whose open documents the test controls, to put a deletion between a close and its notification. */
+    private class FakeHost : ClosedFileIndexing {
+        val open = mutableSetOf<String>()
+        val forgotten = mutableListOf<String>()
+        var read: ClosedRead = ClosedRead.Missing
+        override fun isOpen(uri: String) = uri in open
+        override suspend fun read(uri: String) = read
+        override fun prepare(uri: String, text: String): PreparedClosedIndex? = null
+        override fun forget(uri: String) { forgotten += uri }
+    }
+
+    private fun TestScope.indexer(host: FakeHost) = BackgroundReferenceIndexer(
+        scope = backgroundScope,
+        directories = WorkspaceDirectories { null },
+        extensions = setOf(".zfl"),
+        host = host,
+        settings = testSettings(),
+    )
+
+    @Test
+    fun aDeletionBetweenTheEditorClosingAndTheCloseReachingTheIndexRemovesTheFile() = runTest {
+        val host = FakeHost().apply { read = ClosedRead.Failed }
+        val indexer = indexer(host)
+        host.open += FLOW
+        indexer.opened(FLOW)
+
+        host.open -= FLOW // the editor closed it
+        indexer.deletedOnDisk(FLOW) // before the close reached the indexer
+        indexer.closed(FLOW)
+        runCurrent()
+
+        assertTrue(FLOW in host.forgotten)
+        assertEquals(0, indexer.status().files)
+    }
+
+    @Test
+    fun aDeletionWhileOpenIsRemovedOnCloseEvenWhenTheFileCannotBeRead() = runTest {
+        val host = FakeHost().apply { read = ClosedRead.Failed }
+        val indexer = indexer(host)
+        host.open += FLOW
+        indexer.opened(FLOW)
+
+        indexer.deletedOnDisk(FLOW)
+        assertEquals(emptyList(), host.forgotten, "open: the editor's references stay")
+        host.open -= FLOW
+        indexer.closed(FLOW)
+        runCurrent()
+
+        assertEquals(listOf(FLOW), host.forgotten)
+        assertEquals(0, indexer.status().skipped, "a deleted file is not a failure")
     }
 }

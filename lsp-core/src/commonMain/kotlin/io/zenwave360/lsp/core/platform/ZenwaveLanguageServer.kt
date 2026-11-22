@@ -49,6 +49,7 @@ import io.zenwave360.lsp.core.xref.toForwardTarget
 import io.zenwave360.lsp.core.index.BackgroundIndexSettings
 import io.zenwave360.lsp.core.index.BackgroundReferenceIndexer
 import io.zenwave360.lsp.core.index.ClosedFileIndexing
+import io.zenwave360.lsp.core.index.ClosedRead
 import io.zenwave360.lsp.core.index.IndexStatus
 import io.zenwave360.lsp.core.index.PreparedClosedIndex
 import io.zenwave360.lsp.core.index.WorkspaceDirectories
@@ -111,7 +112,7 @@ class ZenwaveLanguageServer(
         host = object : ClosedFileIndexing {
             override fun isOpen(uri: String) = sessionStore.get(uri) != null
 
-            override suspend fun read(uri: String) = readUnopened(uri)
+            override suspend fun read(uri: String) = readClosedFile(uri)
 
             override fun prepare(uri: String, text: String) = prepareClosedDocument(uri, text)
 
@@ -367,6 +368,17 @@ class ZenwaveLanguageServer(
             module.capabilities.supportsHierarchy && module.capabilities.extensions.any { path.endsWith(it) }
         }
     }
+
+    /** A closed local file as the background index reads it: its text, or whether it is missing or unreadable. */
+    private suspend fun readClosedFile(uri: String): ClosedRead =
+        try {
+            ClosedRead.Text(documentReader.read(uri))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (e is Error && e !is NotImplementedError) throw e
+            if (isMissingFile(e)) ClosedRead.Missing else ClosedRead.Failed
+        }
 
     /** The content of a document that is not open, or null when it cannot be reached. */
     private suspend fun readUnopened(uri: String): String? =

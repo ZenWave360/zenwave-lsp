@@ -14,18 +14,34 @@ object FileUris {
         if (!uri.startsWith("file:", ignoreCase = true)) return uri
         val fragmentAt = uri.indexOf('#')
         val fragment = if (fragmentAt < 0) "" else uri.substring(fragmentAt)
-        val path = uri.substring(5, if (fragmentAt < 0) uri.length else fragmentAt).trimStart('/')
-        val segments = path.split('/').toMutableList()
-        if (segments.size > 1 && segments[0].equals("localhost", ignoreCase = true)) segments.removeAt(0)
+        val rest = uri.substring(5, if (fragmentAt < 0) uri.length else fragmentAt)
+        var authority = ""
+        var path = rest.trimStart('/')
+        if (rest.startsWith("//") && !rest.startsWith("///")) {
+            // `file://host/share/x` names another machine; only no authority, `localhost` and IntelliJ's `file://C:/x` are local.
+            val body = rest.substring(2)
+            val end = body.indexOf('/').let { if (it < 0) body.length else it }
+            val candidate = body.substring(0, end)
+            val decoded = decode(candidate)
+            val isDrive = decoded.length == 2 && decoded[0].isLetter() && decoded[1] == ':'
+            if (!isDrive && !candidate.equals("localhost", ignoreCase = true) && candidate.isNotEmpty()) {
+                authority = candidate.lowercase()
+                path = body.substring(end).trimStart('/')
+            } else if (candidate.equals("localhost", ignoreCase = true)) {
+                path = body.substring(end).trimStart('/')
+            }
+        }
+        val segments = path.split('/')
         val canonical = segments.mapIndexed { index, raw ->
             val decoded = decode(raw)
-            if (index == 0 && decoded.length == 2 && decoded[0].isLetter() && decoded[1] == ':') {
+            if (index == 0 && authority.isEmpty() && decoded.length == 2 && decoded[0].isLetter() && decoded[1] == ':') {
                 decoded.lowercase()
             } else {
                 encodeSegment(decoded)
             }
         }
-        return "file:///" + canonical.joinToString("/") + fragment
+        val head = if (authority.isEmpty()) "file:///" else "file://$authority/"
+        return head + canonical.joinToString("/") + fragment
     }
 
     /** [value], a URI or a semantic id (`uri#path`), with the `file:` URI in it written as [key] writes it. */
