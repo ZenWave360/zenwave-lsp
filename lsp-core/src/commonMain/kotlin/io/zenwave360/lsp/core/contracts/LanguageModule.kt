@@ -69,6 +69,10 @@ interface LanguageModule {
     fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<CrossReferenceContribution> =
         crossReferenceContributions(snapshot)
 
+    /** The contributions of a document that may list alternative locations for what it links to ([known] tells which exist). */
+    fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?, known: KnownDocuments): List<CrossReferenceContribution> =
+        crossReferenceContributions(snapshot, parsedArtifact)
+
     fun canHandle(uri: String, text: String?): Boolean
 
     /**

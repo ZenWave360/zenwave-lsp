@@ -1,8 +1,10 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
+
 internal class ZflModelEnricher {
-    fun enrich(uri: String, model: Map<String, Any?>): EnrichedZflModel {
-        val zdlUris = declaredZdlUris(uri, model)
+    fun enrich(uri: String, model: Map<String, Any?>, related: RelatedDocuments = RelatedDocuments.NONE): EnrichedZflModel {
+        val zdlUris = declaredZdlUris(uri, model, related)
         val flows = readFlows(model.mapAt("flows"))
         val commandIndex = buildCommandIndex(flows)
         val systems = readSystems(model.mapAt("systems"), zdlUris, commandIndex)

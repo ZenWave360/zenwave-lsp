@@ -288,4 +288,95 @@ class ZflToZdlNavigationTest {
 
         assertEquals(null, server.diagnosticsWithLinks(reachableUri))
     }
+
+    /** NAV-R9: the flow of [flow] with a `@zdl` that lists [refs] in order. */
+    private fun listed(vararg refs: String) = flow(refs.joinToString("\", \""))
+
+    @Test
+    fun theFirstLocationThatExistsIsTheWinningZdl() = runTest {
+        val text = listed("orders/nowhere.zdl", "orders/orders.zdl", "orders/other.zdl")
+        val zdl = writeTestFile("nav/list/skip/orders/orders.zdl", orders)
+        writeTestFile("nav/list/skip/orders/other.zdl", orders.replace("createOrder(", "makeOrder("))
+        val zfl = writeTestFile("nav/list/skip/checkout.zfl", text)
+        val server = server().opened(zfl, text)
+
+        val target = server.definitionReading(zfl, at(text, "do createOrder", "createOrder")).single()
+
+        assertEquals(zdl, target.uri)
+        assertEquals(lineOf(orders, "createOrder("), target.range!!.start.line)
+        assertEquals(null, server.diagnosticsWithLinks(zfl), "one location resolves: no warning")
+    }
+
+    @Test
+    fun whenSeveralExistTheFirstWins() = runTest {
+        val text = listed("orders/orders.zdl", "orders/other.zdl")
+        val first = writeTestFile("nav/list/first/orders/orders.zdl", orders)
+        writeTestFile("nav/list/first/orders/other.zdl", orders)
+        val zfl = writeTestFile("nav/list/first/checkout.zfl", text)
+
+        val target = server().opened(zfl, text).definitionReading(zfl, at(text, "when OrderCreated", "OrderCreated")).single()
+
+        assertEquals(first, target.uri)
+    }
+
+    @Test
+    fun aStringOfTheListOpensItsLocationEvenWhenItIsNotTheWinner() = runTest {
+        val text = listed("orders/orders.zdl", "orders/other.zdl")
+        writeTestFile("nav/list/click/orders/orders.zdl", orders)
+        val other = writeTestFile("nav/list/click/orders/other.zdl", orders)
+        val zfl = writeTestFile("nav/list/click/checkout.zfl", text)
+        val server = server().opened(zfl, text)
+
+        val target = server.definitionReading(zfl, at(text, "\"orders/other.zdl\"", "orders/other.zdl")).single()
+
+        assertEquals(other, target.uri)
+        assertEquals(Position(0, 0), target.range!!.start)
+    }
+
+    @Test
+    fun anUnreachableRemoteLocationIsSkipped() = runTest {
+        val text = listed("https://example.com/orders/orders.zdl", "orders/orders.zdl")
+        val zdl = writeTestFile("nav/list/remote/orders/orders.zdl", orders)
+        val zfl = writeTestFile("nav/list/remote/checkout.zfl", text)
+        val server = server().opened(zfl, text)
+
+        val target = server.definitionReading(zfl, at(text, "do createOrder", "createOrder")).single()
+
+        assertEquals(zdl, target.uri)
+        assertEquals(null, server.diagnosticsWithLinks(zfl))
+    }
+
+    @Test
+    fun whenNoLocationResolvesTheWarningListsAllAndNavigationReturnsNothing() = runTest {
+        val text = listed("orders/nowhere.zdl", "https://example.com/orders/orders.zdl")
+        val zfl = writeTestFile("nav/list/none/checkout.zfl", text)
+        val server = server().opened(zfl, text)
+
+        val warning = server.diagnosticsWithLinks(zfl)!!.single { it.code == "zfl.zdl-not-found" }
+        assertEquals("ZDL of system Orders not found: orders/nowhere.zdl, https://example.com/orders/orders.zdl", warning.message)
+        val line = text.lines()[warning.range.start.line]
+        assertEquals(warning.range.start.line, warning.range.end.line)
+        assertEquals(
+            "orders/nowhere.zdl\", \"https://example.com/orders/orders.zdl",
+            line.substring(warning.range.start.character, warning.range.end.character),
+        )
+
+        val target = server.definitionReading(zfl, at(text, "do createOrder", "createOrder")).single()
+        assertEquals(zfl, target.uri, "no ZDL: the flow's own declaration")
+        assertEquals(lineOf(text, "commands: createOrder"), target.range!!.start.line)
+    }
+
+    @Test
+    fun theHierarchyUsesTheWinningZdl() = runTest {
+        val text = listed("orders/nowhere.zdl", "orders/orders.zdl")
+        val zdl = writeTestFile("nav/list/hierarchy/orders/orders.zdl", orders)
+        val zfl = writeTestFile("nav/list/hierarchy/checkout.zfl", text)
+        val server = server().opened(zfl, text)
+
+        fun flatten(nodes: List<io.zenwave360.lsp.core.contracts.HierarchyNode>): List<io.zenwave360.lsp.core.contracts.HierarchyNode> =
+            nodes.flatMap { listOf(it) + flatten(it.children) }
+        val nodes = flatten(server.conceptualHierarchy(zfl))
+
+        assertTrue(nodes.any { it.source.uri == zdl }, "the service is shown where the winning ZDL declares it")
+    }
 }

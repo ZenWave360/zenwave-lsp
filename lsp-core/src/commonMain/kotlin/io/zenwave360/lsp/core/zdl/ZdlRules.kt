@@ -39,7 +39,7 @@ internal class ZdlRules(private val uri: String, private val text: String) {
         return null
     }
 
-    private fun declared(name: String): List<RuleDeclaration> = declarations.filter { it.name == name }
+    private fun declared(name: String): List<RuleDeclaration> = declarations.filter { it.matches(name) }
 
     private fun targets(position: Position): Triple<Range, String, List<RuleDeclaration>>? {
         val (range, declaration) = siteAt(position) ?: return null

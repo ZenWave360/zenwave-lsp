@@ -4,6 +4,7 @@ import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.SourceLocation
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.zdl.resolveRelativeUri
@@ -275,12 +276,29 @@ internal fun locateZflContext(
     )
 }
 
-internal fun declaredZdlUris(uri: String, model: Map<String, Any?>): Map<String, String> =
+/** The locations a system's `@zdl` lists, resolved against [uri], in the order written (NAV-R9). */
+internal fun declaredZdlLocations(uri: String, model: Map<String, Any?>): Map<String, List<String>> =
     model.mapAt("systems").mapNotNull { (systemName, rawSystem) ->
-        val options = rawSystem.asZflMap().mapAt("options")
-        val zdl = options["zdl"].asZflString() ?: rawSystem.asZflMap()["zdl"].asZflString()
-        zdl?.let { systemName to resolveZdlUri(uri, it) }
+        val system = rawSystem.asZflMap()
+        val declared = system.mapAt("options")["zdl"] ?: system["zdl"]
+        val references = when (declared) {
+            is String -> listOf(declared)
+            is List<*> -> declared.filterIsInstance<String>()
+            else -> emptyList()
+        }
+        references.takeIf { it.isNotEmpty() }?.let { systemName to it.map { reference -> resolveZdlUri(uri, reference) }.distinct() }
     }.toMap()
+
+/**
+ * The winning ZDL of each system (NAV-R9): the first location of its `@zdl` among [related], and with none there, the
+ * first location written, which is the one a missing-document diagnostic or an index entry names.
+ */
+internal fun declaredZdlUris(uri: String, model: Map<String, Any?>, related: RelatedDocuments = RelatedDocuments.NONE): Map<String, String> =
+    declaredZdlUris(uri, model) { related.get(it) != null }
+
+/** The same winner, where [exists] says which locations are there. */
+internal fun declaredZdlUris(uri: String, model: Map<String, Any?>, exists: (String) -> Boolean): Map<String, String> =
+    declaredZdlLocations(uri, model).mapValues { (_, locations) -> locations.firstOrNull(exists) ?: locations.first() }
 
 /** `file:` documents keep their established resolution; other schemes (`http:`, `vscode-vfs:`) resolve generically. */
 internal fun resolveZdlUri(uri: String, reference: String): String =

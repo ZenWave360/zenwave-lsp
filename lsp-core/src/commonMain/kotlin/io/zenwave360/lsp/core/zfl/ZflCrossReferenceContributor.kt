@@ -1,11 +1,12 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.KnownDocuments
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 internal class ZflCrossReferenceContributor {
-    fun build(uri: String, model: Map<String, Any?>): List<CrossReferenceContribution> {
+    fun build(uri: String, model: Map<String, Any?>, known: KnownDocuments = KnownDocuments.NONE): List<CrossReferenceContribution> {
         val locations = model.locationTable()
-        val zdlUris = declaredZdlUris(uri, model)
+        val zdlUris = declaredZdlUris(uri, model) { known.isKnown(it) }
 
         val declaresDomain = zdlUris.map { (systemName, targetUri) ->
             CrossReferenceContribution(

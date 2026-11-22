@@ -282,6 +282,137 @@ class BackgroundIndexTest {
         assertEquals(1, server.indexStatus().files)
     }
 
+    /** NAV-R9: the index follows the first listed `@zdl` location that is known, and switches when one appears or goes. */
+    @Test
+    fun aListedZdlIsIndexedAgainstTheFirstKnownLocation() = runTest {
+        val missing = "$FOLDER/orders/missing.zdl"
+        val listed = CHECKOUT_FLOW_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(\"orders/missing.zdl\", \"orders/model.zdl\")")
+        val disk = FakeDisk(mapOf(ZDL to ORDERS_MODEL_ZDL, FLOW to listed))
+        val server = server(disk)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        fun usesOf(zdl: String) = server.reverseReferences(zdl, "$zdl#services.OrderService.methods.createOrder").map { it.uri }
+
+        assertEquals(listOf(FLOW), usesOf(ZDL), "the second location exists, the first does not")
+        assertEquals(emptyList(), usesOf(missing))
+
+        disk.texts[missing] = ORDERS_MODEL_ZDL
+        server.workspaceFilesChanged(listOf(WatchedFileChange(missing, WatchedFileChangeKind.CREATED)))
+        settle(server)
+        assertEquals(listOf(FLOW), usesOf(missing), "creating the first location makes it the winner")
+        assertEquals(emptyList(), usesOf(ZDL))
+
+        disk.remove(missing)
+        server.workspaceFilesChanged(listOf(WatchedFileChange(missing, WatchedFileChangeKind.DELETED)))
+        settle(server)
+        assertEquals(listOf(FLOW), usesOf(ZDL), "deleting it switches back")
+        assertEquals(emptyList(), usesOf(missing))
+    }
+
+    @Test
+    fun aListedZdlOfAnOpenFlowFollowsTheOpenDocuments() = runTest {
+        val missing = "$FOLDER/orders/missing.zdl"
+        val listed = CHECKOUT_FLOW_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(\"orders/missing.zdl\", \"orders/model.zdl\")")
+        val server = server(FakeDisk())
+        server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), listed))
+        server.open(DocumentSnapshot(DocumentRef(ZDL, "zdl", 1), ORDERS_MODEL_ZDL))
+        fun usesOf(zdl: String) = server.reverseReferences(zdl, "$zdl#services.OrderService.methods.createOrder").map { it.uri }
+
+        assertEquals(listOf(FLOW), usesOf(ZDL))
+
+        server.open(DocumentSnapshot(DocumentRef(missing, "zdl", 1), ORDERS_MODEL_ZDL))
+        assertEquals(listOf(FLOW), usesOf(missing))
+        assertEquals(emptyList(), usesOf(ZDL))
+
+        server.close(missing)
+        runCurrent() // the closed file is read again and is not on disk
+        assertEquals(listOf(FLOW), usesOf(ZDL))
+        assertEquals(emptyList(), usesOf(missing))
+    }
+
+    @Test
+    fun aFlowOpenBeforeTheScanFindsTheWinnerWhenTheScanEnds() = runTest {
+        val missing = "$FOLDER/orders/missing.zdl"
+        val listed = CHECKOUT_FLOW_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(\"orders/missing.zdl\", \"orders/model.zdl\")")
+        val server = server(FakeDisk(mapOf(ZDL to ORDERS_MODEL_ZDL, missing to ORDERS_MODEL_ZDL)))
+        server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), listed))
+        fun usesOf(zdl: String) = server.reverseReferences(zdl, "$zdl#services.OrderService.methods.createOrder").map { it.uri }
+        assertEquals(listOf(FLOW), usesOf(missing), "nothing is known yet: the first location stands")
+
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        assertEquals(listOf(FLOW), usesOf(missing))
+
+        val onlySecond = server(FakeDisk(mapOf(ZDL to ORDERS_MODEL_ZDL)))
+        onlySecond.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), listed))
+        assertEquals(listOf(FLOW), onlySecond.reverseReferences(missing, "$missing#services.OrderService.methods.createOrder").map { it.uri })
+        onlySecond.startBackgroundIndex(listOf(FOLDER))
+        settle(onlySecond)
+        assertEquals(listOf(FLOW), onlySecond.reverseReferences(ZDL, "$ZDL#services.OrderService.methods.createOrder").map { it.uri })
+        assertEquals(emptyList(), onlySecond.reverseReferences(missing, "$missing#services.OrderService.methods.createOrder").map { it.uri })
+    }
+
+    private fun listing(vararg locations: String) =
+        CHECKOUT_FLOW_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(${locations.joinToString(", ") { "\"$it\"" }})")
+
+    @Test
+    fun aDeletedFlowThatListsItselfIsNotIndexedAgain() = runTest {
+        val disk = FakeDisk(mapOf(FLOW to listing("checkout.zfl")))
+        val server = server(disk)
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        assertEquals(1, server.indexStatus().files)
+
+        disk.remove(FLOW)
+        server.workspaceFilesChanged(listOf(WatchedFileChange(FLOW, WatchedFileChangeKind.DELETED)))
+        runCurrent()
+        val reads = disk.reads
+        runCurrent()
+
+        assertEquals(reads, disk.reads, "nothing reads the deleted file again")
+        assertEquals(0, server.indexStatus().files)
+        assertEquals(IndexState.READY, server.indexStatus().state)
+    }
+
+    @Test
+    fun aClosedFileRejectedBecauseItWasOpenedKeepsTheOpenDocumentsLinks() = runTest {
+        val alt = "$FOLDER/orders/alt.zdl"
+        val disk = FakeDisk(mapOf(ZDL to ORDERS_MODEL_ZDL, FLOW to listing("orders/missing.zdl", "orders/model.zdl")))
+        val server = server(disk)
+        // The editor opens the flow, with other links, while the server is reading it from disk.
+        disk.onRead = { uri ->
+            if (uri == FLOW) server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), listing("orders/alt.zdl", "orders/model.zdl")))
+        }
+        server.startBackgroundIndex(listOf(FOLDER))
+        settle(server)
+        fun usesOf(zdl: String) = server.reverseReferences(zdl, "$zdl#services.OrderService.methods.createOrder").map { it.uri }
+        assertEquals(listOf(FLOW), usesOf(ZDL))
+
+        server.open(DocumentSnapshot(DocumentRef(alt, "zdl", 1), ORDERS_MODEL_ZDL))
+
+        assertEquals(listOf(FLOW), usesOf(alt), "the open flow lists alt.zdl: it follows it")
+        assertEquals(emptyList(), usesOf(ZDL))
+    }
+
+    @Test
+    fun aClosedFlowIsContributedAgainWhateverTheWorkspaceFolders() = runTest {
+        val missing = "$FOLDER/orders/missing.zdl"
+        val disk = FakeDisk(mapOf(FLOW to listing("orders/missing.zdl", "orders/model.zdl")))
+        val server = server(disk) // no background index: the watcher would admit nothing
+        server.open(DocumentSnapshot(DocumentRef(ZDL, "zdl", 1), ORDERS_MODEL_ZDL))
+        server.open(DocumentSnapshot(DocumentRef(FLOW, "zfl", 1), disk.texts.getValue(FLOW)))
+        server.close(FLOW)
+        runCurrent()
+        fun usesOf(zdl: String) = server.reverseReferences(zdl, "$zdl#services.OrderService.methods.createOrder").map { it.uri }
+        assertEquals(listOf(FLOW), usesOf(ZDL))
+
+        server.open(DocumentSnapshot(DocumentRef(missing, "zdl", 1), ORDERS_MODEL_ZDL))
+        runCurrent()
+
+        assertEquals(listOf(FLOW), usesOf(missing))
+        assertEquals(emptyList(), usesOf(ZDL))
+    }
+
     @Test
     fun aFileCreatedOrChangedOnDiskIsIndexedAgain() = runTest {
         val disk = workspace()
