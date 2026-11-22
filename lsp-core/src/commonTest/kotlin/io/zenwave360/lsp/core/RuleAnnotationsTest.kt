@@ -137,4 +137,29 @@ class RuleAnnotationsTest {
             assertEquals(listOf("noBookingWithoutSeats", "plain", "noAnnotation"), labels)
         }
     }
+
+    @Test
+    fun aCommentInsideAnAnnotationIsNotTheJavadocAndStringsKeepTheirSpaces() {
+        val text = """
+            rules (O) {
+              @rule(note: /** internal */ "a   b",  x: 1) actual "the rule"
+            }
+            entity O { name String }
+        """.trimIndent()
+        val markdown = assertNotNull(server(zdlUri, text).hover(zdlUri, text.at("actual"))).markdown
+        assertTrue("internal" !in markdown, markdown)
+        assertTrue("`@rule(note: \"a   b\", x: 1)`" in markdown, markdown)
+    }
+
+    @Test
+    fun outlineRangeStartsAtTheJavadocWhileDefinitionStaysOnTheName() {
+        val text = zdl()
+        val server = server(zdlUri, text)
+        val rule = server.hierarchy(zdlUri).single { it.label == "rules" }.children.first()
+        assertEquals(text.at("/** the booking", offsetInto = 0), rule.source.range.start)
+        val plain = server.hierarchy(zdlUri).single { it.label == "rules" }.children[1]
+        assertEquals(text.at("@rule(severity", offsetInto = 0), plain.source.range.start)
+        val definition = server.definition(zdlUri, text.at("noBookingWithoutSeats", occurrence = 1))
+        assertEquals(text.at("noBookingWithoutSeats", offsetInto = 0), definition.first().range!!.start)
+    }
 }

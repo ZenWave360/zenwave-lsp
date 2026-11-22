@@ -206,7 +206,7 @@ internal data class RuleDeclaration(
     val aggregate: String?,
     val value: String?,
     val nameRange: Range,
-    /** The whole entry, from the name to the end of its value. */
+    /** The whole entry, from its javadoc or first annotation (else the name) to the end of its value. */
     val range: Range,
     /** The annotations written before the name, as written: `@invariant`, `@rule(severity: high)`. */
     val annotations: List<String> = emptyList(),
@@ -319,7 +319,7 @@ private fun readBlock(text: String, docs: List<RuleToken>, tokens: List<RuleToke
         val annotations = mutableListOf<String>()
         while (j < tokens.size && isAnnotationStart(tokens, j)) {
             val end = annotationEnd(tokens, j)
-            annotations += text.substring(tokens[j].start, tokens[end - 1].end).replace(Regex("""\s+"""), " ")
+            annotations += annotationText(tokens, j, end)
             j = end
         }
         if (j >= tokens.size || tokens[j].text == "}") break
@@ -329,7 +329,10 @@ private fun readBlock(text: String, docs: List<RuleToken>, tokens: List<RuleToke
             continue
         }
         val previousEnd = tokens.getOrNull(entryStart - 1)?.end ?: open.end
-        val javadoc = docs.lastOrNull { it.start >= previousEnd && it.end <= name.start }?.let { cleanJavadoc(it.text) }
+        // Only a javadoc before the declaration's first token counts, not a comment inside an annotation's value.
+        val doc = docs.lastOrNull { it.start >= previousEnd && it.end <= tokens[entryStart].start }
+        val javadoc = doc?.let { cleanJavadoc(it.text) }
+        val entryFrom = doc?.start ?: tokens[entryStart].start
         val value = tokens.getOrNull(j + 1)?.takeIf { it.kind == TokenKind.STRING || it.kind == TokenKind.NUMBER || it.kind == TokenKind.IDENT }
         val last = value ?: name
         rules += RuleDeclaration(
@@ -337,7 +340,7 @@ private fun readBlock(text: String, docs: List<RuleToken>, tokens: List<RuleToke
             aggregate = aggregate,
             value = value?.let { if (it.kind == TokenKind.STRING) it.unquoted().trimIndent().trim() else it.text },
             nameRange = index.range(name.start, name.end),
-            range = index.range(name.start, last.end),
+            range = index.range(entryFrom, last.end),
             annotations = annotations,
             javadoc = javadoc,
         )
@@ -368,6 +371,14 @@ private fun annotationEnd(tokens: List<RuleToken>, i: Int): Int {
         j++
     }
     return j
+}
+
+/** The annotation at tokens [from] until [end], as written: whitespace between tokens is one space, string literals are untouched. */
+private fun annotationText(tokens: List<RuleToken>, from: Int, end: Int): String = buildString {
+    for (k in from until end) {
+        if (k > from && tokens[k].start > tokens[k - 1].end) append(' ')
+        append(tokens[k].text)
+    }
 }
 
 private fun cleanJavadoc(comment: String): String? =
