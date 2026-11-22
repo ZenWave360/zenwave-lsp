@@ -404,6 +404,33 @@ class ZenwaveJsLanguageServerTest {
         }
     }
 
+    /** NAV-R22, ZFL-R11: hover on an annotated rule shows its annotations and javadoc through the connection. */
+    @Test
+    fun hoverOnAnAnnotatedRuleShowsAnnotationsAndJavadoc() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = """
+            rules (Order) {
+                /** Seats first */
+                @invariant @rule(severity: high)
+                noBookingWithoutSeats "no booking without seats"
+            }
+            entity Order { name String }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("noBookingWithoutSeats") }
+
+        val hover = recording.call(
+            "onHover",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        )
+
+        assertNotNull(hover)
+        val value = hover.contents.value as String
+        assertTrue(value.contains("`@invariant` `@rule(severity: high)`"), value)
+        assertTrue(value.contains("Seats first") && value.contains("no booking without seats"), value)
+    }
+
     /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL through the connection's definition handler. */
     @Test
     fun definitionFromAZflReachesTheZdlItNames(): Promise<Unit> {

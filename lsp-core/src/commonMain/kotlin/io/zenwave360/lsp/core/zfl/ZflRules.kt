@@ -28,7 +28,7 @@ internal class ZflRules(private val uri: String, private val text: String) {
     private val tokens = tokenize(text)
     private val index = LineIndex(text)
     private val references = ruleReferences(tokens, index, setOf("rules"))
-    private val flows: List<FlowRules> = zflFlowRules(tokens, index, text.length)
+    private val flows: List<FlowRules> = zflFlowRules(text, tokens, index, text.length)
 
     private fun rulesOf(flow: FlowRules): List<RuleDeclaration> = flow.blocks.flatMap { it.rules }
 
