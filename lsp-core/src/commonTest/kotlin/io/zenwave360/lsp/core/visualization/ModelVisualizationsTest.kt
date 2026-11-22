@@ -543,6 +543,7 @@ class ModelVisualizationsTest {
                 "zenwave/symbolAt",
                 "zenwave/statResource",
                 "zenwave/readResource",
+                "zenwave/indexStatus",
             ),
             ZenwaveCustomRequests.ALL,
         )

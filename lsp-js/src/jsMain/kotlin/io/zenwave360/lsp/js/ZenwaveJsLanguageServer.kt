@@ -5,7 +5,10 @@ import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
+import io.zenwave360.lsp.core.index.IndexStatusJson
 import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
+import io.zenwave360.lsp.core.platform.WatchedFileChange
+import io.zenwave360.lsp.core.platform.WatchedFileChangeKind
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
 import io.zenwave360.lsp.core.spec.asyncapi.AsyncApiLanguageModule
 import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
@@ -27,6 +30,9 @@ import kotlin.js.Promise
 import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
 import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
 import io.zenwave360.lsp.core.zfl.ZflLanguageModule
+
+/** The files the reference index follows on disk; the server drops what its own rules skip (dot-directories, node_modules, ...). */
+private const val WATCHED_FILES = "**/*.{zdl,zfl,zw,avsc,yml,yaml,json}"
 
 /** The language modules the JS server serves; the same set as lsp-jvm's `defaultCoreLanguageServer()`. */
 fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
@@ -73,6 +79,7 @@ class ZenwaveJsLanguageServer(
     private val documentTexts = mutableMapOf<String, String>()
     private val customRequests = linkedMapOf<String, (dynamic) -> Any?>()
     private var shutdownRequested = false
+    private var watchesFilesDynamically = false
 
     var initializationOptions: ZenwaveInitializationOptions? = null
         private set
@@ -181,6 +188,9 @@ class ZenwaveJsLanguageServer(
                 JSON.parse<dynamic>(ResourceJson.content(server.readResource(uri)))
             }
         }
+        registerCustomRequest(ZenwaveCustomRequests.INDEX_STATUS) {
+            JSON.parse<dynamic>(IndexStatusJson.status(server.indexStatus()))
+        }
     }
 
     private fun resourceUri(params: dynamic): String =
@@ -251,6 +261,13 @@ class ZenwaveJsLanguageServer(
         customRequests.forEach { (method, handler) ->
             connection.onRequest(method) { params: dynamic -> handler(params) }
         }
+        // The fake connections of some tests do not know these two.
+        if (isPresent(connection.onDidChangeWatchedFiles)) {
+            connection.onDidChangeWatchedFiles { params: dynamic -> didChangeWatchedFiles(params) }
+        }
+        if (isPresent(connection.onInitialized)) {
+            connection.onInitialized { registerFileWatchers() }
+        }
         connection.onNotification(ZenwaveCustomNotifications.PLUGIN_CATALOGUE) { params: dynamic ->
             replacePluginCatalogue(if (isPresent(params)) params.catalogue else null)
         }
@@ -275,6 +292,10 @@ class ZenwaveJsLanguageServer(
             server.expectProjectManifest(manifestUri)
             openWorkspace(manifestUri)
         }
+        watchesFilesDynamically = isPresent(params) &&
+            params.capabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration == true
+        // Not awaited: the first pass of the reference index runs behind the requests that follow (NAV-R20).
+        server.startBackgroundIndex(workspaceFolderUris(params))
         if (isPresent(params) && isPresent(params.initializationOptions)) {
             val catalogue = params.initializationOptions.pluginCatalogue
             if (isPresent(catalogue)) replacePluginCatalogue(catalogue)
@@ -282,6 +303,52 @@ class ZenwaveJsLanguageServer(
         return jsonObject(
             "capabilities" to buildCapabilities(),
             "serverInfo" to jsonObject("name" to "zenwave-lsp", "version" to serverVersion),
+        )
+    }
+
+    /** The workspace folders the client sent, or its root when it sent none. */
+    private fun workspaceFolderUris(params: dynamic): List<String> {
+        if (!isPresent(params)) return emptyList()
+        val folders = params.workspaceFolders
+        if (isPresent(folders) && js("Array.isArray(folders)") as Boolean) {
+            val uris = folders.unsafeCast<Array<dynamic>>().mapNotNull { stringOrNull(it.uri) }
+            if (uris.isNotEmpty()) return uris
+        }
+        return listOfNotNull(stringOrNull(params.rootUri))
+    }
+
+    /** NAV-R20: asks the client to tell the server about files created, changed or deleted on disk, when it can. */
+    private fun registerFileWatchers() {
+        if (!watchesFilesDynamically || !isPresent(connection.sendRequest)) return
+        val registration = jsonObject(
+            "id" to "zenwave-watched-files",
+            "method" to "workspace/didChangeWatchedFiles",
+            "registerOptions" to jsonObject(
+                "watchers" to arrayOf(jsonObject("globPattern" to WATCHED_FILES)),
+            ),
+        )
+        val pending: dynamic = connection.sendRequest("client/registerCapability", jsonObject("registrations" to arrayOf(registration)))
+        if (isPresent(pending) && isPresent(pending.catch)) {
+            pending.catch { error: dynamic ->
+                val console = connection.console
+                if (isPresent(console)) console.warn("Could not watch workspace files: ${error?.message ?: error}")
+            }
+        }
+    }
+
+    fun didChangeWatchedFiles(params: dynamic) {
+        val changes = params.changes.unsafeCast<Array<dynamic>>()
+        server.workspaceFilesChanged(
+            changes.map { change ->
+                WatchedFileChange(
+                    change.uri as String,
+                    when ((change.type as Number).toInt()) {
+                        1 -> WatchedFileChangeKind.CREATED
+                        3 -> WatchedFileChangeKind.DELETED
+                        else -> WatchedFileChangeKind.CHANGED
+                    },
+                )
+            },
         )
     }
 

@@ -42,6 +42,8 @@ class ZenwaveLspWireTest {
         private val nextId = AtomicInteger(1)
         private val pending = ConcurrentHashMap<Int, CompletableFuture<JsonObject>>()
         val notifications = LinkedBlockingQueue<JsonObject>()
+        /** The requests the server sent to the client (`client/registerCapability`), which this client answers with null. */
+        val serverRequests = LinkedBlockingQueue<JsonObject>()
         private val reader = Thread(::readLoop, "raw-json-rpc-reader").apply { isDaemon = true; start() }
 
         fun send(message: JsonObject) {
@@ -95,6 +97,7 @@ class ZenwaveLspWireTest {
                     val message = JsonParser.parseString(String(body, Charsets.UTF_8)).asJsonObject
                     when {
                         message.has("id") && message.has("method") -> send(JsonObject().apply {
+                            serverRequests.add(message)
                             addProperty("jsonrpc", "2.0")
                             add("id", message["id"])
                             add("result", com.google.gson.JsonNull.INSTANCE)
@@ -1247,5 +1250,150 @@ class ZenwaveLspWireTest {
             flow Broken {
                 when {{ do
         """.trimIndent()
+    }
+
+    // NAV-R20, NAV-R22: references reach files that are not open, through the wire.
+
+    private val ordersZdl = """
+        entity Order {
+            total Integer
+        }
+
+        service OrderService for (Order) {
+            createOrder(Order) Order
+            cancelOrder(id) Order
+        }
+    """.trimIndent() + "\n"
+
+    private val checkoutZfl = """
+        systems {
+            @zdl("orders/model.zdl")
+            Orders {
+                service OrderService {
+                    commands: createOrder
+                }
+            }
+        }
+
+        flow CheckoutFlow {
+            @actor(Customer)
+            start CheckoutStarted {
+            }
+
+            when CheckoutStarted do createOrder {
+                service Orders.OrderService
+                emits OrderCreated
+            }
+        }
+    """.trimIndent() + "\n"
+
+    private fun workspaceOnDisk(): java.nio.file.Path {
+        val root = java.nio.file.Files.createTempDirectory("zenwave-index")
+        fun write(relative: String, text: String) {
+            val file = root.resolve(relative)
+            java.nio.file.Files.createDirectories(file.parent)
+            java.nio.file.Files.writeString(file, text)
+        }
+        write("orders/model.zdl", ordersZdl)
+        write("checkout.zfl", checkoutZfl)
+        write(".claude/skills/other.zfl", checkoutZfl)
+        write("node_modules/pkg/other.zfl", checkoutZfl)
+        return root
+    }
+
+    private fun uriOf(path: java.nio.file.Path): String = path.toUri().toString().trimEnd('/')
+
+    private fun initializeWith(folder: java.nio.file.Path, dynamicWatching: Boolean = false) {
+        val watching = if (dynamicWatching) """{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}""" else "{}"
+        request(
+            "initialize",
+            """{"processId":null,"rootUri":null,"workspaceFolders":[{"uri":"${uriOf(folder)}","name":"ws"}],"capabilities":$watching}""",
+        )
+        notify("initialized", "{}")
+    }
+
+    private fun awaitIndexReady(): JsonObject {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
+        while (System.nanoTime() < deadline) {
+            val status = request("zenwave/indexStatus", "{}").asJsonObject
+            if (status["state"].asString == "ready") return status
+            Thread.sleep(20)
+        }
+        fail("the index never became ready")
+    }
+
+    private fun referencesOfCreateOrder(zdlUri: String): List<String> {
+        val line = ordersZdl.lines().indexOfFirst { "createOrder" in it }
+        val locations = request(
+            "textDocument/references",
+            """{"textDocument":{"uri":"$zdlUri"},"position":{"line":$line,"character":6},"context":{"includeDeclaration":false}}""",
+        ).asJsonArray
+        return locations.map { it.asJsonObject["uri"].asString }
+    }
+
+    @Test
+    fun referencesIncludeTheUsesInAClosedFileIndexedInTheBackground() {
+        val root = workspaceOnDisk()
+        initializeWith(root)
+        val status = awaitIndexReady()
+        assertEquals(2, status["files"].asInt, "dot-directories and node_modules are skipped: $status")
+        assertFalse(status["partial"].asBoolean)
+        val zdlUri = uriOf(root.resolve("orders/model.zdl"))
+        open(zdlUri, "zdl", ordersZdl)
+
+        val uses = referencesOfCreateOrder(zdlUri)
+
+        assertEquals(listOf(uriOf(root.resolve("checkout.zfl"))), uses)
+        val symbol = request(
+            "zenwave/symbolAt",
+            """{"textDocument":{"uri":"$zdlUri"},"position":{"line":${ordersZdl.lines().indexOfFirst { "createOrder" in it }},"character":6}}""",
+        ).asJsonObject
+        val reverse = request("zenwave/reverseReferences", """{"uri":"$zdlUri","semanticId":${symbol["semanticId"]}}""").asJsonArray
+        assertEquals(uses, reverse.map { it.asJsonObject["uri"].asString })
+    }
+
+    @Test
+    fun closingADocumentKeepsItsUsesAndAFileDeletedOnDiskLosesThem() {
+        val root = workspaceOnDisk()
+        initializeWith(root)
+        awaitIndexReady()
+        val zdlUri = uriOf(root.resolve("orders/model.zdl"))
+        val flowUri = uriOf(root.resolve("checkout.zfl"))
+        open(zdlUri, "zdl", ordersZdl)
+        open(flowUri, "zfl", checkoutZfl)
+        notify("textDocument/didClose", """{"textDocument":{"uri":"$flowUri"}}""")
+        assertEquals(listOf(flowUri), referencesOfCreateOrder(zdlUri), "the closed flow is still found")
+
+        java.nio.file.Files.delete(root.resolve("checkout.zfl"))
+        notify("workspace/didChangeWatchedFiles", """{"changes":[{"uri":"$flowUri","type":3}]}""")
+
+        assertEquals(emptyList(), referencesOfCreateOrder(zdlUri))
+    }
+
+    @Test
+    fun aFileCreatedOnDiskIsIndexedWhenTheClientReportsIt() {
+        val root = workspaceOnDisk()
+        initializeWith(root)
+        awaitIndexReady()
+        val zdlUri = uriOf(root.resolve("orders/model.zdl"))
+        open(zdlUri, "zdl", ordersZdl)
+        java.nio.file.Files.writeString(root.resolve("second.zfl"), checkoutZfl)
+        val secondUri = uriOf(root.resolve("second.zfl"))
+
+        notify("workspace/didChangeWatchedFiles", """{"changes":[{"uri":"$secondUri","type":1}]}""")
+        awaitIndexReady()
+
+        assertEquals(setOf(uriOf(root.resolve("checkout.zfl")), secondUri), referencesOfCreateOrder(zdlUri).toSet())
+    }
+
+    @Test
+    fun theServerAsksTheClientToWatchWorkspaceFilesWhenItCan() {
+        initializeWith(workspaceOnDisk(), dynamicWatching = true)
+
+        val registration = client.serverRequests.poll(30, TimeUnit.SECONDS) ?: fail("no client/registerCapability request")
+
+        assertEquals("client/registerCapability", registration["method"].asString)
+        val registered = registration["params"].asJsonObject["registrations"].asJsonArray[0].asJsonObject
+        assertEquals("workspace/didChangeWatchedFiles", registered["method"].asString)
     }
 }

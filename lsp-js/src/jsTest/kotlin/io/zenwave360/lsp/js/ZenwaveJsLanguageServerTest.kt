@@ -32,6 +32,7 @@ internal class RecordingConnection {
             "onInitialize", "onShutdown", "onDidOpenTextDocument", "onDidChangeTextDocument",
             "onDidCloseTextDocument", "onHover", "onDefinition", "onReferences", "onDocumentSymbol",
             "onDocumentFormatting", "onCompletion", "onCodeAction",
+            "onDidChangeWatchedFiles", "onInitialized",
         ).forEach { name ->
             connection[name] = { handler: dynamic -> handlers[name] = handler }
         }
@@ -57,6 +58,15 @@ private val ORDERS_TEXT = """
     }
 """.trimIndent()
 
+private fun nodeFsOrNull(): dynamic =
+    js("typeof globalThis.process === 'object' && typeof globalThis.process.getBuiltinModule === 'function' ? globalThis.process.getBuiltinModule('node:fs') : null")
+
+private fun nodePathOrNull(): dynamic =
+    js("typeof globalThis.process === 'object' && typeof globalThis.process.getBuiltinModule === 'function' ? globalThis.process.getBuiltinModule('node:path') : null")
+
+private fun pause(millis: Int): Promise<Unit> =
+    Promise { resolve, _ -> js("globalThis.setTimeout(function() { resolve(null) }, millis)") }
+
 private fun textDocumentItem(uri: String, languageId: String, version: Int, text: String): dynamic =
     jsonObject("textDocument" to jsonObject("uri" to uri, "languageId" to languageId, "version" to version, "text" to text))
 
@@ -67,6 +77,90 @@ class ZenwaveJsLanguageServerTest {
         val server = ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test")
         server.listen()
         return server to recording
+    }
+
+    // NAV-R20: a closed file's uses are found by references, through the handlers the connection registers.
+    @Test
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    fun referencesIncludeTheUsesInAClosedFileIndexedInTheBackground(): Promise<Unit> {
+        val fs = nodeFsOrNull()
+        val path = nodePathOrNull()
+        // The browser run has no file system: the worker wire test covers that case.
+        if (fs == null || path == null) return Promise.resolve(Unit)
+        val root = fs.mkdtempSync(path.join(js("globalThis.process.getBuiltinModule('node:os')").tmpdir(), "zenwave-js-index-")) as String
+        fun write(relative: String, text: String): String {
+            val file = path.join(root, relative) as String
+            fs.mkdirSync(path.dirname(file), jsonObject("recursive" to true))
+            fs.writeFileSync(file, text)
+            return "file:///" + file.replace("\\", "/").trimStart('/')
+        }
+        val zdlText = """
+            entity Order {
+                total Integer
+            }
+
+            service OrderService for (Order) {
+                createOrder(Order) Order
+            }
+        """.trimIndent()
+        val flowText = """
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                @actor(Customer)
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+            }
+        """.trimIndent()
+        val zdlUri = write("orders/model.zdl", zdlText)
+        val flowUri = write("checkout.zfl", flowText)
+        write(".claude/skills/other.zfl", flowText)
+        val (_, recording) = listening()
+
+        fun uses(): List<String> =
+            (recording.call(
+                "onReferences",
+                jsonObject("textDocument" to jsonObject("uri" to zdlUri), "position" to jsonObject("line" to 5, "character" to 6)),
+            ) as Array<dynamic>).map { it.uri as String }
+        suspend fun awaitReady() {
+            repeat(500) {
+                val status: dynamic = recording.call("zenwave/indexStatus")
+                if (status.state == "ready") return
+                pause(10).await()
+            }
+            throw AssertionError("the index never became ready")
+        }
+
+        return kotlinx.coroutines.GlobalScope.promise {
+            val rootUri = "file:///" + root.replace("\\", "/").trimStart('/')
+            recording.call("onInitialize", jsonObject("capabilities" to jsonObject(), "workspaceFolders" to arrayOf(jsonObject("uri" to rootUri, "name" to "ws"))))
+            awaitReady()
+            val status: dynamic = recording.call("zenwave/indexStatus")
+            assertEquals(2, status.files as Int)
+            recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdlText))
+            assertEquals(listOf(flowUri), uses())
+
+            // Opening and closing the flow keeps its uses.
+            recording.call("onDidOpenTextDocument", textDocumentItem(flowUri, "zfl", 1, flowText))
+            recording.call("onDidCloseTextDocument", jsonObject("textDocument" to jsonObject("uri" to flowUri)))
+            assertEquals(listOf(flowUri), uses())
+
+            fs.rmSync(path.join(root, "checkout.zfl"))
+            recording.call("onDidChangeWatchedFiles", jsonObject("changes" to arrayOf(jsonObject("uri" to flowUri, "type" to 3))))
+            assertEquals(emptyList(), uses())
+        }
     }
 
     @Test
@@ -200,6 +294,7 @@ class ZenwaveJsLanguageServerTest {
             listOf(
                 "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
                 "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
+                "zenwave/indexStatus",
             ),
             advertised,
         )
