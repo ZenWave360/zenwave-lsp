@@ -182,10 +182,18 @@ class ModelVisualizationsTest {
         val line = tree.sequenceTree!!.single().nodes.single()
         assertEquals(listOf("S"), line.steps)
         assertEquals(listOf("sequence:completed:0", "sequence:completed:1"), line.children.map { it.id })
-        val branch = tree.representations.last()
-        assertEquals(line.id, branch.id)
-        assertEquals("completed", branch.outcome)
-        assertTrue(branch.content.contains("alt ") && branch.content.contains("else "), branch.content)
+        // The tree answer stays the size of the leaves: a line's sequence is asked for when it is chosen.
+        assertEquals(plain.representations.map { it.id }, tree.representations.map { it.id })
+        val branch = server.preview(CHECKOUT_ZFL_URI, "SEPARATE_VARIANTS", representationId = line.id)
+        assertEquals(listOf(line.id), branch.representations.map { it.id })
+        assertEquals(line.id, branch.defaultRepresentationId)
+        assertEquals("completed", branch.representations.single().outcome)
+        assertTrue(branch.representations.single().content.contains("alt ") && branch.representations.single().content.contains("else "))
+        assertEquals("sequence:completed:1", server.preview(CHECKOUT_ZFL_URI, "SEPARATE_VARIANTS", representationId = "sequence:completed:1").representations.single().id)
+        assertEquals(
+            "unknown representation: branch:completed:nope",
+            assertFailsWith<InvalidRequestParamsException> { server.preview(CHECKOUT_ZFL_URI, "SEPARATE_VARIANTS", representationId = "branch:completed:nope") }.message,
+        )
 
         // Alt blocks keep one line per outcome and no tree.
         assertEquals(null, server.preview(CHECKOUT_ZFL_URI, "ALT_BLOCKS", sequenceTree = true).sequenceTree)

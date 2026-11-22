@@ -184,7 +184,8 @@ data class PreviewRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
     val sequenceRenderMode: String? = null,
     val mode: com.google.gson.JsonElement? = null,
-    val sequenceTree: Boolean? = null,
+    val sequenceTree: com.google.gson.JsonElement? = null,
+    val representationId: com.google.gson.JsonElement? = null,
 )
 
 /** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */
@@ -252,6 +253,20 @@ internal fun modeOrNull(mode: com.google.gson.JsonElement?): String? {
     if (mode == null || mode.isJsonNull) return null
     if (!mode.isJsonPrimitive || !mode.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("mode must be a string")
     return mode.asString
+}
+
+/** The `sequenceTree` param as lsp-js reads it: absent or null is false, any other non-boolean is InvalidParams. */
+internal fun sequenceTreeOrFalse(value: com.google.gson.JsonElement?): Boolean {
+    if (value == null || value.isJsonNull) return false
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("sequenceTree must be a boolean")
+    return value.asBoolean
+}
+
+/** The `representationId` param as lsp-js reads it: absent or null is none, any other non-string is InvalidParams. */
+internal fun representationIdOrNull(value: com.google.gson.JsonElement?): String? {
+    if (value == null || value.isJsonNull) return null
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("representationId must be a string")
+    return value.asString
 }
 
 /** The `variant` param as lsp-js reads it: absent or null selects the full flow. */
