@@ -294,7 +294,11 @@ internal fun declaredZdlLocations(uri: String, model: Map<String, Any?>): Map<St
  * first location written, which is the one a missing-document diagnostic or an index entry names.
  */
 internal fun declaredZdlUris(uri: String, model: Map<String, Any?>, related: RelatedDocuments = RelatedDocuments.NONE): Map<String, String> =
-    declaredZdlLocations(uri, model).mapValues { (_, locations) -> locations.firstOrNull { related.get(it) != null } ?: locations.first() }
+    declaredZdlUris(uri, model) { related.get(it) != null }
+
+/** The same winner, where [exists] says which locations are there. */
+internal fun declaredZdlUris(uri: String, model: Map<String, Any?>, exists: (String) -> Boolean): Map<String, String> =
+    declaredZdlLocations(uri, model).mapValues { (_, locations) -> locations.firstOrNull(exists) ?: locations.first() }
 
 /** `file:` documents keep their established resolution; other schemes (`http:`, `vscode-vfs:`) resolve generically. */
 internal fun resolveZdlUri(uri: String, reference: String): String =

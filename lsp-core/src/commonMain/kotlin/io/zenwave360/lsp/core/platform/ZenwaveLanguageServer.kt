@@ -29,6 +29,7 @@ import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
 import io.zenwave360.lsp.core.resource.ZenwaveResources
 import io.zenwave360.lsp.core.resource.platformAbsoluteHttpFetch
 import io.zenwave360.lsp.core.contracts.DocumentRef
+import io.zenwave360.lsp.core.contracts.KnownDocuments
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.contracts.Range
 import kotlinx.coroutines.CancellationException
@@ -117,9 +118,54 @@ class ZenwaveLanguageServer(
             override fun prepare(uri: String, text: String) = prepareClosedDocument(uri, text)
 
             override fun forget(uri: String) = crossReferenceIndex.remove(uri)
+
+            override fun scanned() = refreshAllLinked()
+
+            override fun gone(uri: String) = refreshLinkedTo(uri)
         },
         settings = indexSettings,
     )
+
+    /** NAV-R9: a location a ZFL `@zdl` lists is known when open, or a local file the index has seen on disk. */
+    private val knownDocuments = KnownDocuments { uri -> sessionStore.get(uri) != null || (uri.startsWith("file:") && indexer.knows(uri)) }
+
+    /** The ZFL documents that list a location in their `@zdl`, by location key: they are contributed again when it appears or goes. */
+    private val linkedBy = mutableMapOf<String, MutableSet<String>>()
+
+    /** For each such document, the locations it lists and whether each was known when it was contributed. */
+    private val linkState = mutableMapOf<String, Pair<List<String>, List<Boolean>>>()
+    private val linkLock = PlatformReadWriteLock()
+
+    private fun recordLinks(uri: String, links: List<String>) {
+        val flags = links.map { knownDocuments.isKnown(it) }
+        linkLock.write {
+            linkedBy.values.forEach { it.remove(uri) }
+            linkState.remove(uri)
+            if (links.isNotEmpty()) linkState[uri] = links to flags
+            links.forEach { linkedBy.getOrPut(FileUris.key(it)) { mutableSetOf() } += uri }
+            linkedBy.values.removeAll { it.isEmpty() }
+        }
+    }
+
+    /** The documents that list [uri] are contributed again, if what is known of their locations changed. */
+    private fun refreshLinkedTo(uri: String) =
+        refreshLinks(linkLock.read { linkedBy[FileUris.key(uri)]?.toList().orEmpty() })
+
+    private fun refreshAllLinked() =
+        refreshLinks(linkLock.read { linkState.keys.toList() })
+
+    private fun refreshLinks(documents: List<String>) {
+        for (document in documents) {
+            val (links, flags) = linkLock.read { linkState[document] } ?: continue
+            if (links.map { knownDocuments.isKnown(it) } == flags) continue
+            if (sessionStore.get(document) != null) rebuildCache(document) else if (document.startsWith("file:")) indexer.changedOnDisk(document)
+        }
+    }
+
+    private fun contributionsOf(module: LanguageModule, snapshot: DocumentSnapshot, parsedArtifact: Any?): List<CrossReferenceContribution> {
+        recordLinks(snapshot.ref.uri, module.linkDependencies(snapshot, parsedArtifact))
+        return module.crossReferenceContributions(snapshot, parsedArtifact, knownDocuments)
+    }
 
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
@@ -128,6 +174,7 @@ class ZenwaveLanguageServer(
         sessionStore.open(snapshot)
         rebuildCache(snapshot.ref.uri)
         indexer.opened(snapshot.ref.uri)
+        refreshLinkedTo(snapshot.ref.uri)
     }
 
     fun change(uri: String, text: String, version: Int) {
@@ -146,6 +193,8 @@ class ZenwaveLanguageServer(
         // NAV-R20: a closed local file keeps the references it contributes; the file on disk is read again for
         // whatever the editor discarded. Any other address (zenwave:, a virtual file system) is dropped as before.
         if (uri.startsWith("file:")) indexer.closed(uri) else crossReferenceIndex.remove(uri)
+        // No longer open: a location that is not on disk stops being known.
+        refreshLinkedTo(uri)
     }
 
     /**
@@ -165,6 +214,7 @@ class ZenwaveLanguageServer(
                 WatchedFileChangeKind.DELETED -> indexer.deletedOnDisk(change.uri)
                 else -> indexer.changedOnDisk(change.uri)
             }
+            if (change.kind != WatchedFileChangeKind.CHANGED) refreshLinkedTo(change.uri)
         }
     }
 
@@ -181,7 +231,7 @@ class ZenwaveLanguageServer(
         val entry = buildCacheEntry(snapshot)
         val module = entry.module ?: return null
         entry.processingFailure?.let { throw IllegalStateException(it) }
-        val contributions = module.crossReferenceContributions(snapshot, entry.parsedArtifact)
+        val contributions = contributionsOf(module, snapshot, entry.parsedArtifact)
         return PreparedClosedIndex(contributions.map { it.targetUri }.distinct()) {
             lock.write {
                 // An editor may have opened the file since it was read: its snapshot indexes it.
@@ -967,7 +1017,7 @@ class ZenwaveLanguageServer(
         run {
             lock.read { entry.xrefContributions }?.let { return it }
             lock.write {
-                entry.xrefContributions ?: entry.module?.takeUnless { entry.processingFailure != null }?.crossReferenceContributions(snapshot, entry.parsedArtifact).orEmpty().also {
+                entry.xrefContributions ?: entry.module?.takeUnless { entry.processingFailure != null }?.let { contributionsOf(it, snapshot, entry.parsedArtifact) }.orEmpty().also {
                     entry.xrefContributions = it
                 }
             }

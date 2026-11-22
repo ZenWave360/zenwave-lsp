@@ -329,7 +329,7 @@ class RulesLanguageServerTest {
 
     private val qualifiedZdl = """
         rules (Order) {
-            Order.limit "At most 100 EUR"
+            limit "At most 100 EUR"
             stock-first "Stock first"
         }
         entity Order { name String }
@@ -352,7 +352,7 @@ class RulesLanguageServerTest {
         assertEquals("Order.limit", qualifiedZdl.slice(hover.range!!))
 
         val definition = server.definition(zdlUri, onReference).single()
-        assertEquals(qualifiedZdl.at("Order.limit", offsetInto = 0), definition.range!!.start)
+        assertEquals(qualifiedZdl.at("limit \"At most", offsetInto = 0), definition.range!!.start)
     }
 
     @Test
@@ -371,8 +371,8 @@ class RulesLanguageServerTest {
 
         val dotted = qualifiedZdl.replace("@rules(Order.limit, \"stock-first\")", "@rules(Order.)")
         val afterDot = server().opened(zdlUri, dotted).completion(zdlUri, dotted.at("Order.)", offsetInto = 6))
-        assertEquals(listOf("Order.limit"), afterDot.map { it.label })
-        val edit = afterDot.single().textEdit!!
+        assertEquals(listOf("Order.limit", "Order.stock-first"), afterDot.map { it.label })
+        val edit = afterDot.first().textEdit!!
         assertEquals("Order.", dotted.slice(edit.range))
     }
 
@@ -397,5 +397,52 @@ class RulesLanguageServerTest {
         assertEquals(null, server.hover(zflUri, position), "no such rule to show")
         val completion = server.completion(zflUri, text.at("@rules(Order.limit, audit", offsetInto = 20))
         assertEquals(listOf("audit"), completion.map { it.label })
+    }
+
+    private val aggregateFlow = """
+        flow Refund {
+            rules (Order) {
+                limit "At most 100 EUR"
+            }
+            rules (Payment) {
+                limit "Payment limit"
+            }
+            start RefundRequested {}
+            @rules(Order.limit, "Payment.limit")
+            when RefundRequested do refund
+        }
+    """.trimIndent()
+
+    @Test
+    fun zflQualifiedNameResolvesToTheAggregateRule() {
+        val server = server().opened(zflUri, aggregateFlow)
+        assertTrue(server.diagnostics(zflUri).none { it.message.contains("rule") }, server.diagnostics(zflUri).toString())
+
+        val onOrder = aggregateFlow.at("@rules(Order.limit", offsetInto = 13)
+        val hover = assertNotNull(server.hover(zflUri, onOrder))
+        assertTrue("At most 100 EUR" in hover.markdown && "Payment limit" !in hover.markdown, hover.markdown)
+        val definition = server.definition(zflUri, onOrder).single()
+        assertEquals(aggregateFlow.at("limit \"At most", offsetInto = 0), definition.range!!.start)
+
+        val onPayment = aggregateFlow.at("Payment.limit\")", offsetInto = 3)
+        assertEquals(aggregateFlow.at("limit \"Payment", offsetInto = 0), server.definition(zflUri, onPayment).single().range!!.start)
+    }
+
+    @Test
+    fun zflBareNameStillMatchesRulesOfSeveralAggregates() {
+        val text = aggregateFlow.replace("@rules(Order.limit, \"Payment.limit\")", "@rules(limit)")
+        val definitions = server().opened(zflUri, text).definition(zflUri, text.at("@rules(limit", offsetInto = 9))
+        assertEquals(2, definitions.size, definitions.toString())
+    }
+
+    @Test
+    fun zflCompletionOffersTheQualifiedNameOnceADotIsTyped() {
+        val text = aggregateFlow.replace("@rules(Order.limit, \"Payment.limit\")", "@rules(Pay)")
+        val bare = server().opened(zflUri, text).completion(zflUri, text.at("Pay)", offsetInto = 3))
+        assertTrue(bare.none { '.' in it.label }, bare.toString())
+
+        val dotted = aggregateFlow.replace("@rules(Order.limit, \"Payment.limit\")", "@rules(Pay.)").replace("Pay.", "Payment.")
+        val items = server().opened(zflUri, dotted).completion(zflUri, dotted.at("Payment.)", offsetInto = 8))
+        assertEquals(listOf("Payment.limit"), items.map { it.label })
     }
 }

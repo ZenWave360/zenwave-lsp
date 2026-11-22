@@ -55,6 +55,23 @@ internal sealed class ClosedRead {
     object Failed : ClosedRead()
 }
 
+/**
+ * The files seen on disk, behind a lock of its own: the server asks whether a file is known while it holds the
+ * server's lock, and the indexer takes the server's lock while it holds the indexer's, so asking must not need the latter.
+ */
+private class KnownFiles {
+    private val lock = PlatformReadWriteLock()
+    private val keys = mutableSetOf<String>()
+
+    fun add(key: String) { lock.write { keys += key } }
+
+    fun remove(key: String) { lock.write { keys -= key } }
+
+    operator fun contains(key: String): Boolean = lock.read { key in keys }
+
+    val size: Int get() = lock.read { keys.size }
+}
+
 /** What the indexer asks of the language server. */
 internal interface ClosedFileIndexing {
     fun isOpen(uri: String): Boolean
@@ -69,6 +86,12 @@ internal interface ClosedFileIndexing {
     fun prepare(uri: String, text: String): PreparedClosedIndex?
 
     fun forget(uri: String)
+
+    /** The first pass over the workspace found every file it will find: what [BackgroundReferenceIndexer.knows] says is now complete. */
+    fun scanned() {}
+
+    /** A file that was known is not any more: it was read again and is gone. */
+    fun gone(uri: String) {}
 }
 
 /**
@@ -96,7 +119,7 @@ internal class BackgroundReferenceIndexer(
     private val pending = linkedMapOf<String, String>()
 
     /** Every file the scan or the watcher found, by key. */
-    private val known = mutableSetOf<String>()
+    private val known = KnownFiles()
     private val indexed = mutableSetOf<String>()
 
     /** Why a file is left out, if it is. A file has at most one current reason. */
@@ -135,7 +158,7 @@ internal class BackgroundReferenceIndexer(
                 for (uri in models + others) {
                     lock.write {
                         val key = FileUris.key(uri)
-                        known += key
+                        known.add(key)
                         if (host.isOpen(uri) || key in indexed) return@write
                         if (indexed.size + queue.size < settings.maxFiles) queue[key] = Job(uri) else pending[key] = uri
                     }
@@ -143,6 +166,7 @@ internal class BackgroundReferenceIndexer(
                 }
             } finally {
                 lock.write { scanning = false }
+                host.scanned()
                 launchWorker()
             }
         }
@@ -158,7 +182,7 @@ internal class BackgroundReferenceIndexer(
             pending.remove(key)
             if (uri.startsWith("file:")) {
                 indexed += key
-                known += key
+                known.add(key)
             }
         }
     }
@@ -188,7 +212,7 @@ internal class BackgroundReferenceIndexer(
         val accepted = lock.write {
             if (folders.none { WorkspaceFileRules.accepts(it, uri, extensions) }) return@write false
             deleted.remove(key)
-            known += key
+            known.add(key)
             if (key !in indexed && indexed.size + queue.size >= settings.maxFiles) pending[key] = uri else queue[key] = Job(uri)
             true
         }
@@ -210,6 +234,9 @@ internal class BackgroundReferenceIndexer(
             }
         }
     }
+
+    /** Whether the scan or the watcher has seen the local file [uri] on disk, and it has not been deleted since. */
+    fun knows(uri: String): Boolean = FileUris.key(uri) in known
 
     fun status(): IndexStatus = lock.read {
         val state = when {
@@ -267,8 +294,8 @@ internal class BackgroundReferenceIndexer(
      * A file an editor has opened meanwhile is not touched: its snapshot is the authority.
      */
     private fun leave(key: String, uri: String, why: Skip?) {
-        lock.write {
-            if (key in deleted || host.isOpen(uri)) return@write
+        val removed = lock.write {
+            if (key in deleted || host.isOpen(uri)) return@write false
             indexed.remove(key)
             skips.remove(key)
             if (why != null) skips[key] = why
@@ -277,7 +304,9 @@ internal class BackgroundReferenceIndexer(
                 pending.remove(key)
             }
             host.forget(uri)
+            why == null
         }
+        if (removed) host.gone(uri)
     }
 
     private suspend fun index(key: String, job: Job) {

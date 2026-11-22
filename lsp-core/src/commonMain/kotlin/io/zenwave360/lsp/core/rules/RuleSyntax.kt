@@ -225,6 +225,9 @@ internal data class RuleDeclaration(
     val javadoc: String? = null,
 ) {
     val key: String get() = if (aggregate != null) "$aggregate.$name" else name
+
+    /** A reference names this rule bare (`limit`) or qualified by its aggregate (`Order.limit`), ZFL-R12. */
+    fun matches(reference: String): Boolean = reference == name || reference == key
 }
 
 /** A `rules (Aggregate) { ... }` or deprecated `policies (Aggregate) { ... }` block. */
@@ -423,21 +426,25 @@ internal fun ruleHoverMarkdown(declarations: List<RuleDeclaration>): String =
 /** One completion item per distinct declared name that starts with what was typed. A name with `-` is written quoted. */
 internal fun ruleCompletionItems(declarations: List<RuleDeclaration>, context: RuleCompletionContext, index: LineIndex): List<CompletionItem> =
     declarations
-        .filter { it.name.startsWith(context.prefix, ignoreCase = true) }
-        .distinctBy { it.name }
-        .sortedBy { it.name.lowercase() }
-        .map { rule ->
+        // The qualified form `Order.limit` is offered once a `.` is being typed.
+        .flatMap { rule ->
+            listOfNotNull(rule.name to rule, (rule.key to rule).takeIf { rule.aggregate != null && '.' in context.prefix })
+        }
+        .filter { (label, _) -> label.startsWith(context.prefix, ignoreCase = true) }
+        .distinctBy { (label, _) -> label }
+        .sortedBy { (label, _) -> label.lowercase() }
+        .map { (label, rule) ->
             val quote = context.quote
             val text = when {
-                context.quoted -> "$quote${rule.name}$quote"
-                rule.name.contains('-') -> "\"${rule.name}\""
-                else -> rule.name
+                context.quoted -> "$quote$label$quote"
+                label.contains('-') -> "\"$label\""
+                else -> label
             }
             CompletionItem(
-                label = rule.name,
+                label = label,
                 kind = "rule",
                 detail = listOfNotNull(rule.aggregate?.let { "($it)" }, rule.annotations.joinToString(" ").ifBlank { null }, rule.value?.lineSequence()?.firstOrNull()).joinToString(" ").ifBlank { null },
-                insertText = if (context.quoted) rule.name else text,
+                insertText = if (context.quoted) label else text,
                 documentation = rule.value,
                 textEdit = CompletionTextEdit(index.range(context.replaceStart, context.replaceEnd), text),
             )

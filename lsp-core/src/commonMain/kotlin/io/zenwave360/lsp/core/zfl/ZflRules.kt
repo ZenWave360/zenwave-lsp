@@ -42,7 +42,7 @@ internal class ZflRules(private val uri: String, private val text: String) {
         }
         val reference = references.firstOrNull { it.range.containsInclusive(position) } ?: return null
         val flow = flowAt(reference.range.start)
-        return Site(reference.range, reference.name, flow, flow?.let(::rulesOf).orEmpty().filter { it.name == reference.name })
+        return Site(reference.range, reference.name, flow, flow?.let(::rulesOf).orEmpty().filter { it.matches(reference.name) })
     }
 
     /** Whether the cursor is on a rule's name, declared or written in `@rules(...)`: such a place is answered here, even by nothing. */

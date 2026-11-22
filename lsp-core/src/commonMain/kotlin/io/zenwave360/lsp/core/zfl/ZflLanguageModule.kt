@@ -16,6 +16,7 @@ import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.contracts.KnownDocuments
 import io.zenwave360.lsp.core.contracts.RelatedDocuments
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.parser.ZflParser
@@ -153,6 +154,9 @@ class ZflLanguageModule(
 
     override fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<CrossReferenceContribution> =
         crossReferenceContributor.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap())
+
+    override fun crossReferenceContributions(snapshot: DocumentSnapshot, parsedArtifact: Any?, known: KnownDocuments): List<CrossReferenceContribution> =
+        crossReferenceContributor.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), known)
 
     override fun canHandle(uri: String, text: String?): Boolean =
         uri.endsWith(".zfl")
