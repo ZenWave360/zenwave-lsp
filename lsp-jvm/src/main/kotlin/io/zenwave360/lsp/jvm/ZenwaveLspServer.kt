@@ -6,6 +6,9 @@ import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
 import com.google.gson.JsonElement
 import com.google.gson.JsonParser
+import io.zenwave360.lsp.core.index.IndexStatusJson
+import io.zenwave360.lsp.core.platform.WatchedFileChange
+import io.zenwave360.lsp.core.platform.WatchedFileChangeKind
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
 import io.zenwave360.lsp.core.resource.ResourceJson
 import io.zenwave360.lsp.core.resource.ResourceRequestException
@@ -28,6 +31,12 @@ import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidChangeWatchedFilesParams
+import org.eclipse.lsp4j.DidChangeWatchedFilesRegistrationOptions
+import org.eclipse.lsp4j.FileChangeType
+import org.eclipse.lsp4j.FileSystemWatcher
+import org.eclipse.lsp4j.InitializedParams
+import org.eclipse.lsp4j.Registration
+import org.eclipse.lsp4j.RegistrationParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DidSaveTextDocumentParams
@@ -88,6 +97,15 @@ interface ZenwaveCustomRequests {
 
     @JsonRequest("zenwave/workspaceStatus")
     fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto>
+
+    /**
+     * Whether the background reference index (NAV-R20) is still being built: `{state: "idle" | "indexing" | "ready",
+     * files, candidates, partial}`. `partial` is true while some workspace files are beyond the cap of the first pass
+     * and not indexed yet; those are indexed when opened or referenced.
+     */
+    @JsonRequest("zenwave/indexStatus")
+    fun indexStatus(): CompletableFuture<JsonElement>
+
     /** `{flowGraph, serviceGraph, variants, savedPositions?, lanes?}`, or a -32803 error whose `data.kind` says why the document cannot answer. */
     @JsonRequest("zenwave/eventFlowViews")
     fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement>
@@ -119,6 +137,9 @@ interface ZenwaveCustomRequests {
     fun pluginCatalogue(params: PluginCatalogueParams)
 }
 
+/** The files the reference index follows on disk; the server drops what its own rules skip (dot-directories, node_modules, ...). */
+private const val WATCHED_FILES = "**/*.{zdl,zfl,zw,avsc,yml,yaml,json}"
+
 class ZenwaveLspServer(
     private val server: ZenwaveLanguageServer
 ) : LanguageServer, TextDocumentService, WorkspaceService, LanguageClientAware, ZenwaveCustomRequests {
@@ -127,6 +148,7 @@ class ZenwaveLspServer(
     private val gson = com.google.gson.Gson()
     private var client: LanguageClient? = null
     private var shutdownRequested = false
+    private var watchesFilesDynamically = false
     internal var initializationOptions: ZenwaveInitializationOptions? = null
         private set
 
@@ -149,15 +171,31 @@ class ZenwaveLspServer(
                     client?.logMessage(MessageParams(MessageType.Warning, warning))
                 }
             }
+            watchesFilesDynamically = params.capabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration == true
             pluginCatalogueFrom(params.initializationOptions)?.let(::replacePluginCatalogue)
             initializationOptions?.projectManifestUri?.let { manifestUri ->
                 server.expectProjectManifest(manifestUri)
                 runBlocking { server.openWorkspace(manifestUri) }
             }
+            // Not awaited: the first pass of the reference index runs behind the requests that follow (NAV-R20).
+            server.startBackgroundIndex(workspaceFolderUris(params))
             InitializeResult(buildCapabilities()).apply {
                 serverInfo = ServerInfo("zenwave-lsp", "0.1.0-SNAPSHOT")
             }
         }
+
+    /** The workspace folders the client sent, or its root when it sent none. */
+    private fun workspaceFolderUris(params: InitializeParams): List<String> =
+        params.workspaceFolders?.mapNotNull { it.uri }?.takeIf { it.isNotEmpty() }
+            ?: listOfNotNull(params.rootUri)
+
+    /** NAV-R20: asks the client to tell the server about files created, changed or deleted on disk, when it can. */
+    override fun initialized(params: InitializedParams) {
+        if (!watchesFilesDynamically) return
+        val watchers = listOf(FileSystemWatcher(Either.forLeft(WATCHED_FILES)))
+        val registration = Registration("zenwave-watched-files", "workspace/didChangeWatchedFiles", DidChangeWatchedFilesRegistrationOptions(watchers))
+        client?.registerCapability(RegistrationParams(listOf(registration)))
+    }
 
     override fun pluginCatalogue(params: PluginCatalogueParams) {
         replacePluginCatalogue(params.catalogue)
@@ -437,7 +475,22 @@ class ZenwaveLspServer(
     }
 
     override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
+        server.workspaceFilesChanged(
+            params.changes.map { change ->
+                WatchedFileChange(
+                    change.uri,
+                    when (change.type) {
+                        FileChangeType.Created -> WatchedFileChangeKind.CREATED
+                        FileChangeType.Deleted -> WatchedFileChangeKind.DELETED
+                        else -> WatchedFileChangeKind.CHANGED
+                    },
+                )
+            },
+        )
     }
+
+    override fun indexStatus(): CompletableFuture<JsonElement> =
+        CompletableFuture.completedFuture(JsonParser.parseString(IndexStatusJson.status(server.indexStatus())))
 
     fun diagnostics(uri: String): List<org.eclipse.lsp4j.Diagnostic> =
         DtoMapper.toPublishDiagnostics(uri, server.diagnostics(uri)).diagnostics

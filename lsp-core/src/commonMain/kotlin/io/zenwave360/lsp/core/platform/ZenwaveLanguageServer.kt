@@ -46,6 +46,15 @@ import io.zenwave360.lsp.core.zfl.parseOrganizeMode
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
 import io.zenwave360.lsp.core.xref.toForwardTarget
+import io.zenwave360.lsp.core.index.BackgroundIndexSettings
+import io.zenwave360.lsp.core.index.BackgroundReferenceIndexer
+import io.zenwave360.lsp.core.index.ClosedFileIndexing
+import io.zenwave360.lsp.core.index.IndexStatus
+import io.zenwave360.lsp.core.index.WorkspaceDirectories
+import io.zenwave360.lsp.core.index.platformWorkspaceDirectories
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlin.concurrent.Volatile
 
 class ZenwaveLanguageServer(
@@ -65,6 +74,11 @@ class ZenwaveLanguageServer(
      * this at the client log; a test collects the line by passing its own.
      */
     var log: (String) -> Unit = {},
+    /** Lists local directories for the background reference index (NAV-R20). */
+    workspaceDirectories: WorkspaceDirectories = platformWorkspaceDirectories(),
+    /** Where the background reference index runs. */
+    indexScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    indexSettings: BackgroundIndexSettings = BackgroundIndexSettings(),
 ) {
     private val lock = PlatformReadWriteLock()
     private var resourceSettings = ZenwaveResourceSettings()
@@ -89,12 +103,29 @@ class ZenwaveLanguageServer(
     private val pluginCatalogues = PluginCatalogues()
     private val visualizations = ModelVisualizations(pluginCatalogues)
 
+    private val indexer = BackgroundReferenceIndexer(
+        scope = indexScope,
+        directories = workspaceDirectories,
+        extensions = modules.flatMap { it.capabilities.extensions }.map { it.lowercase() }.toSet(),
+        host = object : ClosedFileIndexing {
+            override fun isOpen(uri: String) = sessionStore.get(uri) != null
+
+            override suspend fun read(uri: String) = readUnopened(uri)
+
+            override fun indexClosed(uri: String, text: String) = indexClosedDocument(uri, text)
+
+            override fun forget(uri: String) = crossReferenceIndex.remove(uri)
+        },
+        settings = indexSettings,
+    )
+
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
 
     fun open(snapshot: DocumentSnapshot) {
         sessionStore.open(snapshot)
         rebuildCache(snapshot.ref.uri)
+        indexer.opened(snapshot.ref.uri)
     }
 
     fun change(uri: String, text: String, version: Int) {
@@ -110,7 +141,56 @@ class ZenwaveLanguageServer(
             parsedCache.remove(uri)
             importRuns.remove(uri)
         }
-        crossReferenceIndex.remove(uri)
+        // NAV-R20: a closed local file keeps the references it contributes; the file on disk is read again for
+        // whatever the editor discarded. Any other address (zenwave:, a virtual file system) is dropped as before.
+        if (uri.startsWith("file:")) indexer.closed(uri) else crossReferenceIndex.remove(uri)
+    }
+
+    /**
+     * Starts indexing the local files under [workspaceFolders] in the background (NAV-R20, NAV-Q11): files of the
+     * supported languages, skipping dot-directories, `node_modules`, `target` and `build`; at most
+     * [BackgroundIndexSettings.maxFiles] in the first pass. Returns at once. Open documents index themselves.
+     */
+    fun startBackgroundIndex(workspaceFolders: List<String>) = indexer.start(workspaceFolders)
+
+    /** Files created, changed (`created` or `changed`) or deleted on disk, from `workspace/didChangeWatchedFiles`. */
+    fun workspaceFilesChanged(changes: List<WatchedFileChange>) {
+        for (change in changes) {
+            when (change.kind) {
+                WatchedFileChangeKind.DELETED -> if (sessionStore.get(change.uri) == null) indexer.deletedOnDisk(change.uri)
+                else -> if (sessionStore.get(change.uri) == null) indexer.changedOnDisk(change.uri)
+            }
+        }
+    }
+
+    /** Whether the reference index is still being built, and whether it is partial (`zenwave/indexStatus`). */
+    fun indexStatus(): IndexStatus = indexer.status()
+
+    /**
+     * Replaces the references [uri] contributes with those of [text], read from disk, without keeping what the parse
+     * produced. Null when no module handles it; else the documents the references point at.
+     */
+    private fun indexClosedDocument(uri: String, text: String): List<String>? {
+        val snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
+        // The write lock keeps requests off the parser; the JVM parses one document at a time, as it does for open ones.
+        return lock.write {
+            val entry = buildCacheEntry(snapshot)
+            val module = entry.module ?: return@write null
+            if (entry.processingFailure != null) return@write null
+            val contributions = try {
+                module.crossReferenceContributions(snapshot, entry.parsedArtifact)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e is Error && e !is NotImplementedError) throw e
+                return@write null
+            }
+            // An editor may have opened the file since it was read: its snapshot indexes it.
+            if (sessionStore.get(uri) != null) return@write emptyList()
+            crossReferenceIndex.remove(uri)
+            if (contributions.isNotEmpty()) crossReferenceIndex.index(contributions)
+            contributions.map { it.targetUri }.distinct()
+        }
     }
 
     fun canHandle(snapshot: DocumentSnapshot): Boolean =
@@ -888,6 +968,11 @@ data class ImportDiagnostics(
     val documents: Map<String, List<Diagnostic>> = emptyMap(),
     val cleared: Set<String> = emptySet(),
 )
+
+enum class WatchedFileChangeKind { CREATED, CHANGED, DELETED }
+
+/** One entry of `workspace/didChangeWatchedFiles`. */
+data class WatchedFileChange(val uri: String, val kind: WatchedFileChangeKind)
 
 enum class WorkspaceState { NONE, BUILDING, READY, STALE, FAILED }
 

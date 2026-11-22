@@ -1,5 +1,10 @@
 package io.zenwave360.lsp.js
 
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.promise
 import kotlin.js.Promise
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -115,6 +120,7 @@ class WorkerWireTest {
                 listOf(
                     "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
                     "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
+                    "zenwave/indexStatus",
                 ),
                 (result.capabilities.experimental.customRequests as Array<String>).toList(),
             )
@@ -288,6 +294,40 @@ class WorkerWireTest {
             assertTrue(!JSON.stringify(document).contains("\"disabledReason\":"), JSON.stringify(document))
             client.request("shutdown", null)
         }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
+    @OptIn(DelicateCoroutinesApi::class)
+    fun withoutAFileSystemTheReferenceIndexIsReadyAndEmpty(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+
+        return GlobalScope.promise {
+            val initialized: dynamic = client.request(
+                "initialize",
+                jsonObject(
+                    "processId" to null,
+                    "rootUri" to null,
+                    "workspaceFolders" to arrayOf(jsonObject("uri" to "file:///workspace", "name" to "ws")),
+                    "capabilities" to jsonObject(),
+                ),
+            ).await()
+            assertTrue("zenwave/indexStatus" in (initialized.capabilities.experimental.customRequests as Array<String>))
+            client.notify("initialized", jsonObject())
+            var status: dynamic = null
+            repeat(200) {
+                if (status == null || status.state != "ready") {
+                    status = client.request("zenwave/indexStatus", jsonObject()).await()
+                    if (status.state != "ready") delay(20)
+                }
+            }
+            assertEquals("ready", status.state as String, JSON.stringify(status))
+            assertEquals(0, status.files as Int, JSON.stringify(status))
+            assertEquals(false, status.partial as Boolean)
+            client.request("shutdown", null).await()
             client.notify("exit", null)
             client.worker.terminate()
             assertEquals(null, client.workerError)

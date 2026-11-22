@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -25,6 +25,7 @@ const EXPECTED_CUSTOM_REQUESTS = [
   'zenwave/symbolAt',
   'zenwave/statResource',
   'zenwave/readResource',
+  'zenwave/indexStatus',
 ];
 
 const checkoutUri = 'file:///workspace/checkout.zfl';
@@ -951,5 +952,128 @@ describe('Plugin catalogue (MP-R16) over Node IPC', { timeout: 120_000 }, () => 
     await start({ pluginCatalogue: 'not a catalogue' });
     assert.ok((await page()).includes(shippedSummary));
     assert.ok(server.logs.some((log) => log.message.includes('plugin catalogue')));
+  });
+});
+
+describe('Reference index (NAV-R20) over Node IPC', { timeout: 120_000 }, () => {
+  const ordersZdl = [
+    'entity Order {',
+    '    total Integer',
+    '}',
+    '',
+    'service OrderService for (Order) {',
+    '    createOrder(Order) Order',
+    '    cancelOrder(id) Order',
+    '}',
+    '',
+  ].join('\n');
+  const checkoutZfl = [
+    'systems {',
+    '    @zdl("orders/model.zdl")',
+    '    Orders {',
+    '        service OrderService {',
+    '            commands: createOrder',
+    '        }',
+    '    }',
+    '}',
+    '',
+    'flow CheckoutFlow {',
+    '    @actor(Customer)',
+    '    start CheckoutStarted {',
+    '    }',
+    '',
+    '    when CheckoutStarted do createOrder {',
+    '        service Orders.OrderService',
+    '        emits OrderCreated',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  let server;
+  let root;
+
+  const write = (relative, text) => {
+    const file = join(root, relative);
+    mkdirSync(join(file, '..'), { recursive: true });
+    writeFileSync(file, text);
+    return pathToFileURL(file).href;
+  };
+
+  async function start(capabilities = {}) {
+    root = mkdtempSync(join(tmpdir(), 'zenwave-index-'));
+    write('orders/model.zdl', ordersZdl);
+    write('checkout.zfl', checkoutZfl);
+    write('.claude/skills/other.zfl', checkoutZfl);
+    write('node_modules/pkg/other.zfl', checkoutZfl);
+    server = startServer(['--node-ipc']);
+    await server.connection.sendRequest('initialize', {
+      processId: process.pid,
+      rootUri: null,
+      workspaceFolders: [{ uri: pathToFileURL(root).href, name: 'ws' }],
+      capabilities,
+    });
+    await server.connection.sendNotification('initialized', {});
+  }
+
+  async function indexReady() {
+    for (let attempt = 0; attempt < 600; attempt++) {
+      const status = await server.connection.sendRequest('zenwave/indexStatus', {});
+      if (status.state === 'ready') return status;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.fail('the index never became ready');
+  }
+
+  async function usesOfCreateOrder(zdlUri) {
+    const locations = await server.connection.sendRequest('textDocument/references', {
+      textDocument: { uri: zdlUri },
+      position: { line: 5, character: 6 },
+      context: { includeDeclaration: false },
+    });
+    return locations.map((location) => location.uri);
+  }
+
+  afterEach(() => {
+    if (server?.child.exitCode === null) server.child.kill();
+  });
+
+  test('references include the uses in a closed file indexed in the background', async () => {
+    await start();
+    const status = await indexReady();
+    assert.equal(status.files, 2, 'dot-directories and node_modules are skipped: ' + JSON.stringify(status));
+    assert.equal(status.partial, false);
+    const zdlUri = pathToFileURL(join(root, 'orders/model.zdl')).href;
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: zdlUri, languageId: 'zdl', version: 1, text: ordersZdl },
+    });
+
+    assert.deepEqual(await usesOfCreateOrder(zdlUri), [pathToFileURL(join(root, 'checkout.zfl')).href]);
+    const symbol = await server.connection.sendRequest('zenwave/symbolAt', { textDocument: { uri: zdlUri }, position: { line: 5, character: 6 } });
+    const reverse = await server.connection.sendRequest('zenwave/reverseReferences', { uri: zdlUri, semanticId: symbol.semanticId });
+    assert.deepEqual(reverse.map((target) => target.uri), [pathToFileURL(join(root, 'checkout.zfl')).href]);
+  });
+
+  test('closing a document keeps its uses; a file deleted or created on disk is followed', async () => {
+    await start();
+    await indexReady();
+    const zdlUri = pathToFileURL(join(root, 'orders/model.zdl')).href;
+    const flowUri = pathToFileURL(join(root, 'checkout.zfl')).href;
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: zdlUri, languageId: 'zdl', version: 1, text: ordersZdl },
+    });
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: flowUri, languageId: 'zfl', version: 1, text: checkoutZfl },
+    });
+    await server.connection.sendNotification('textDocument/didClose', { textDocument: { uri: flowUri } });
+    assert.deepEqual(await usesOfCreateOrder(zdlUri), [flowUri]);
+
+    const secondUri = write('second.zfl', checkoutZfl);
+    await server.connection.sendNotification('workspace/didChangeWatchedFiles', { changes: [{ uri: secondUri, type: 1 }] });
+    await indexReady();
+    assert.deepEqual((await usesOfCreateOrder(zdlUri)).sort(), [flowUri, secondUri].sort());
+
+    rmSync(join(root, 'checkout.zfl'));
+    await server.connection.sendNotification('workspace/didChangeWatchedFiles', { changes: [{ uri: flowUri, type: 3 }] });
+    assert.deepEqual(await usesOfCreateOrder(zdlUri), [secondUri]);
   });
 });

@@ -20,6 +20,7 @@ object ZenwaveCustomRequests {
     const val SYMBOL_AT = "zenwave/symbolAt"
     const val STAT_RESOURCE = "zenwave/statResource"
     const val READ_RESOURCE = "zenwave/readResource"
+    const val INDEX_STATUS = "zenwave/indexStatus"
 
     val ALL: List<String> = listOf(
         HIERARCHY,
@@ -31,6 +32,7 @@ object ZenwaveCustomRequests {
         SYMBOL_AT,
         STAT_RESOURCE,
         READ_RESOURCE,
+        INDEX_STATUS,
     )
 }
 
