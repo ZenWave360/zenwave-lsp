@@ -219,6 +219,20 @@ internal class BackgroundReferenceIndexer(
         if (accepted) launchWorker()
     }
 
+    /**
+     * [uri] is contributed again because what its links resolve to changed. Only a file the index already holds, and
+     * never one that was deleted: this is not the watcher's admission, so the workspace folders do not matter.
+     */
+    fun refresh(uri: String) {
+        val key = FileUris.key(uri)
+        val queued = lock.write {
+            if (key in deleted || key !in indexed || host.isOpen(uri)) return@write false
+            queue[key] = Job(uri)
+            true
+        }
+        if (queued) launchWorker()
+    }
+
     fun deletedOnDisk(uri: String) {
         val key = FileUris.key(uri)
         // Decided under the lock that [closed] takes too, so a close racing with this deletion ends with the file removed.
