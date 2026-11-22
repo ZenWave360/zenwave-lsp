@@ -665,10 +665,10 @@ class ZenwaveLanguageServer(
      * @throws DocumentRequestException when the document is not open, not ZDL or ZFL, or cannot be read
      * @throws io.zenwave360.lsp.core.visualization.InvalidRequestParamsException for an unknown sequence render mode
      */
-    fun preview(uri: String, sequenceRenderMode: String? = null, mode: String? = null): PreviewResult {
+    fun preview(uri: String, sequenceRenderMode: String? = null, mode: String? = null, sequenceTree: Boolean = false): PreviewResult {
         ModelVisualizations.parseSequenceRenderMode(sequenceRenderMode)
         ModelVisualizations.parsePreviewMode(mode)
-        return visualizations.preview(visualizedDocument(uri), sequenceRenderMode, mode)
+        return visualizations.preview(visualizedDocument(uri), sequenceRenderMode, mode, sequenceTree)
     }
 
     /**

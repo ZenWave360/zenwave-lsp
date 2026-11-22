@@ -184,6 +184,7 @@ data class PreviewRequest(
     val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
     val sequenceRenderMode: String? = null,
     val mode: com.google.gson.JsonElement? = null,
+    val sequenceTree: Boolean? = null,
 )
 
 /** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */

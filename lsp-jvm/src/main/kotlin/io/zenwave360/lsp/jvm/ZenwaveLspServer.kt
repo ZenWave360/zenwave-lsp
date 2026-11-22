@@ -434,7 +434,7 @@ class ZenwaveLspServer(
     override fun preview(request: PreviewRequest): CompletableFuture<JsonElement> =
         answer {
             val uri = requireTextDocumentUri(request.textDocument)
-            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, modeOrNull(request.mode))))
+            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, modeOrNull(request.mode), request.sequenceTree == true)))
         }
 
     /**

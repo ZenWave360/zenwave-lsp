@@ -1,5 +1,7 @@
 package io.zenwave360.lsp.core.visualization
 
+import io.zenwave360.language.eventflow.view.FlowVariantGroup
+import io.zenwave360.language.eventflow.view.FlowVariantNode
 import io.zenwave360.language.eventflow.view.FlowViewModel
 import io.zenwave360.language.eventflow.view.ServiceViewModel
 import io.zenwave360.lsp.core.contracts.Diagnostic
@@ -50,10 +52,30 @@ object VisualizationJson {
                     add(buildJsonObject {
                         put("id", variant.id)
                         put("title", variant.title)
+                        if (variant.outcome.isNotEmpty()) put("outcome", variant.outcome)
+                        put("steps", buildJsonArray { variant.steps.forEach { add(JsonPrimitive(it)) } })
                     })
                 }
             })
+            put("variantTree", variantTree(views.variantTree))
         }.toString()
+
+    /** `[{outcome, nodes: [{id, steps, title, count, children}]}]`: a line's `steps` are those it adds to its parent. */
+    private fun variantTree(groups: List<FlowVariantGroup>) = buildJsonArray {
+        fun node(node: FlowVariantNode): JsonObject = buildJsonObject {
+            put("id", node.id)
+            put("steps", buildJsonArray { node.steps.forEach { add(JsonPrimitive(it)) } })
+            put("title", node.title)
+            put("count", node.variantIds.size)
+            put("children", buildJsonArray { node.children.forEach { add(node(it)) } })
+        }
+        groups.forEach { group ->
+            add(buildJsonObject {
+                put("outcome", group.outcome)
+                put("nodes", buildJsonArray { group.nodes.forEach { add(node(it)) } })
+            })
+        }
+    }
 
     fun preview(result: PreviewResult): String =
         buildJsonObject {
@@ -68,12 +90,14 @@ object VisualizationJson {
                                 put("format", representation.format.name)
                                 put("content", representation.content)
                                 representation.group?.let { put("group", it) }
+                                representation.outcome?.let { put("outcome", it) }
                             }
                         )
                     }
                 }
             )
             result.defaultRepresentationId?.let { put("defaultRepresentationId", it) }
+            result.sequenceTree?.let { put("sequenceTree", variantTree(it)) }
         }.toString()
 
     /** The `data` of a [ZenwaveErrorCodes.REQUEST_FAILED] error: `{kind, diagnostics?}`. */
