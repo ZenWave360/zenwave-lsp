@@ -570,6 +570,29 @@ class ZenwaveLspWireTest {
         assertEquals("""{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}""", location["range"].toString())
     }
 
+    /** NAV-R22, ZFL-R11: hover on an annotated rule shows its annotations and javadoc through the wire. */
+    @Test
+    fun hoverOnAnAnnotatedRuleShowsAnnotationsAndJavadoc() {
+        initialize()
+        val uri = "file:///workspace/models/rules.zdl"
+        val text = """
+            rules (Order) {
+                /** Seats first */
+                @invariant @rule(severity: high)
+                noBookingWithoutSeats "no booking without seats"
+            }
+            entity Order { name String }
+        """.trimIndent()
+        open(uri, "zdl", text)
+        val line = text.lines().indexOfFirst { it.contains("noBookingWithoutSeats") }
+
+        val hover = request("textDocument/hover", """{"textDocument":{"uri":"$uri"},"position":{"line":$line,"character":6}}""").asJsonObject
+        val value = hover["contents"].asJsonObject["value"].asString
+
+        assertTrue("`@invariant` `@rule(severity: high)`" in value, value)
+        assertTrue("Seats first" in value && "no booking without seats" in value, value)
+    }
+
     @Test
     fun definitionOfAsyncApiAnnotationLandsOnTheChannelOfTheOpenDocument() {
         initialize()

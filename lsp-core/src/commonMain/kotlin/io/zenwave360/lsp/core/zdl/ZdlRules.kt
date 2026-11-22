@@ -28,7 +28,7 @@ import io.zenwave360.lsp.core.rules.zdlRuleBlocks
 internal class ZdlRules(private val uri: String, private val text: String) {
     private val tokens = tokenize(text)
     private val index = LineIndex(text)
-    private val blocks = zdlRuleBlocks(tokens, index)
+    private val blocks = zdlRuleBlocks(text, tokens, index)
     private val declarations: List<RuleDeclaration> = blocks.flatMap { it.rules }
     private val references = ruleReferences(tokens, index, ANNOTATIONS)
 

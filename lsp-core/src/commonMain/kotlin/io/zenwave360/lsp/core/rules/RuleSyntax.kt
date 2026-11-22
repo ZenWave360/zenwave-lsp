@@ -17,14 +17,20 @@ internal enum class TokenKind { IDENT, STRING, NUMBER, PUNCT }
 internal data class RuleToken(val text: String, val start: Int, val end: Int, val kind: TokenKind)
 
 /** Lexes ZDL or ZFL text well enough to find rule syntax: comments are skipped, a string is one token, `-` belongs to a name. */
-internal fun tokenize(text: String): List<RuleToken> = scan(text).first
+internal fun tokenize(text: String): List<RuleToken> = scan(text).tokens
+
+/** The javadoc comments (`/** ... */`) of [text], as tokens whose text is the whole comment. */
+internal fun javadocs(text: String): List<RuleToken> = scan(text).docs
 
 /** Whether [text] ends inside a comment: after a `//` with no line end yet, or inside an unclosed block comment. */
-internal fun endsInsideComment(text: String): Boolean = scan(text).second
+internal fun endsInsideComment(text: String): Boolean = scan(text).inComment
 
 /** The tokens of [text], and whether the text ends inside a comment. Strings are `"..."`, `'...'` and ZDL `"""..."""`, as in Zdl.g4 and Zfl.g4. */
-private fun scan(text: String): Pair<List<RuleToken>, Boolean> {
+private class Scan(val tokens: List<RuleToken>, val inComment: Boolean, val docs: List<RuleToken>)
+
+private fun scan(text: String): Scan {
     val tokens = mutableListOf<RuleToken>()
+    val docs = mutableListOf<RuleToken>()
     var inComment = false
     var i = 0
     while (i < text.length) {
@@ -38,7 +44,9 @@ private fun scan(text: String): Pair<List<RuleToken>, Boolean> {
             c == '/' && text.startsWith("/*", i) -> {
                 val close = text.indexOf("*/", i + 2)
                 if (close < 0) inComment = true
-                i = if (close < 0) text.length else close + 2
+                val j = if (close < 0) text.length else close + 2
+                if (text.startsWith("/**", i) && close >= 0 && close > i + 1) docs += RuleToken(text.substring(i, j), i, j, TokenKind.STRING)
+                i = j
             }
             c == '"' && text.startsWith("\"\"\"", i) -> {
                 val close = text.indexOf("\"\"\"", i + 3)
@@ -71,7 +79,7 @@ private fun scan(text: String): Pair<List<RuleToken>, Boolean> {
             }
         }
     }
-    return tokens to inComment
+    return Scan(tokens, inComment, docs)
 }
 
 /** The UTF-16 offset in [text] of the [codePoints]th code point; ANTLR counts code points, Kotlin strings and LSP count UTF-16 units. */
@@ -200,6 +208,10 @@ internal data class RuleDeclaration(
     val nameRange: Range,
     /** The whole entry, from the name to the end of its value. */
     val range: Range,
+    /** The annotations written before the name, as written: `@invariant`, `@rule(severity: high)`. */
+    val annotations: List<String> = emptyList(),
+    /** The text of the javadoc written before the rule. */
+    val javadoc: String? = null,
 ) {
     val key: String get() = if (aggregate != null) "$aggregate.$name" else name
 }
@@ -208,8 +220,9 @@ internal data class RuleDeclaration(
 internal data class RuleBlock(val keyword: String, val keywordRange: Range, val aggregate: String?, val range: Range, val rules: List<RuleDeclaration>)
 
 /** The top-level `rules` and `policies` blocks of a ZDL document. */
-internal fun zdlRuleBlocks(tokens: List<RuleToken>, index: LineIndex): List<RuleBlock> {
+internal fun zdlRuleBlocks(text: String, tokens: List<RuleToken>, index: LineIndex): List<RuleBlock> {
     val blocks = mutableListOf<RuleBlock>()
+    val docs = javadocs(text)
     var depth = 0
     var i = 0
     while (i < tokens.size) {
@@ -219,7 +232,7 @@ internal fun zdlRuleBlocks(tokens: List<RuleToken>, index: LineIndex): List<Rule
             token.text == "}" && token.kind == TokenKind.PUNCT -> { depth--; i++ }
             depth == 0 && token.kind == TokenKind.IDENT && (token.text == "rules" || token.text == "policies") &&
                 startsStatement(tokens, i) -> {
-                val block = readBlock(tokens, i, index)
+                val block = readBlock(text, docs, tokens, i, index)
                 if (block == null) {
                     i++
                 } else {
@@ -237,8 +250,9 @@ internal fun zdlRuleBlocks(tokens: List<RuleToken>, index: LineIndex): List<Rule
 internal data class FlowRules(val name: String, val range: Range, val blocks: List<RuleBlock>)
 
 /** The flows of a ZFL document and their `rules` blocks, read from the text so an unfinished document still has them. */
-internal fun zflFlowRules(tokens: List<RuleToken>, index: LineIndex, textLength: Int): List<FlowRules> {
+internal fun zflFlowRules(text: String, tokens: List<RuleToken>, index: LineIndex, textLength: Int): List<FlowRules> {
     val flows = mutableListOf<FlowRules>()
+    val docs = javadocs(text)
     var depth = 0
     var name: String? = null
     var flowStart = 0
@@ -265,7 +279,7 @@ internal fun zflFlowRules(tokens: List<RuleToken>, index: LineIndex, textLength:
                 i += 3
             }
             depth == 1 && name != null && token.kind == TokenKind.IDENT && token.text == "rules" -> {
-                val block = readBlock(tokens, i, index)
+                val block = readBlock(text, docs, tokens, i, index)
                 if (block == null) {
                     i++
                 } else {
@@ -286,7 +300,7 @@ private fun startsStatement(tokens: List<RuleToken>, i: Int): Boolean {
     return previous.text == "}" || previous.kind == TokenKind.STRING
 }
 
-private fun readBlock(tokens: List<RuleToken>, i: Int, index: LineIndex): Pair<RuleBlock, Int>? {
+private fun readBlock(text: String, docs: List<RuleToken>, tokens: List<RuleToken>, i: Int, index: LineIndex): Pair<RuleBlock, Int>? {
     val keyword = tokens[i]
     var j = i + 1
     var aggregate: String? = null
@@ -301,11 +315,21 @@ private fun readBlock(tokens: List<RuleToken>, i: Int, index: LineIndex): Pair<R
     j++
     val rules = mutableListOf<RuleDeclaration>()
     while (j < tokens.size && tokens[j].text != "}") {
+        val entryStart = j
+        val annotations = mutableListOf<String>()
+        while (j < tokens.size && isAnnotationStart(tokens, j)) {
+            val end = annotationEnd(tokens, j)
+            annotations += text.substring(tokens[j].start, tokens[end - 1].end).replace(Regex("""\s+"""), " ")
+            j = end
+        }
+        if (j >= tokens.size || tokens[j].text == "}") break
         val name = tokens[j]
         if (name.kind != TokenKind.IDENT) {
             j++
             continue
         }
+        val previousEnd = tokens.getOrNull(entryStart - 1)?.end ?: open.end
+        val javadoc = docs.lastOrNull { it.start >= previousEnd && it.end <= name.start }?.let { cleanJavadoc(it.text) }
         val value = tokens.getOrNull(j + 1)?.takeIf { it.kind == TokenKind.STRING || it.kind == TokenKind.NUMBER || it.kind == TokenKind.IDENT }
         val last = value ?: name
         rules += RuleDeclaration(
@@ -314,6 +338,8 @@ private fun readBlock(tokens: List<RuleToken>, i: Int, index: LineIndex): Pair<R
             value = value?.let { if (it.kind == TokenKind.STRING) it.unquoted().trimIndent().trim() else it.text },
             nameRange = index.range(name.start, name.end),
             range = index.range(name.start, last.end),
+            annotations = annotations,
+            javadoc = javadoc,
         )
         j += if (value != null) 2 else 1
     }
@@ -321,7 +347,35 @@ private fun readBlock(tokens: List<RuleToken>, i: Int, index: LineIndex): Pair<R
     return RuleBlock(keyword.text, index.range(keyword.start, keyword.end), aggregate, index.range(keyword.start, end), rules) to (j + 1)
 }
 
-/** The text of a rule hover. */
+private fun isAnnotationStart(tokens: List<RuleToken>, i: Int): Boolean {
+    val at = tokens[i]
+    val name = tokens.getOrNull(i + 1) ?: return false
+    return at.text == "@" && at.kind == TokenKind.PUNCT && name.kind == TokenKind.IDENT && name.start == at.end
+}
+
+/** The index after the annotation starting at [i]: `@name`, or `@name( ... )` with nested parentheses; an unclosed one runs to the end. */
+private fun annotationEnd(tokens: List<RuleToken>, i: Int): Int {
+    var j = i + 2
+    val paren = tokens.getOrNull(j)
+    if (paren?.text != "(" || paren.kind != TokenKind.PUNCT) return j
+    var depth = 0
+    while (j < tokens.size) {
+        val token = tokens[j]
+        if (token.kind == TokenKind.PUNCT) {
+            if (token.text == "(") depth++
+            if (token.text == ")" && --depth == 0) return j + 1
+        }
+        j++
+    }
+    return j
+}
+
+private fun cleanJavadoc(comment: String): String? =
+    comment.removePrefix("/**").removeSuffix("*/").lines()
+        .joinToString("\n") { it.trim().removePrefix("*").removePrefix(" ") }
+        .trim().ifBlank { null }
+
+/** The text of a rule hover: annotations and javadoc come before the rule's text. */
 internal fun ruleHoverMarkdown(declarations: List<RuleDeclaration>): String =
     declarations.joinToString("\n\n") { rule ->
         buildList {
@@ -329,6 +383,14 @@ internal fun ruleHoverMarkdown(declarations: List<RuleDeclaration>): String =
             add("")
             add("- kind: `rule`")
             rule.aggregate?.let { add("- aggregate: `$it`") }
+            if (rule.annotations.isNotEmpty()) {
+                add("")
+                add(rule.annotations.joinToString(" ") { "`$it`" })
+            }
+            rule.javadoc?.let {
+                add("")
+                add(it)
+            }
             rule.value?.takeIf { it.isNotBlank() }?.let {
                 add("")
                 add(it)
@@ -352,7 +414,7 @@ internal fun ruleCompletionItems(declarations: List<RuleDeclaration>, context: R
             CompletionItem(
                 label = rule.name,
                 kind = "rule",
-                detail = listOfNotNull(rule.aggregate?.let { "($it)" }, rule.value?.lineSequence()?.firstOrNull()).joinToString(" ").ifBlank { null },
+                detail = listOfNotNull(rule.aggregate?.let { "($it)" }, rule.annotations.joinToString(" ").ifBlank { null }, rule.value?.lineSequence()?.firstOrNull()).joinToString(" ").ifBlank { null },
                 insertText = if (context.quoted) rule.name else text,
                 documentation = rule.value,
                 textEdit = CompletionTextEdit(index.range(context.replaceStart, context.replaceEnd), text),
