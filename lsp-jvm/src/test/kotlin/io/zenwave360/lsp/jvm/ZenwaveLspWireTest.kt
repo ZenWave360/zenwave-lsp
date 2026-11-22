@@ -533,6 +533,56 @@ class ZenwaveLspWireTest {
         assertEquals(1, link["range"].asJsonObject["start"].asJsonObject["line"].asInt, "the line of @zdl")
     }
 
+    /** NAV-R9: a `@zdl` that lists several locations resolves to the first that exists; a click on any string opens it. */
+    @Test
+    fun aListedZdlResolvesToTheFirstLocationThatExistsOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-list")
+        val zdl = dir.resolve("orders").also { java.nio.file.Files.createDirectories(it) }.resolve("model.zdl")
+        java.nio.file.Files.writeString(zdl, "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n")
+        val other = dir.resolve("orders").resolve("other.zdl")
+        java.nio.file.Files.writeString(other, "entity Order {\n    total Integer\n}\n")
+        val text = CHECKOUT_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(\"orders/nowhere.zdl\", \"orders/model.zdl\", \"orders/other.zdl\")")
+        val zflUri = dir.resolve("checkout.zfl").toUri().toString()
+        initialize()
+        open(zflUri, "zfl", text)
+        val lines = text.lines()
+        fun definitionAt(line: Int, character: Int) = request(
+            "textDocument/definition",
+            """{"textDocument":{"uri":"$zflUri"},"position":{"line":$line,"character":$character}}""",
+        ).asJsonArray
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val command = definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2)
+        assertEquals(1, command.size(), "$command")
+        assertEquals(zdl.toUri().toString(), command[0].asJsonObject["uri"].asString)
+        assertEquals(5, command[0].asJsonObject["range"].asJsonObject["start"].asJsonObject["line"].asInt)
+
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        val notWinner = definitionAt(stringLine, lines[stringLine].indexOf("orders/other.zdl") + 3)
+        assertEquals(1, notWinner.size(), "$notWinner")
+        assertEquals(other.toUri().toString(), notWinner[0].asJsonObject["uri"].asString)
+    }
+
+    /** NAV-R9: when no listed location resolves, the warning is at the `@zdl` and names every location tried. */
+    @Test
+    fun aListedZdlThatResolvesNowhereIsOneWarningListingAllOverTheWire() {
+        val dir = java.nio.file.Files.createTempDirectory("zfl-list-missing")
+        val zflUri = dir.resolve("checkout.zfl").toUri().toString()
+        initialize()
+        open(zflUri, "zfl", CHECKOUT_ZFL.replace("@zdl(\"orders/model.zdl\")", "@zdl(\"orders/a.zdl\", \"orders/b.zdl\")"))
+
+        var link: JsonObject? = null
+        while (link == null) {
+            val notification = client.notifications.poll(30, TimeUnit.SECONDS) ?: fail("no link diagnostic for $zflUri")
+            if (notification["method"].asString != "textDocument/publishDiagnostics") continue
+            val published = notification["params"].asJsonObject
+            if (published["uri"].asString != zflUri) continue
+            link = published["diagnostics"].asJsonArray.map { it.asJsonObject }.firstOrNull { it["code"]?.asString == "zfl.zdl-not-found" }
+        }
+        assertEquals("ZDL of system Orders not found: orders/a.zdl, orders/b.zdl", link["message"].asString)
+        assertEquals(1, link["range"].asJsonObject["start"].asJsonObject["line"].asInt, "the line of @zdl")
+    }
+
     @Test
     fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile() {
         initialize()

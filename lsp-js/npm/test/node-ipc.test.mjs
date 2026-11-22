@@ -456,6 +456,39 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     assert.equal((await requestFailure(server, 'zenwave/symbolAt', { textDocument: { uri: checkoutUri } })).code, INVALID_PARAMS);
   });
 
+  test('a listed @zdl resolves to the first location that exists, and warns listing all when none does', async () => {
+    const zflUri = 'file:///workspace/list/checkout.zfl';
+    const zdlUri = 'file:///workspace/list/orders/model.zdl';
+    const zfl = checkoutText.replace('@zdl("orders/model.zdl")', '@zdl("orders/nowhere.zdl", "orders/model.zdl")');
+    const zdl = 'entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n';
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: zflUri, languageId: 'zfl', version: 1, text: zfl },
+    });
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: zdlUri, languageId: 'zdl', version: 1, text: zdl },
+    });
+    const line = zfl.split('\n').findIndex((l) => l.includes('do createOrder'));
+    const result = await within(10, server.connection.sendRequest('textDocument/definition', {
+      textDocument: { uri: zflUri }, position: { line, character: zfl.split('\n')[line].indexOf('createOrder') + 2 },
+    }), 'definition');
+    assert.equal(result.length, 1, JSON.stringify(result));
+    assert.equal(result[0].uri, zdlUri);
+    assert.equal(result[0].range.start.line, 5);
+
+    const missingUri = 'file:///workspace/list-missing/checkout.zfl';
+    await server.connection.sendNotification('textDocument/didOpen', {
+      textDocument: { uri: missingUri, languageId: 'zfl', version: 1, text: checkoutText.replace('@zdl("orders/model.zdl")', '@zdl("orders/a.zdl", "orders/b.zdl")') },
+    });
+    let link;
+    for (let attempt = 0; attempt < 5 && !link; attempt++) {
+      const diagnostics = await within(10, server.diagnosticsFor(missingUri), 'link diagnostics');
+      link = diagnostics.find((d) => d.code === 'zfl.zdl-not-found');
+    }
+    assert.ok(link, 'a link diagnostic');
+    assert.equal(link.message, 'ZDL of system Orders not found: orders/a.zdl, orders/b.zdl');
+    assert.equal(link.range.start.line, 1);
+  });
+
   test('an unregistered request is answered with MethodNotFound', async () => {
     await assert.rejects(
       server.connection.sendRequest('zenwave/doesNotExist', { uri: ordersUri }),

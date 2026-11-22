@@ -34,7 +34,7 @@ internal class ZflHierarchyBuilder(
         related: RelatedDocuments = RelatedDocuments.NONE,
     ): List<HierarchyNode> {
         val locations = model.locationTable()
-        val enriched = enricher.enrich(uri, model)
+        val enriched = enricher.enrich(uri, model, related)
         val viewIds = text?.let(::viewModelIds) ?: ViewModelIds.NONE
         val declarations = enriched.systems.mapNotNull { system ->
             val zdlUri = system.zdlUri ?: return@mapNotNull null

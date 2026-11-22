@@ -613,6 +613,93 @@ class ZenwaveJsLanguageServerTest {
         }
     }
 
+    /** NAV-R9: a listed `@zdl` resolves to the first location that exists, and a click on any string opens it. */
+    @Test
+    fun aListedZdlResolvesToTheFirstLocationThatExists(): Promise<Unit> {
+        val (_, recording) = listening()
+        val zflUri = "file:///workspace/list/checkout.zfl"
+        val zdlUri = "file:///workspace/list/orders/model.zdl"
+        val otherUri = "file:///workspace/list/orders/other.zdl"
+        val zfl = """
+            systems {
+                @zdl("orders/nowhere.zdl", "orders/model.zdl", "orders/other.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                }
+
+                end {
+                    completed: CheckoutStarted
+                }
+            }
+        """.trimIndent()
+        val zdl = "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(otherUri, "zdl", 1, "entity Order {\n    total Integer\n}\n"))
+        val lines = zfl.lines()
+        fun definitionAt(line: Int, character: Int): Promise<dynamic> = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to zflUri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        return definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(5, locations[0].range.start.line)
+            definitionAt(stringLine, lines[stringLine].indexOf("orders/other.zdl") + 3)
+        }.then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(otherUri, locations[0].uri)
+        }
+    }
+
+    /** NAV-R9: when no listed location resolves, one warning at the `@zdl` names them all. */
+    @Test
+    fun aListedZdlThatResolvesNowhereIsOneWarningListingAll(): Promise<Unit> {
+        val (server, recording) = listening()
+        val zflUri = "file:///workspace/list-missing/checkout.zfl"
+        val zfl = """
+            systems {
+                @zdl("orders/a.zdl", "orders/b.zdl")
+                Orders {
+                    service OrderService
+                }
+            }
+
+            flow F {
+                start S {
+                }
+
+                end {
+                    completed: S
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+
+        return server.linksPublishing!!.then {
+            val link = recording.diagnostics.filter { it.uri == zflUri }
+                .flatMap { (it.diagnostics as Array<dynamic>).toList() }.single { it.code == "zfl.zdl-not-found" }
+            assertEquals("ZDL of system Orders not found: orders/a.zdl, orders/b.zdl", link.message)
+            assertEquals(1, link.range.start.line)
+        }
+    }
+
     @Test
     fun answersSymbolAtWithWhatTheReferenceRequestsTake(): Promise<Unit> {
         val (_, recording) = listening()

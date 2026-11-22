@@ -16,7 +16,7 @@ internal enum class TokenKind { IDENT, STRING, NUMBER, PUNCT }
 /** [end] is exclusive. */
 internal data class RuleToken(val text: String, val start: Int, val end: Int, val kind: TokenKind)
 
-/** Lexes ZDL or ZFL text well enough to find rule syntax: comments are skipped, a string is one token, `-` belongs to a name. */
+/** Lexes ZDL or ZFL text well enough to find rule syntax: comments are skipped, a string is one token, `-` and an inner `.` belong to a name. */
 internal fun tokenize(text: String): List<RuleToken> = scan(text).tokens
 
 /** The javadoc comments (`/** ... */`) of [text], as tokens whose text is the whole comment. */
@@ -63,7 +63,7 @@ private fun scan(text: String): Scan {
             }
             c.isLetter() || c == '_' -> {
                 var j = i + 1
-                while (j < text.length && (text[j].isLetterOrDigit() || text[j] == '_' || text[j] == '-')) j++
+                while (j < text.length && (text[j].isLetterOrDigit() || text[j] == '_' || text[j] == '-' || isQualifier(text, j))) j++
                 tokens += RuleToken(text.substring(i, j), i, j, TokenKind.IDENT)
                 i = j
             }
@@ -81,6 +81,10 @@ private fun scan(text: String): Scan {
     }
     return Scan(tokens, inComment, docs)
 }
+
+/** A `.` inside a name, as in the unquoted `Order.limit` (ZFL-R12), when a letter follows it. */
+private fun isQualifier(text: String, at: Int): Boolean =
+    text[at] == '.' && text.getOrNull(at + 1)?.let { it.isLetter() || it == '_' } == true
 
 /** The UTF-16 offset in [text] of the [codePoints]th code point; ANTLR counts code points, Kotlin strings and LSP count UTF-16 units. */
 internal fun codePointsToUtf16(text: String, codePoints: Int): Int {
@@ -193,6 +197,13 @@ internal fun ruleCompletionContext(text: String, offset: Int, annotations: Set<S
         val quote = last.text[0]
         val end = if (text.getOrNull(here) == quote) here + 1 else here
         return RuleCompletionContext(last.text.drop(1), true, last.start, end, quote)
+    }
+    // `Order.` typed so far: the dot is not yet part of the name.
+    if (last.kind == TokenKind.PUNCT && last.text == "." && last.end == here && tokens.size >= 3) {
+        val name = tokens[tokens.size - 2]
+        if (name.kind == TokenKind.IDENT && name.end == last.start && tokens[tokens.size - 3].text in separators) {
+            return RuleCompletionContext(name.text + ".", false, name.start, here)
+        }
     }
     // After `(`, `,` or `[`: a new name starts.
     return if (last.text in separators && last.end <= here) RuleCompletionContext("", false, here, here) else null

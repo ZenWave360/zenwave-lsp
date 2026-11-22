@@ -326,4 +326,76 @@ class RulesLanguageServerTest {
         val diagnostics: List<Diagnostic> = server().opened(zflUri, text).diagnostics(zflUri)
         assertTrue(diagnostics.none { it.message.contains("rule") }, diagnostics.toString())
     }
+
+    private val qualifiedZdl = """
+        rules (Order) {
+            Order.limit "At most 100 EUR"
+            stock-first "Stock first"
+        }
+        entity Order { name String }
+        aggregate OrderAggregate(Order) {
+        }
+        service OrderService for (OrderAggregate) {
+            @rules(Order.limit, "stock-first")
+            placeOrder(Order) Order
+        }
+    """.trimIndent()
+
+    @Test
+    fun zdlUnquotedQualifiedNameHoversResolvesAndHasNoWarning() {
+        val server = server().opened(zdlUri, qualifiedZdl)
+        assertTrue(server.diagnostics(zdlUri).none { it.message.contains("rule") }, server.diagnostics(zdlUri).toString())
+
+        val onReference = qualifiedZdl.at("@rules(Order.limit", offsetInto = 13)
+        val hover = assertNotNull(server.hover(zdlUri, onReference))
+        assertTrue("At most 100 EUR" in hover.markdown, hover.markdown)
+        assertEquals("Order.limit", qualifiedZdl.slice(hover.range!!))
+
+        val definition = server.definition(zdlUri, onReference).single()
+        assertEquals(qualifiedZdl.at("Order.limit", offsetInto = 0), definition.range!!.start)
+    }
+
+    @Test
+    fun zdlUnquotedQualifiedUnknownNameWarnsOnTheWholeName() {
+        val text = qualifiedZdl.replace("@rules(Order.limit,", "@rules(Order.nope,")
+        val warning = server().opened(zdlUri, text).diagnostics(zdlUri).single { it.message.contains("nope") }
+        assertEquals("Order.nope", text.slice(warning.range))
+    }
+
+    @Test
+    fun zdlQualifiedNameCompletionOffersDeclaredNamesWhileTyped() {
+        val typed = qualifiedZdl.replace("@rules(Order.limit, \"stock-first\")", "@rules(Order.li)")
+        val items = server().opened(zdlUri, typed).completion(zdlUri, typed.at("Order.li)", offsetInto = 8))
+        assertEquals(listOf("Order.limit"), items.map { it.label })
+        assertEquals("Order.limit", items.single().insertText)
+
+        val dotted = qualifiedZdl.replace("@rules(Order.limit, \"stock-first\")", "@rules(Order.)")
+        val afterDot = server().opened(zdlUri, dotted).completion(zdlUri, dotted.at("Order.)", offsetInto = 6))
+        assertEquals(listOf("Order.limit"), afterDot.map { it.label })
+        val edit = afterDot.single().textEdit!!
+        assertEquals("Order.", dotted.slice(edit.range))
+    }
+
+    @Test
+    fun zflUnquotedQualifiedNameWarnsOnTheWholeNameAndStaysARuleSite() {
+        val text = """
+            flow Refund {
+                rules {
+                    audit "Audited"
+                }
+                start RefundRequested {}
+                @rules(Order.limit, audit)
+                when RefundRequested do refund
+            }
+        """.trimIndent()
+        val server = server().opened(zflUri, text)
+        val warning = server.diagnostics(zflUri).let { all -> all.singleOrNull { it.message.contains("'Order.limit'") } ?: error(all.toString()) }
+        assertEquals("Order.limit", text.slice(warning.range))
+
+        val position = text.at("@rules(Order.limit", offsetInto = 13)
+        assertTrue(server.definition(zflUri, position).none { it.range == null }, "answers at the name, not the command")
+        assertEquals(null, server.hover(zflUri, position), "no such rule to show")
+        val completion = server.completion(zflUri, text.at("@rules(Order.limit, audit", offsetInto = 20))
+        assertEquals(listOf("audit"), completion.map { it.label })
+    }
 }

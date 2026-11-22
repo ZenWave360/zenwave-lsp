@@ -101,7 +101,7 @@ class ZflLanguageModule(
     }
 
     override fun linkDependencies(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<String> =
-        declaredZdlUris(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.distinct()
+        declaredZdlLocations(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.flatten().distinct()
 
     override fun linkDiagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<Diagnostic> =
         ZflNavigation(snapshot.ref.uri, snapshot.text, (parsedArtifact as SemanticModel).asZflMap()).missingZdlDiagnostics(related)
@@ -125,7 +125,7 @@ class ZflLanguageModule(
         hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), snapshot.text)
 
     override fun hierarchyDependencies(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<String> =
-        declaredZdlUris(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.distinct()
+        declaredZdlLocations(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap()).values.flatten().distinct()
 
     override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?, related: RelatedDocuments): List<HierarchyNode> =
         hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZflMap(), snapshot.text, related)
@@ -216,7 +216,7 @@ class ZflLanguageModule(
         }
     }
 
-    /** The end of the name or quoted string that starts at [start] of [line]; one character when none does. */
+    /** The end of the name (qualified ones included) or quoted string that starts at [start] of [line]; one character when none does. */
     private fun tokenEnd(line: String, start: Int): Int {
         if (start >= line.length) return start
         if (line[start] == '"' || line[start] == '\'') {
@@ -224,10 +224,14 @@ class ZflLanguageModule(
             return if (close < 0) line.length else close + 1
         }
         var end = start
-        while (end < line.length && (line[end].isLetterOrDigit() || line[end] == '_' || line[end] == '-')) end++
+        while (end < line.length && (line[end].isLetterOrDigit() || line[end] == '_' || line[end] == '-' || isQualifierDot(line, end))) end++
         return if (end == start) start + 1 else end
     }
 }
+
+/** A `.` inside the unquoted qualified rule name `Order.limit` (ZFL-R12): a letter follows it. */
+private fun isQualifierDot(line: String, at: Int): Boolean =
+    line[at] == '.' && line.getOrNull(at + 1)?.let { it.isLetter() || it == '_' } == true
 
 /** `mode` of `zenwave/organizeZflServices`. Absent stays `full`, the rewrite the request already did. */
 internal fun parseOrganizeMode(value: String?): ZflSystemsOrganizationMode =

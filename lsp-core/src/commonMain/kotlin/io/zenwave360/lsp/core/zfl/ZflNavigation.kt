@@ -22,19 +22,20 @@ internal class ZflNavigation(
     private val text: String,
     private val model: Map<String, Any?>,
 ) {
-    private val zdlBySystem = declaredZdlUris(uri, model)
+    private val zdlBySystem = declaredZdlLocations(uri, model)
 
-    /** The ZDL named by the `@zdl("...")` string under [position], resolved against this document. */
-    private fun zdlStringAt(position: Position): String? {
-        val line = text.lines().getOrNull(position.line) ?: return null
-        return zdlString.findAll(line).firstNotNullOfOrNull { match ->
-            val value = match.groupValues[2]
-            // From the opening quote to the closing one, which ends the match.
-            val close = match.range.last
-            val open = close - value.length - 1
-            if (position.character in open..(close + 1)) resolveZdlUri(uri, value) else null
-        }
-    }
+    /** The first location of [system] that [related] reaches: its winning ZDL (NAV-R9). */
+    private fun winner(system: String, related: RelatedDocuments): String? =
+        zdlBySystem[system]?.firstOrNull { related.get(it) != null }
+
+    /** The location named by the `@zdl("...")` string under [position], resolved against this document (any one of the list). */
+    private fun zdlStringAt(position: Position): String? =
+        zdlAnnotationsIn(text).flatten().firstOrNull { string ->
+            val range = string.range
+            // From the opening quote to the closing one.
+            position.line == range.start.line && range.end.line == position.line &&
+                position.character in (range.start.character - 1)..(range.end.character + 1)
+        }?.let { resolveZdlUri(uri, it.value) }
 
     private fun cursor(position: Position): ZflCursorContext? =
         locateZflContext(text, model, position, uri)?.takeIf { it.kind in navigable } ?: commandDeclarationAt(position)
@@ -82,25 +83,24 @@ internal class ZflNavigation(
      * navigates by what it declares itself.
      */
     fun missingZdlDiagnostics(related: RelatedDocuments): List<Diagnostic> {
-        val lines = text.lines()
         val locations = model.locationTable()
-        return zdlBySystem.mapNotNull { (system, zdl) ->
-            if (related.get(zdl) != null) return@mapNotNull null
-            val nameLine = locations["systems.$system.name"]?.toRange()?.start?.line ?: return@mapNotNull null
-            for (index in nameLine downTo maxOf(0, nameLine - 4)) {
-                val match = zdlString.find(lines[index]) ?: continue
-                val reference = match.groupValues[2]
-                val close = match.range.last
-                return@mapNotNull Diagnostic(
-                    uri = uri,
-                    range = Range(Position(index, close - reference.length), Position(index, close)),
-                    severity = DiagnosticSeverity.WARNING,
-                    message = "ZDL of system $system not found: $reference",
-                    code = "zfl.zdl-not-found",
-                    data = mapOf("language" to "zfl"),
-                )
-            }
-            null
+        val annotations = zdlAnnotationsIn(text)
+        return zdlBySystem.mapNotNull { (system, zdls) ->
+            if (zdls.any { related.get(it) != null }) return@mapNotNull null
+            val name = locations["systems.$system.name"]?.toRange()?.start ?: return@mapNotNull null
+            // The `@zdl` written just above the system, within four lines of its name.
+            val strings = annotations.lastOrNull { listed ->
+                val end = listed.last().range.end
+                (end.line < name.line || (end.line == name.line && end.character <= name.character)) && end.line >= name.line - 4
+            } ?: return@mapNotNull null
+            Diagnostic(
+                uri = uri,
+                range = Range(strings.first().range.start, strings.last().range.end),
+                severity = DiagnosticSeverity.WARNING,
+                message = "ZDL of system $system not found: ${strings.joinToString(", ") { it.value }}",
+                code = "zfl.zdl-not-found",
+                data = mapOf("language" to "zfl"),
+            )
         }
     }
 
@@ -108,7 +108,7 @@ internal class ZflNavigation(
     fun dependencies(position: Position): List<String> {
         zdlStringAt(position)?.let { return listOf(it) }
         val context = cursor(position) ?: return emptyList()
-        return candidateZdls(context)
+        return candidateSystems(context).flatMap { zdlBySystem[it].orEmpty() }.distinct()
     }
 
     fun definition(position: Position, related: RelatedDocuments): List<NavigationTarget>? {
@@ -118,7 +118,7 @@ internal class ZflNavigation(
         }
         val context = cursor(position) ?: return null
         val scoped = context.system != null
-        val documents = candidateZdls(context).mapNotNull { zdl -> related.get(zdl)?.let { zdl to it.text } }
+        val documents = candidateSystems(context).mapNotNull { winner(it, related) }.distinct().mapNotNull { zdl -> related.get(zdl)?.let { zdl to it.text } }
         val declared = documents.flatMap { (zdl, zdlText) ->
             val zdlModel = parseZdl(zdlText) ?: return@flatMap emptyList()
             declarations(zdl, zdlText, zdlModel, context)
@@ -131,13 +131,12 @@ internal class ZflNavigation(
         return null
     }
 
-    /** The ZDLs to look in: the one of the command's system (NAV-R13), or every system's when it has none. */
-    private fun candidateZdls(context: ZflCursorContext): List<String> =
+    /** The systems whose ZDL to look in: the command's own (NAV-R13), or every system with a `@zdl` when it has none. */
+    private fun candidateSystems(context: ZflCursorContext): List<String> =
         when {
-            context.kind == "command" && context.system != null -> listOfNotNull(zdlBySystem[context.system])
-            context.kind != "command" ->
-                eventSystems(context).mapNotNull { zdlBySystem[it] }.distinct().ifEmpty { zdlBySystem.values.distinct() }
-            else -> zdlBySystem.values.distinct()
+            context.kind == "command" && context.system != null -> listOfNotNull(context.system.takeIf { it in zdlBySystem })
+            context.kind != "command" -> eventSystems(context).filter { it in zdlBySystem }.ifEmpty { zdlBySystem.keys.toList() }
+            else -> zdlBySystem.keys.toList()
         }
 
     private fun declarations(zdl: String, zdlText: String, zdlModel: Map<String, Any?>, context: ZflCursorContext): List<NavigationTarget> {
@@ -193,6 +192,33 @@ internal class ZflNavigation(
 
     private companion object {
         val navigable = setOf("command", "trigger", "event")
-        val zdlString = Regex("""@zdl\s*\(\s*(["'])(.*?)\1""")
     }
+}
+
+internal class ZflNavigationString(val value: String, val range: Range)
+
+private val zdlAnnotationPattern = Regex("""@zdl\s*\(\s*((?:"[^"]*"|'[^']*')(?:\s*,\s*(?:"[^"]*"|'[^']*'))*)\s*\)""")
+private val quotedPattern = Regex(""""([^"]*)"|'([^']*)'""")
+
+/** Each `@zdl("a", "b")` of [text], with the strings it lists in order and where each one's content is. */
+private fun zdlAnnotationsIn(text: String): List<List<ZflNavigationString>> {
+    val lineStarts = buildList {
+        add(0)
+        text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
+    }
+    fun position(offset: Int): Position {
+        var line = lineStarts.binarySearch(offset)
+        if (line < 0) line = -line - 2
+        return Position(line, offset - lineStarts[line])
+    }
+    return zdlAnnotationPattern.findAll(text).map { annotation ->
+        val list = annotation.groupValues[1]
+        val listStart = annotation.range.first + annotation.value.indexOf(list)
+        quotedPattern.findAll(list).map { string ->
+            val value = string.groupValues[1].ifEmpty { string.groupValues[2] }
+            // The content starts after the opening quote.
+            val start = listStart + string.range.first + 1
+            ZflNavigationString(value, Range(position(start), position(start + value.length)))
+        }.toList()
+    }.toList()
 }
