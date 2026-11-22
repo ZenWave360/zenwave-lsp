@@ -75,7 +75,11 @@ subprojects {
     }
     repositories {
         mavenCentral()
-        maven("https://www.zenwave360.io/maven-snapshots/") { mavenContent { snapshotsOnly() } }
+        // Only our own snapshots live there; the host answers 503 for missing paths, which would disable the repository for everything else.
+        maven("https://www.zenwave360.io/maven-snapshots/") {
+            mavenContent { snapshotsOnly() }
+            content { includeGroupByRegex("io\\.zenwave360(\\..*)?") }
+        }
         if (providers.gradleProperty("useLocalDependencies").map { it.toBooleanStrict() }.getOrElse(true)) {
             mavenLocal()
         }
