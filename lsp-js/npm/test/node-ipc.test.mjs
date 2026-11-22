@@ -284,8 +284,11 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
 
   test('zenwave/eventFlowViews returns the laid-out flow and service view models', async () => {
     const views = await server.connection.sendRequest('zenwave/eventFlowViews', { textDocument: { uri: checkoutUri } });
-    assert.deepEqual(Object.keys(views).sort(), ['flowGraph', 'serviceGraph', 'variants']);
+    assert.deepEqual(Object.keys(views).sort(), ['flowGraph', 'serviceGraph', 'variantTree', 'variants']);
     assert.deepEqual(views.variants.map((variant) => variant.id), ['sequence:completed:0', 'sequence:rejected:1']);
+    assert.deepEqual(views.variants.map((variant) => variant.outcome), ['completed', 'rejected']);
+    assert.deepEqual(views.variantTree.map((group) => group.outcome), ['completed', 'rejected']);
+    assert.deepEqual(views.variantTree[0].nodes.map((node) => node.id), ['sequence:completed:0']);
     assert.equal(views.flowGraph.schema, 'zfl.eventflow.view@1');
     assert.equal(views.serviceGraph.schema, 'zfl.services.view@1');
     assert.ok(views.flowGraph.nodes.length > 0);
@@ -315,14 +318,26 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
     );
   });
 
+  test('zenwave/preview offers the variant tree only to a request that asks for it', async () => {
+    const asked = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, sequenceRenderMode: 'SEPARATE_VARIANTS', sequenceTree: true });
+    assert.deepEqual(asked.sequenceTree.map((group) => group.outcome), ['completed', 'rejected']);
+    assert.deepEqual(asked.sequenceTree.flatMap((group) => group.nodes.map((node) => node.id)), ['sequence:completed:0', 'sequence:rejected:1']);
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, sequenceTree: 'yes' }),
+      /sequenceTree must be a boolean/,
+    );
+  });
+
   test('zenwave/preview returns ordered representations for ZFL and ZDL', async () => {
     const zfl = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri } });
     assert.deepEqual(zfl.representations.map((r) => r.id), ['flowchart', 'sequence:completed:0', 'sequence:rejected:1']);
     assert.equal(zfl.defaultRepresentationId, 'sequence:completed:0');
     for (const representation of zfl.representations) {
-      assert.deepEqual(Object.keys(representation).sort(), ['content', 'format', 'id', 'title']);
+      const sequence = representation.id !== 'flowchart';
+      assert.deepEqual(Object.keys(representation).sort(), sequence ? ['content', 'format', 'id', 'outcome', 'title'] : ['content', 'format', 'id', 'title']);
       assert.equal(representation.format, 'MERMAID');
     }
+    assert.equal('sequenceTree' in zfl, false, 'the tree is only built when asked for');
     assert.equal(zfl.representations[0].title, 'Flowchart');
     assert.ok(zfl.representations[0].content.startsWith('flowchart'));
 

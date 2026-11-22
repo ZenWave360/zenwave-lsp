@@ -145,6 +145,76 @@ class ModelVisualizationsTest {
         assertTrue(preview.representations.drop(1).all { it.content.startsWith("sequenceDiagram") })
     }
 
+    private val BRANCHING_ZFL = """
+        flow BranchingFlow {
+            start S {
+            }
+
+            when S do a {
+                service Orders.OrderService
+                @outcome(ok)
+                emits Ok
+                @outcome(retry)
+                emits Retry
+            }
+
+            when Ok, Retry do fin {
+                service Orders.OrderService
+                emits Done
+            }
+
+            end {
+                completed: Done
+            }
+        }
+    """.trimIndent()
+
+    @Test
+    fun zflPreviewGroupsSequencesByOutcomeAndOnlyOffersTheTreeWhenAsked() {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", BRANCHING_ZFL))
+
+        val plain = server.preview(CHECKOUT_ZFL_URI, "SEPARATE_VARIANTS")
+        assertEquals(null, plain.sequenceTree)
+        assertEquals(listOf("flowchart", "sequence:completed:0", "sequence:completed:1"), plain.representations.map { it.id })
+        assertEquals(listOf(null, "completed", "completed"), plain.representations.map { it.outcome })
+
+        val tree = server.preview(CHECKOUT_ZFL_URI, "SEPARATE_VARIANTS", sequenceTree = true)
+        val line = tree.sequenceTree!!.single().nodes.single()
+        assertEquals(listOf("S"), line.steps)
+        assertEquals(listOf("sequence:completed:0", "sequence:completed:1"), line.children.map { it.id })
+        val branch = tree.representations.last()
+        assertEquals(line.id, branch.id)
+        assertEquals("completed", branch.outcome)
+        assertTrue(branch.content.contains("alt ") && branch.content.contains("else "), branch.content)
+
+        // Alt blocks keep one line per outcome and no tree.
+        assertEquals(null, server.preview(CHECKOUT_ZFL_URI, "ALT_BLOCKS", sequenceTree = true).sequenceTree)
+    }
+
+    @Test
+    fun eventFlowViewsListTheStepsAndTheTreeAndALineLaysOutItsVariantsTogether() = runTest {
+        val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", BRANCHING_ZFL))
+        val views = server.eventFlowViews(CHECKOUT_ZFL_URI)
+
+        assertEquals(listOf(listOf("S", "ok"), listOf("S", "retry")), views.variants.map { it.steps })
+        assertEquals(listOf("completed", "completed"), views.variants.map { it.outcome })
+        val line = views.variantTree.single().nodes.single()
+        val together = server.eventFlowViews(CHECKOUT_ZFL_URI, line.id)
+        val first = server.eventFlowViews(CHECKOUT_ZFL_URI, line.children[0].id)
+        val second = server.eventFlowViews(CHECKOUT_ZFL_URI, line.children[1].id)
+        val ids = together.flowGraph.nodes.map { it.id }.toSet()
+        assertTrue(ids.containsAll(first.flowGraph.nodes.map { it.id }) && ids.containsAll(second.flowGraph.nodes.map { it.id }))
+        assertTrue(ids.size > first.flowGraph.nodes.size)
+        assertTrue(together.flowGraph.hasLayout())
+        assertEquals(views.variantTree, together.variantTree)
+
+        val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject
+        val node = json.getValue("variantTree").jsonArray.single().jsonObject.getValue("nodes").jsonArray.single().jsonObject
+        assertEquals(2, node.getValue("count").jsonPrimitive.content.toInt())
+        assertEquals(2, node.getValue("children").jsonArray.size)
+        assertEquals("completed", json.getValue("variants").jsonArray.first().jsonObject.getValue("outcome").jsonPrimitive.content)
+    }
+
     @Test
     fun zflPreviewFollowsTheSequenceRenderMode() {
         val server = server(Triple(CHECKOUT_ZFL_URI, "zfl", CHECKOUT_ZFL))
@@ -476,7 +546,7 @@ class ModelVisualizationsTest {
 
         val json = Json.parseToJsonElement(VisualizationJson.eventFlowViews(views)).jsonObject
 
-        assertEquals(setOf("flowGraph", "serviceGraph", "variants"), json.keys)
+        assertEquals(setOf("flowGraph", "serviceGraph", "variants", "variantTree"), json.keys)
         assertEquals(listOf("sequence:completed:0", "sequence:cancelled:1"), json.getValue("variants").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
         val flowGraph = json.getValue("flowGraph").jsonObject
         assertEquals("zfl.eventflow.view@1", flowGraph.getValue("schema").jsonPrimitive.content)

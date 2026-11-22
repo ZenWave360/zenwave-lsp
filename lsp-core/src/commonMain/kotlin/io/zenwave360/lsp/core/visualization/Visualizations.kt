@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.visualization
 import io.zenwave360.language.eventflow.view.FlowLanes
 import io.zenwave360.language.eventflow.view.FlowViewModel
 import io.zenwave360.language.eventflow.view.FlowVariant
+import io.zenwave360.language.eventflow.view.FlowVariantGroup
 import io.zenwave360.language.eventflow.view.ServiceViewModel
 import io.zenwave360.lsp.core.contracts.Diagnostic
 
@@ -60,12 +61,19 @@ data class PreviewRepresentation(
     val content: String,
     /** The optional kind a client uses to group diagram representations. */
     val group: String? = null,
+    /** The end outcome of a ZFL sequence diagram, which a client groups its selector by (spec:zenwave-platform-vscode/model-preview#mp-r36). */
+    val outcome: String? = null,
 )
 
 /** The ordered representations of a document and the one a client shows first. */
 data class PreviewResult(
     val representations: List<PreviewRepresentation>,
     val defaultRepresentationId: String?,
+    /**
+     * Only when the request asked for `sequenceTree` and the sequences are separate variants: the variants grouped by
+     * outcome, as a prefix tree of steps. A leaf's id is its representation's, a branch's one that shows its variants as alt blocks.
+     */
+    val sequenceTree: List<FlowVariantGroup>? = null,
 )
 
 /** The laid-out EventFlow view models of a ZFL document, as dsl-kotlin generates them. */
@@ -73,6 +81,8 @@ data class EventFlowViews(
     val flowGraph: FlowViewModel,
     val serviceGraph: ServiceViewModel,
     val variants: List<FlowVariant>,
+    /** The variants grouped by outcome, as a prefix tree of steps (spec:flows/eventflow#ef-r25). */
+    val variantTree: List<FlowVariantGroup> = emptyList(),
     /** Present only when saved positions were sent for the full diagram. */
     val savedPositions: SavedPositions? = null,
     /** The lanes the flow graph is drawn in, echoed only when the request named them. */
