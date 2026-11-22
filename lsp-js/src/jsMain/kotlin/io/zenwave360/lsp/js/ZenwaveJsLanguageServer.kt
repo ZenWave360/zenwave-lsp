@@ -159,11 +159,15 @@ class ZenwaveJsLanguageServer(
                 if (isPresent(previewMode) && jsTypeOf(previewMode) != "string") {
                     throw InvalidRequestParamsException("mode must be a string")
                 }
+                val representationId = params.representationId
+                if (isPresent(representationId) && jsTypeOf(representationId) != "string") {
+                    throw InvalidRequestParamsException("representationId must be a string")
+                }
                 val sequenceTree = params.sequenceTree
                 if (isPresent(sequenceTree) && jsTypeOf(sequenceTree) != "boolean") {
                     throw InvalidRequestParamsException("sequenceTree must be a boolean")
                 }
-                JSON.parse<dynamic>(VisualizationJson.preview(server.preview(uri, stringOrNull(mode), stringOrNull(previewMode), sequenceTree == true)))
+                JSON.parse<dynamic>(VisualizationJson.preview(server.preview(uri, stringOrNull(mode), stringOrNull(previewMode), sequenceTree == true, stringOrNull(representationId))))
             }
         }
         registerCustomRequest(ZenwaveCustomRequests.SYMBOL_AT) { params ->

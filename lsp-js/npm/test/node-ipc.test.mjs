@@ -326,6 +326,16 @@ describe('Node IPC entry point', { timeout: 120_000 }, () => {
       server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, sequenceTree: 'yes' }),
       /sequenceTree must be a boolean/,
     );
+    const one = await server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, sequenceRenderMode: 'SEPARATE_VARIANTS', representationId: 'sequence:rejected:1' });
+    assert.deepEqual(one.representations.map((r) => r.id), ['sequence:rejected:1']);
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, representationId: 3 }),
+      /representationId must be a string/,
+    );
+    await assert.rejects(
+      server.connection.sendRequest('zenwave/preview', { textDocument: { uri: checkoutUri }, representationId: 'nope' }),
+      /unknown representation: nope/,
+    );
   });
 
   test('zenwave/preview returns ordered representations for ZFL and ZDL', async () => {
