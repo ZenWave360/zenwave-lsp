@@ -4,7 +4,7 @@ plugins {
     base
     kotlin("multiplatform") version "2.3.0" apply false
     kotlin("jvm") version "2.3.0" apply false
-    kotlin("js") version "2.3.0" apply false
+    kotlin("js") version "2.4.21" apply false
     kotlin("plugin.serialization") version "2.3.0" apply false
     id("com.vanniktech.maven.publish") version "0.34.0" apply false
     id("org.jetbrains.kotlinx.kover") version "0.9.4" apply false
