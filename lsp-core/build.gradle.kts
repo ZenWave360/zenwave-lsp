@@ -40,12 +40,12 @@ kotlin {
             dependencies {
                 implementation(kotlin("stdlib-common"))
 
-                implementation("io.zenwave360.dsl:dsl-kotlin:1.11.0-SNAPSHOT")
-                implementation("io.zenwave360.dsl:dsl-views:1.11.0-SNAPSHOT")
-                implementation("io.zenwave360.dsl:dsl-docs:1.11.0-SNAPSHOT")
-                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:1.0.0-SNAPSHOT")
-                implementation("io.zenwave360.architecture:architecture-manifest:1.0.0-SNAPSHOT")
-                implementation("io.zenwave360.architecture:workspace-runtime:1.0.0-SNAPSHOT")
+                implementation("io.zenwave360.dsl:dsl-kotlin:1.11.0")
+                implementation("io.zenwave360.dsl:dsl-views:1.11.0")
+                implementation("io.zenwave360.dsl:dsl-docs:1.11.0")
+                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.9.24")
+                implementation("io.zenwave360.architecture:architecture-manifest:0.9.6")
+                implementation("io.zenwave360.architecture:workspace-runtime:0.9.6")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
