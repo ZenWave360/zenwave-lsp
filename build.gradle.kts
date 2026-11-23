@@ -7,7 +7,7 @@ plugins {
     kotlin("js") version "2.3.0" apply false
     kotlin("plugin.serialization") version "2.3.0" apply false
     id("com.vanniktech.maven.publish") version "0.34.0" apply false
-    id("org.jetbrains.kotlinx.kover") version "0.9.4" apply false
+    id("org.jetbrains.kotlinx.kover") version "0.9.11" apply false
 }
 
 group = "io.zenwave360.language"
