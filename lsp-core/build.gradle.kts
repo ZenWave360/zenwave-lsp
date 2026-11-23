@@ -59,7 +59,7 @@ kotlin {
             dependencies {
                 implementation(kotlin("test-common"))
                 implementation(kotlin("test-annotations-common"))
-                implementation("com.goncalossilva:resources:0.14.0")
+                implementation("com.goncalossilva:resources:0.16.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
             }
         }
