@@ -6,7 +6,7 @@ data class InterpolationResult(
 )
 
 object StrictVariableInterpolator {
-    private val placeholderPattern = Regex("""\{\{\s*([A-Za-z0-9_.-]+)\s*}}""")
+    private val placeholderPattern = Regex("""\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}""")
 
     fun interpolate(value: String, properties: Map<String, String>): InterpolationResult {
         val unresolved = linkedSetOf<String>()

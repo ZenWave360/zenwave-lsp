@@ -2,6 +2,7 @@ package io.zenwave360.lsp.core.spec.openapi
 
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -9,11 +10,13 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
 import io.zenwave360.lsp.core.spec.defaultSpecDefinition
 import io.zenwave360.lsp.core.spec.defaultSpecHover
 import io.zenwave360.lsp.core.spec.detectSpecFile
 import io.zenwave360.lsp.core.spec.parseSpecDocument
 import io.zenwave360.lsp.core.spec.refContribution
+import io.zenwave360.lsp.core.spec.specDeclarationRange
 import io.zenwave360.lsp.core.spec.requiredFieldDiagnostics
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
@@ -38,7 +41,7 @@ class OpenApiLanguageModule(
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val document = parseSpecDocument(snapshot)
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = document,
             diagnostics = document.diagnostics + requiredFieldDiagnostics(document, listOf("openapi", "info", "paths"), languageId)
         )
@@ -91,4 +94,7 @@ class OpenApiLanguageModule(
 
     override fun canHandle(uri: String, text: String?): Boolean =
         detectSpecFile(uri, text, "openapi")
+
+    override fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? =
+        specDeclarationRange(parsedArtifact, semanticId)
 }

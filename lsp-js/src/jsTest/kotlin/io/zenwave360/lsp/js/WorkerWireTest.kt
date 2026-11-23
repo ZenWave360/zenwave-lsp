@@ -1,0 +1,413 @@
+package io.zenwave360.lsp.js
+
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.promise
+import kotlin.js.Promise
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * Wire test for the Web Worker entry point of @zenwave360/lsp-js. Runs only in the browser (jsBrowserTest):
+ * it starts the packaged, bundled worker script in a real Web Worker and exchanges JSON-RPC messages with it
+ * over postMessage, the transport vscode-languageclient/browser uses.
+ */
+class WorkerWireTest {
+
+    private class WorkerClient(url: String) {
+        val worker: dynamic = createWorker(url)
+        private var nextId = 1
+        private val pending = mutableMapOf<Int, (dynamic) -> Unit>()
+        private val notificationWaiters = mutableListOf<Pair<(dynamic) -> Boolean, (dynamic) -> Unit>>()
+        var workerError: String? = null
+
+        init {
+            worker.onmessage = { event: dynamic -> onMessage(event.data) }
+            worker.onerror = { event: dynamic ->
+                workerError = "worker error: ${event.message}"
+                pending.values.toList().forEach { it(jsonObject("error" to jsonObject("message" to workerError))) }
+                pending.clear()
+            }
+        }
+
+        private fun onMessage(message: dynamic) {
+            val hasId = isPresent(message.id)
+            val hasMethod = isPresent(message.method)
+            when {
+                hasId && !hasMethod -> pending.remove((message.id as Number).toInt())?.invoke(message)
+                hasId && hasMethod -> {
+                    // A server-to-client request; this client supports none of them, and answers null.
+                    val response: dynamic = js("({ jsonrpc: '2.0', result: null })")
+                    response.id = message.id
+                    worker.postMessage(response)
+                }
+                else -> {
+                    val matching = notificationWaiters.filter { (predicate, _) -> predicate(message) }
+                    notificationWaiters.removeAll(matching)
+                    matching.forEach { (_, resolve) -> resolve(message.params) }
+                }
+            }
+        }
+
+        fun request(method: String, params: dynamic): Promise<dynamic> = Promise { resolve, reject ->
+            val id = nextId++
+            pending[id] = { response ->
+                if (isPresent(response.error)) reject(Error("$method failed: ${JSON.stringify(response.error)}"))
+                else resolve(if (isPresent(response.result)) response.result else null)
+            }
+            worker.postMessage(jsonObject("jsonrpc" to "2.0", "id" to id, "method" to method, "params" to params))
+        }
+
+        fun requestError(method: String, params: dynamic): Promise<dynamic> = Promise { resolve, _ ->
+            val id = nextId++
+            pending[id] = { response -> resolve(response.error) }
+            worker.postMessage(jsonObject("jsonrpc" to "2.0", "id" to id, "method" to method, "params" to params))
+        }
+
+        fun notify(method: String, params: dynamic) {
+            worker.postMessage(jsonObject("jsonrpc" to "2.0", "method" to method, "params" to params))
+        }
+
+        fun nextNotification(method: String, predicate: (dynamic) -> Boolean = { true }): Promise<dynamic> =
+            Promise { resolve, _ ->
+                notificationWaiters.add({ message: dynamic -> message.method == method && predicate(message.params) } to resolve)
+            }
+    }
+
+    @Test
+    fun initializesAndServesRequestsOverPostMessage(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+        val brokenUri = "file:///workspace/broken.zdl"
+        val brokenText = "entity Customer {\n    name String required\n}\n\naggregate CustomerAggregate(MissingEntity) {\n}\n"
+        val ordersUri = "file:///workspace/orders.zdl"
+        val ordersText = "entity Customer {\n    name String required\n}\n\nentity CustomerOrder {\n    customer Customer\n    total Integer\n}\n"
+        val checkoutUri = "file:///workspace/checkout.zfl"
+        val checkoutText = "systems {\n    @zdl(\"orders/model.zdl\")\n    Orders {\n        service OrderService {\n" +
+            "            commands: createOrder\n        }\n    }\n}\n\nflow CheckoutFlow {\n    @actor(Customer)\n" +
+            "    start CheckoutStarted {\n    }\n\n    when CheckoutStarted do createOrder {\n        service Orders.OrderService\n" +
+            "        emits OrderCreated\n        emits OrderRejected\n    }\n\n    end {\n        completed: OrderCreated\n" +
+            "        rejected: OrderRejected\n    }\n}\n"
+        val brokenZflUri = "file:///workspace/broken.zfl"
+        val zwUri = "file:///workspace/orders.zw"
+        val brokenZwUri = "file:///workspace/broken.zw"
+        val origin = js("globalThis.location.origin") as String
+        val fixtures = origin + "/base/kotlin/wire-fixtures"
+        // The fixtures are served by the test page's own host. Absolute http reads only that host when it is allowed.
+        val fixtureHost = origin.substringAfter("://").substringBefore(":")
+
+        return client.request(
+            "initialize",
+            jsonObject(
+                "processId" to null,
+                "rootUri" to null,
+                "capabilities" to jsonObject(),
+                "initializationOptions" to jsonObject(
+                    "zenwave" to jsonObject(
+                        "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
+                        "allowedDomains" to arrayOf(fixtureHost),
+                    ),
+                ),
+            ),
+        ).then { result: dynamic ->
+            assertEquals("zenwave-lsp", result.serverInfo.name)
+            assertEquals(LSP_JS_VERSION, result.serverInfo.version)
+            assertEquals(2, result.capabilities.textDocumentSync)
+            assertEquals(true, result.capabilities.hoverProvider)
+            assertEquals(
+                listOf(
+                    "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
+                    "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
+                    "zenwave/indexStatus",
+                ),
+                (result.capabilities.experimental.customRequests as Array<String>).toList(),
+            )
+            assertEquals(listOf("zenwave/pluginCatalogue"), (result.capabilities.experimental.customNotifications as Array<String>).toList())
+            assertEquals(true, result.capabilities.experimental.organizeModes)
+            client.notify("initialized", jsonObject())
+            val diagnostics = client.nextNotification("textDocument/publishDiagnostics") { it.uri == brokenUri }
+            client.notify("textDocument/didOpen", textDocumentItem(brokenUri, "zdl", 1, brokenText))
+            diagnostics
+        }.then { published: dynamic ->
+            assertTrue((published.diagnostics as Array<dynamic>).isNotEmpty(), "diagnostics for an aggregate of an unknown entity")
+            val diagnostics = client.nextNotification("textDocument/publishDiagnostics") { it.uri == ordersUri }
+            client.notify("textDocument/didOpen", textDocumentItem(ordersUri, "zdl", 1, ordersText))
+            diagnostics
+        }.then { published: dynamic ->
+            assertEquals(0, (published.diagnostics as Array<dynamic>).size)
+            client.request(
+                "textDocument/hover",
+                jsonObject("textDocument" to jsonObject("uri" to ordersUri), "position" to jsonObject("line" to 5, "character" to 15)),
+            )
+        }.then { hover: dynamic ->
+            assertEquals("markdown", hover.contents.kind)
+            client.request("zenwave/hierarchy", jsonObject("uri" to ordersUri))
+        }.then { hierarchy: dynamic ->
+            assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
+            client.notify("textDocument/didOpen", textDocumentItem(checkoutUri, "zfl", 1, checkoutText))
+            client.request("zenwave/hierarchy", jsonObject("uri" to checkoutUri))
+        }.then { hierarchy: dynamic ->
+            // systems > system > service > command, every level with the full node shape
+            val depth = (hierarchy as Array<dynamic>).maxOf { hierarchyDepth(it) }
+            assertTrue(depth >= 4, "hierarchy depth $depth: ${JSON.stringify(hierarchy)}")
+            client.request("zenwave/forwardReferences", jsonObject("uri" to checkoutUri, "semanticId" to "$checkoutUri#systems.Orders"))
+        }.then { references: dynamic ->
+            assertEquals("declares-domain", (references as Array<dynamic>).first().relationType)
+            // elkjs lays the flow out inside the worker, next to the LSP connection.
+            client.request("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to checkoutUri)))
+        }.then { views: dynamic ->
+            assertEquals("zfl.eventflow.view@1", views.flowGraph.schema)
+            assertEquals("zfl.services.view@1", views.serviceGraph.schema)
+            val nodes = views.flowGraph.nodes as Array<dynamic>
+            assertTrue(nodes.isNotEmpty())
+            assertTrue(nodes.all { jsTypeOf(it.position.x) == "number" && jsTypeOf(it.dimensions.width) == "number" })
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to checkoutUri)))
+        }.then { preview: dynamic ->
+            val ids = (preview.representations as Array<dynamic>).map { it.id as String }
+            assertEquals(listOf("flowchart", "sequence:completed:0", "sequence:rejected:1"), ids)
+            assertEquals("sequence:completed:0", preview.defaultRepresentationId)
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
+        }.then { preview: dynamic ->
+            assertEquals("domain", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(zwUri, "zw", 1, ordersText))
+            client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to zwUri)))
+        }.then { preview: dynamic ->
+            assertEquals("configuration", preview.defaultRepresentationId)
+            assertEquals("MARKDOWN", (preview.representations as Array<dynamic>).single().format)
+            client.notify("textDocument/didOpen", textDocumentItem(brokenZwUri, "zw", 1, "entity Customer {\n    name String required\n    ) ) )\n}\n"))
+            client.requestError("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to brokenZwUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentUnreadable", error.data.kind)
+            client.notify("textDocument/didOpen", textDocumentItem(brokenZflUri, "zfl", 1, "flow Broken {\n    when {{ do\n"))
+            client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to brokenZflUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentUnreadable", error.data.kind)
+            assertTrue((error.data.diagnostics as Array<dynamic>).isNotEmpty())
+            client.requestError("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/never-opened.zdl")))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentNotFound", error.data.kind)
+            client.requestError("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to ordersUri)))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("unsupportedDocument", error.data.kind)
+            client.requestError("zenwave/doesNotExist", jsonObject("uri" to ordersUri))
+        }.then { error: dynamic ->
+            assertEquals(-32601, error.code)
+            client.request(
+                "zenwave/symbolAt",
+                jsonObject("textDocument" to jsonObject("uri" to checkoutUri), "position" to jsonObject("line" to 2, "character" to 6)),
+            )
+        }.then { symbol: dynamic ->
+            assertEquals("$checkoutUri#systems.Orders", symbol.semanticId)
+            // Neither fixture is open: the worker reads both over fetch, and the flow's nodes point at the ZDL.
+            client.request("zenwave/hierarchy", jsonObject("uri" to "$fixtures/checkout.zfl"))
+        }.then { hierarchy: dynamic ->
+            val system = (hierarchy as Array<dynamic>).first { it.kind == "section" }.children[0]
+            assertEquals("$fixtures/orders/model.zdl", system.sourceUri, JSON.stringify(hierarchy))
+            val commands = system.children[0].children as Array<dynamic>
+            assertEquals(1, commands.size, JSON.stringify(hierarchy))
+            val command = commands[0]
+            assertEquals("createOrder", command.label)
+            assertEquals("$fixtures/orders/model.zdl", command.sourceUri)
+            assertEquals("command:createOrder", (command.viewNodeIds as Array<String>).single())
+            // A file: document cannot be read in a browser.
+            client.requestError("zenwave/hierarchy", jsonObject("uri" to "file:///workspace/never-opened.zdl"))
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.code)
+            assertEquals("documentNotFound", error.data.kind)
+            client.request("shutdown", null)
+        }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
+    fun aManifestServedOverHttpIsReadByTheLibraryInTheBrowser(): Promise<Unit> {
+        val manifestUri = js("globalThis.location.origin") as String + "/base/kotlin/wire-fixtures/zenwave-architecture.yml"
+        val recording = RecordingConnection()
+        val server = ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test")
+        server.listen()
+
+        recording.call(
+            "onInitialize",
+            jsonObject("initializationOptions" to jsonObject("zenwave" to jsonObject("projectManifestUri" to manifestUri))),
+        )
+
+        return server.workspaceOpening!!.then {
+            val status = server.workspaceStatus()
+            assertEquals(io.zenwave360.lsp.core.platform.WorkspaceState.READY, status.state, status.toString())
+            assertEquals(manifestUri, status.manifestUri)
+        }
+    }
+
+    @Test
+    fun manifestResourceHierarchyFieldsArePresentOnlyWhenDeclared(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+        val uri = "file:///workspace/resources.yml"
+        val manifest = """
+            domains:
+              sales:
+                services:
+                  orders:
+                    id: orders
+                    docs:
+                      readme: README.md
+                    artifacts:
+                      - { type: openapi, path: api.yml, version: 2.0.0 }
+                      - { type: openapi, path: "apis/*.yml", version: 2.1.0 }
+        """.trimIndent()
+
+        return client.request(
+            "initialize",
+            jsonObject("processId" to null, "rootUri" to null, "capabilities" to jsonObject()),
+        ).then { _: dynamic ->
+            client.notify("initialized", jsonObject())
+            client.notify("textDocument/didOpen", textDocumentItem(uri, "yaml", 1, manifest))
+            client.request("zenwave/hierarchy", jsonObject("uri" to uri))
+        }.then { hierarchy: dynamic ->
+            val nodes = (hierarchy as Array<dynamic>).flatMap { flattenHierarchy(it) }
+            val artifact = nodes.single { it.label == "api.yml" }
+            assertEquals("artifact", artifact.kind)
+            assertEquals("openapi", artifact.uiHints.type)
+            assertEquals("2.0.0", artifact.version)
+            assertEquals("zenwave:/orders/2.0.0/api.yml", artifact.address)
+            assertTrue(!JSON.stringify(artifact).contains("\"disabledReason\":"), JSON.stringify(artifact))
+
+            val folder = nodes.single { it.label == "apis/*.yml" }
+            assertEquals("2.1.0", folder.version)
+            assertTrue(!JSON.stringify(folder).contains("\"address\":"), JSON.stringify(folder))
+            assertEquals("pending (phase 2)", folder.disabledReason)
+
+            val document = nodes.single { it.label == "readme" }
+            assertEquals("doc", document.kind)
+            assertEquals("readme", document.uiHints.key)
+            assertTrue(!JSON.stringify(document).contains("\"version\":"), JSON.stringify(document))
+            assertEquals("zenwave:/orders/-/README.md", document.address)
+            assertTrue(!JSON.stringify(document).contains("\"disabledReason\":"), JSON.stringify(document))
+            client.request("shutdown", null)
+        }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
+    @OptIn(DelicateCoroutinesApi::class)
+    fun withoutAFileSystemTheReferenceIndexIsReadyAndEmpty(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+
+        return GlobalScope.promise {
+            val initialized: dynamic = client.request(
+                "initialize",
+                jsonObject(
+                    "processId" to null,
+                    "rootUri" to null,
+                    "workspaceFolders" to arrayOf(jsonObject("uri" to "file:///workspace", "name" to "ws")),
+                    "capabilities" to jsonObject(),
+                ),
+            ).await()
+            assertTrue("zenwave/indexStatus" in (initialized.capabilities.experimental.customRequests as Array<String>))
+            client.notify("initialized", jsonObject())
+            var status: dynamic = null
+            repeat(200) {
+                if (status == null || status.state != "ready") {
+                    status = client.request("zenwave/indexStatus", jsonObject()).await()
+                    if (status.state != "ready") delay(20)
+                }
+            }
+            assertEquals("ready", status.state as String, JSON.stringify(status))
+            assertEquals(0, status.files as Int, JSON.stringify(status))
+            assertEquals(false, status.partial as Boolean)
+            client.request("shutdown", null).await()
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+
+    @Test
+    fun pluginCatalogueIsReplacedByInitializationOptionsAndNotification(): Promise<Unit> {
+        val client = WorkerClient("/base/kotlin/lsp-js-package/dist/browser/zenwave-lsp-worker.js")
+        val scriptsUri = "file:///workspace/scripts.zw"
+        val scripts = "config {\n    basePackage \"io.example.orders\"\n    plugins {\n        ZDLToOpenAPIPlugin {\n            targetFile \"./openapi.yml\"\n        }\n" +
+            "        TeamOwnPlugin {\n            maxDepth 3\n        }\n    }\n}\n"
+        fun catalogue(summary: String?): dynamic {
+            val catalogue: dynamic = jsonObject("source" to "Test SDK", "version" to "9.9", "futureField" to arrayOf(1), "plugins" to emptyArray<dynamic>())
+            if (summary != null) {
+                catalogue.plugins = arrayOf(jsonObject("name" to "ZDLToOpenAPIPlugin", "configClassName" to "x.P", "summary" to summary))
+            }
+            return catalogue
+        }
+        fun page(): Promise<dynamic> = client.request("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to scriptsUri))).then { preview: dynamic ->
+            assertEquals("configuration", preview.defaultRepresentationId)
+            (preview.representations as Array<dynamic>).single().content as String
+        }
+
+        return client.request(
+            "initialize",
+            jsonObject(
+                "processId" to null,
+                "rootUri" to null,
+                "capabilities" to jsonObject(),
+                "initializationOptions" to jsonObject("pluginCatalogue" to catalogue("Summary from the client")),
+            ),
+        ).then { _: dynamic ->
+            client.notify("initialized", jsonObject())
+            client.notify("textDocument/didOpen", textDocumentItem(scriptsUri, "zw", 1, scripts))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Summary from the client"), text)
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue("Replaced by notification")))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Replaced by notification") && !text.contains("Summary from the client"), text)
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to jsonObject("plugins" to "nope")))
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to "text"))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("Replaced by notification"), "a malformed catalogue keeps the previous one")
+            client.notify("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue(null)))
+            page()
+        }.then { content: dynamic ->
+            val text: String = content
+            assertTrue(text.contains("### ZDLToOpenAPIPlugin") && text.contains("targetFile"), text)
+            assertTrue(!text.contains("Replaced by notification"), text)
+            client.request("shutdown", null)
+        }.then {
+            client.notify("exit", null)
+            client.worker.terminate()
+            assertEquals(null, client.workerError)
+        }
+    }
+}
+
+private fun hierarchyDepth(node: dynamic): Int {
+    listOf("id", "label", "kind", "language", "sourceUri", "sourceRange", "children", "relatedResources", "uiHints", "viewNodeIds").forEach { key ->
+        assertTrue(isPresent(node[key]), "hierarchy node has $key: ${JSON.stringify(node)}")
+    }
+    val children = node.children as Array<dynamic>
+    return 1 + (children.maxOfOrNull { hierarchyDepth(it) } ?: 0)
+}
+
+private fun flattenHierarchy(node: dynamic): List<dynamic> =
+    listOf(node) + (node.children as Array<dynamic>).flatMap { flattenHierarchy(it) }
+
+private fun createWorker(scriptUrl: String): dynamic {
+    val workerConstructor: dynamic = js("globalThis.Worker")
+    return js("new workerConstructor(scriptUrl)")
+}
+
+private fun textDocumentItem(uri: String, languageId: String, version: Int, text: String): dynamic =
+    jsonObject("textDocument" to jsonObject("uri" to uri, "languageId" to languageId, "version" to version, "text" to text))

@@ -1,0 +1,364 @@
+package io.zenwave360.lsp.core.visualization
+
+import io.zenwave360.language.antlr.ZdlLexer
+import io.zenwave360.language.docs.DslDocs
+import io.zenwave360.lsp.core.catalogue.PluginCatalogues
+import io.zenwave360.language.eventflow.application.GenerateFlowViewFromZfl
+import io.zenwave360.language.eventflow.application.FlowPositionsReason
+import io.zenwave360.language.eventflow.application.FlowPositionsResult
+import io.zenwave360.language.eventflow.application.FlowVariantViewResult
+import io.zenwave360.language.eventflow.view.FlowLanes
+import io.zenwave360.language.eventflow.view.FlowVariantNode
+import io.zenwave360.language.eventflow.view.Point
+import io.zenwave360.language.eventflow.application.GenerateMermaidFromZfl
+import io.zenwave360.language.eventflow.application.GenerateServiceViewFromZfl
+import io.zenwave360.language.eventflow.view.MermaidSequenceRenderMode
+import io.zenwave360.language.zdl.ZdlParser
+import io.zenwave360.language.zdl.application.GenerateMermaidCommandDiagramFromZdl
+import io.zenwave360.language.zdl.view.ZdlAggregateToMermaidClassDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlDomain
+import io.zenwave360.language.zdl.view.ZdlEventToMermaidClassDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlLifecycleToMermaidStateDiagramTransformer
+import io.zenwave360.language.zdl.view.ZdlServiceToEventStormingTransformer
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
+import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
+import kotlinx.coroutines.CancellationException
+import org.antlr.v4.kotlinruntime.BaseErrorListener
+import org.antlr.v4.kotlinruntime.CharStreams
+import org.antlr.v4.kotlinruntime.CommonTokenStream
+import org.antlr.v4.kotlinruntime.RecognitionException
+import org.antlr.v4.kotlinruntime.Recognizer
+
+/**
+ * Turns an open ZDL or ZFL document into what an IDE shows: EventFlow view models and preview
+ * representations. The generators are dsl-kotlin's, the same ones the IntelliJ plugin calls in-process,
+ * and the ZFL representation ids, titles and default follow IntelliJ's preview, so both IDEs agree. A ZDL
+ * document is one Markdown page of its domain model (`DslDocs.previewZdl`), and a ZW document one of its plugin
+ * configuration (`DslDocs.previewZw`, described by the current [PluginCatalogues]); both escape what the model wrote.
+ *
+ * A document that cannot be read — a syntax error, or a generator that fails on it — is answered with
+ * [DocumentFailureKind.DOCUMENT_UNREADABLE]; semantic problems (an unknown reference, say) still produce a
+ * result, since the diagram of an incomplete model is what a user editing it wants to see.
+ */
+class ModelVisualizations(private val pluginCatalogues: PluginCatalogues = PluginCatalogues()) {
+
+    fun preview(document: VisualizedDocument, sequenceRenderMode: String?, previewMode: String?, sequenceTree: Boolean = false, representationId: String? = null): PreviewResult {
+        val sequenceMode = parseSequenceRenderMode(sequenceRenderMode)
+        val mode = parsePreviewMode(previewMode)
+        return when (document.languageId) {
+            ZDL -> when (mode) {
+                PreviewMode.DOCS -> zdlPreview(document)
+                PreviewMode.DIAGRAMS -> zdlDiagramsPreview(document)
+            }
+            ZW -> zwPreview(document)
+            ZFL -> zflPreview(document, sequenceMode, sequenceTree, representationId)
+            else -> throw unsupported(document, "zenwave/preview covers ZDL, ZW and ZFL documents")
+        }
+    }
+
+    suspend fun eventFlowViews(
+        document: VisualizedDocument,
+        variant: String? = null,
+        positions: Map<String, SavedPoint>? = null,
+        requestedLanes: FlowLanes? = null,
+    ): EventFlowViews {
+        if (document.languageId != ZFL) {
+            throw unsupported(document, "zenwave/eventFlowViews covers ZFL documents")
+        }
+        requireReadable(document)
+        val text = document.snapshot.text
+        return generating(document) {
+            val generator = GenerateFlowViewFromZfl()
+            var savedPositions: SavedPositions? = null
+            val lanes = requestedLanes ?: FlowLanes.NONE
+            val flowGraph = when (val result = variant?.let { generator.variant(text, it, lanes) }) {
+                null -> when {
+                    positions == null -> generator.execute(text, lanes)
+                    // With lanes the layout is always automatic (spec:flows/eventflow#ef-r24): the positions are not used.
+                    lanes != FlowLanes.NONE -> generator.execute(text, lanes).also {
+                        savedPositions = SavedPositions.NotApplied("lanes", emptyList())
+                    }
+                    else -> when (val placed = generator.withPositions(text, positions.mapValues { (_, p) -> Point(p.x, p.y) })) {
+                        is FlowPositionsResult.Applied -> placed.view.also { savedPositions = SavedPositions.Applied }
+                        is FlowPositionsResult.NotApplied -> placed.view.also {
+                            savedPositions = SavedPositions.NotApplied(placed.reason.wireName(), placed.missing)
+                        }
+                    }
+                }
+                is FlowVariantViewResult.Found -> result.view
+                is FlowVariantViewResult.UnknownVariant -> throw InvalidRequestParamsException("unknown variant: ${result.id}")
+            }
+            EventFlowViews(
+                flowGraph = flowGraph,
+                serviceGraph = GenerateServiceViewFromZfl().execute(text),
+                variants = generator.variants(text),
+                variantTree = generator.variantTree(text),
+                savedPositions = savedPositions,
+                lanes = requestedLanes,
+            )
+        }
+    }
+
+    private fun zdlPreview(document: VisualizedDocument): PreviewResult {
+        requireReadable(document)
+        val content = generating(document) { DslDocs().previewZdl(document.snapshot.text) }
+        return PreviewResult(
+            representations = listOf(
+                PreviewRepresentation(
+                    id = DOMAIN_ID,
+                    title = "Domain model",
+                    format = PreviewFormat.MARKDOWN,
+                    content = content,
+                )
+            ),
+            defaultRepresentationId = DOMAIN_ID,
+        )
+    }
+
+    /** The individual ZDL diagrams, grouped for the preview's Show and Element selectors. */
+    private fun zdlDiagramsPreview(document: VisualizedDocument): PreviewResult {
+        requireReadable(document)
+        val representations = generating(document) {
+            val domain = ZdlDomain(ZdlParser().parseModel(document.snapshot.text))
+            buildList {
+                var others: String? = null
+                ZdlServiceToEventStormingTransformer().transform(domain).forEach { diagram ->
+                    diagram.mermaid?.let { mermaid ->
+                        add(diagram("service:${diagram.service}", diagram.service, GROUP_SERVICES, mermaid))
+                    }
+                }
+                ZdlAggregateToMermaidClassDiagramTransformer().transform(domain).let { diagrams ->
+                    diagrams.aggregates.forEach { diagram ->
+                        add(diagram("aggregate:${diagram.aggregate}", diagram.aggregate, GROUP_AGGREGATES, diagram.mermaid))
+                    }
+                    others = diagrams.unused
+                }
+                ZdlLifecycleToMermaidStateDiagramTransformer().transform(domain).forEach { diagram ->
+                    add(diagram("state-machine:${diagram.aggregate}", diagram.aggregate, GROUP_STATE_MACHINES, diagram.mermaid))
+                }
+                ZdlEventToMermaidClassDiagramTransformer().transform(domain)?.let { mermaid ->
+                    add(diagram(EVENTS_ID, "Events", GROUP_EVENTS, mermaid))
+                }
+                GenerateMermaidCommandDiagramFromZdl().execute(document.snapshot.text).forEach { diagram ->
+                    add(diagram("command:${diagram.service}:${diagram.command}", "${diagram.service}.${diagram.command}", GROUP_COMMANDS, diagram.mermaid))
+                }
+                others?.let { mermaid ->
+                    add(diagram(OTHER_ENTITIES_ID, UNUSED_TITLE, GROUP_OTHER_ENTITIES, mermaid))
+                }
+            }
+        }
+        return PreviewResult(representations, representations.firstOrNull()?.id)
+    }
+
+    private fun diagram(id: String, title: String, group: String, content: String) =
+        PreviewRepresentation(id, title, PreviewFormat.MERMAID, content, group)
+
+    private fun zwPreview(document: VisualizedDocument): PreviewResult {
+        requireReadable(document)
+        val content = generating(document) { DslDocs().previewZw(document.snapshot.text, pluginCatalogues.current()) }
+        return PreviewResult(
+            representations = listOf(
+                PreviewRepresentation(
+                    id = CONFIGURATION_ID,
+                    title = "Plugin configuration",
+                    format = PreviewFormat.MARKDOWN,
+                    content = content,
+                )
+            ),
+            defaultRepresentationId = CONFIGURATION_ID,
+        )
+    }
+
+    private fun zflPreview(document: VisualizedDocument, mode: MermaidSequenceRenderMode, withTree: Boolean, representationId: String?): PreviewResult {
+        requireReadable(document)
+        if (representationId != null) return zflBranchPreview(document, representationId)
+        val diagrams = generating(document) { GenerateMermaidFromZfl().execute(document.snapshot.text, mode) }
+        val flowchart = PreviewRepresentation(
+            id = FLOWCHART_ID,
+            title = "Flowchart",
+            format = PreviewFormat.MERMAID,
+            content = diagrams.flowchart,
+        )
+        val sequences = diagrams.sequences.mapIndexed { index, sequence ->
+            PreviewRepresentation(
+                id = "sequence:${sequence.endOutcome}:$index",
+                title = "Sequence: ${sequence.title.ifBlank { sequence.endOutcome }}",
+                format = PreviewFormat.MERMAID,
+                content = sequence.mermaid,
+                outcome = sequence.endOutcome,
+            )
+        }
+        // spec:zenwave-platform-vscode/model-preview#mp-r36: a tree only over separate variants, whose ids are the variants'
+        val tree = if (withTree && mode == MermaidSequenceRenderMode.SEPARATE_VARIANTS) {
+            generating(document) { GenerateFlowViewFromZfl().variantTree(document.snapshot.text) }
+        } else {
+            null
+        }
+        return PreviewResult(
+            representations = listOf(flowchart) + sequences,
+            defaultRepresentationId = sequences.firstOrNull()?.id ?: FLOWCHART_ID,
+            sequenceTree = tree,
+        )
+    }
+
+    /**
+     * One representation by id (`representationId` of `zenwave/preview`): the alt-block sequence of a variant tree line,
+     * which the tree request leaves out so its answer stays the size of the leaves. The document is parsed once.
+     */
+    private fun zflBranchPreview(document: VisualizedDocument, representationId: String): PreviewResult {
+        val generated = generating(document) { GenerateMermaidFromZfl().variantsWithTree(document.snapshot.text, representationId) }
+            ?: throw InvalidRequestParamsException("unknown representation: $representationId")
+        val (diagram, node) = generated
+        val representation = PreviewRepresentation(
+            id = node.id,
+            title = "Sequence: ${node.title}" + if (node.variantIds.size > 1) " (${node.variantIds.size} variants)" else "",
+            format = PreviewFormat.MERMAID,
+            content = diagram.mermaid,
+            outcome = diagram.endOutcome,
+        )
+        return PreviewResult(representations = listOf(representation), defaultRepresentationId = representation.id)
+    }
+
+    private fun requireReadable(document: VisualizedDocument) {
+        val syntaxDiagnostics = when (document.languageId) {
+            ZFL -> document.diagnostics.filter { it.code == "syntax" || it.code == "parser" }
+            ZDL, ZW -> zdlSyntaxDiagnostics(document.snapshot)
+            else -> emptyList()
+        }
+        if (syntaxDiagnostics.isNotEmpty()) {
+            throw DocumentRequestException(
+                kind = DocumentFailureKind.DOCUMENT_UNREADABLE,
+                message = "${document.snapshot.ref.uri} cannot be read: ${syntaxDiagnostics.first().message}",
+                diagnostics = syntaxDiagnostics,
+            )
+        }
+    }
+
+    private inline fun <T> generating(document: VisualizedDocument, block: () -> T): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: DocumentRequestException) {
+            throw e
+        } catch (e: InvalidRequestParamsException) {
+            throw e
+        } catch (e: Exception) {
+            val uri = document.snapshot.ref.uri
+            val message = e.message ?: e::class.simpleName ?: "generation failed"
+            throw DocumentRequestException(
+                kind = DocumentFailureKind.DOCUMENT_UNREADABLE,
+                message = "$uri cannot be read: $message",
+                diagnostics = listOf(
+                    Diagnostic(
+                        uri = uri,
+                        range = Range(Position(0, 0), Position(0, 0)),
+                        severity = DiagnosticSeverity.ERROR,
+                        message = message,
+                        code = "parser",
+                        data = mapOf("language" to document.languageId.orEmpty()),
+                    )
+                ),
+            )
+        }
+
+    private fun unsupported(document: VisualizedDocument, reason: String) =
+        DocumentRequestException(
+            kind = DocumentFailureKind.UNSUPPORTED_DOCUMENT,
+            message = "${document.snapshot.ref.uri} is not supported: $reason",
+        )
+
+    /**
+     * dsl-kotlin's ZDL parser leaves syntax errors to ANTLR's console listener and does not report them as
+     * problems, so they are collected here with the same lexer and parser.
+     */
+    private fun zdlSyntaxDiagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
+        val diagnostics = mutableListOf<Diagnostic>()
+        val listener = object : BaseErrorListener() {
+            override fun syntaxError(
+                recognizer: Recognizer<*, *>,
+                offendingSymbol: Any?,
+                line: Int,
+                charPositionInLine: Int,
+                msg: String,
+                e: RecognitionException?,
+            ) {
+                val position = Position((line - 1).coerceAtLeast(0), charPositionInLine.coerceAtLeast(0))
+                diagnostics += Diagnostic(
+                    uri = snapshot.ref.uri,
+                    range = Range(position, position),
+                    severity = DiagnosticSeverity.ERROR,
+                    message = msg,
+                    code = "syntax",
+                    data = mapOf("semanticPath" to "syntax", "language" to ZDL),
+                )
+            }
+        }
+        val lexer = ZdlLexer(CharStreams.fromString(snapshot.text))
+        lexer.removeErrorListeners()
+        lexer.addErrorListener(listener)
+        val parser = io.zenwave360.language.antlr.ZdlParser(CommonTokenStream(lexer))
+        parser.removeErrorListeners()
+        parser.addErrorListener(listener)
+        parser.zdl()
+        return diagnostics
+    }
+
+    companion object {
+        const val ZDL = "zdl"
+        const val ZW = "zw"
+        const val CONFIGURATION_ID = "configuration"
+        const val ZFL = "zfl"
+        const val DOMAIN_ID = "domain"
+        const val FLOWCHART_ID = "flowchart"
+        /** Id kept from the former "Other entities" kind so clients keep working. */
+        const val OTHER_ENTITIES_ID = "other-entities"
+        const val UNUSED_TITLE = "Unused entities and enums"
+        const val EVENTS_ID = "events"
+        const val GROUP_SERVICES = "Services"
+        const val GROUP_AGGREGATES = "Aggregates"
+        const val GROUP_STATE_MACHINES = "State Machines"
+        const val GROUP_EVENTS = "Events"
+        const val GROUP_COMMANDS = "Commands"
+        const val GROUP_OTHER_ENTITIES = "Unused entities and enums"
+
+        /** `sequenceRenderMode` of `zenwave/preview`; absent means ALT_BLOCKS, as `GenerateMermaidFromZfl.execute(text)`. */
+        fun parseSequenceRenderMode(value: String?): MermaidSequenceRenderMode =
+            when (value) {
+                null -> MermaidSequenceRenderMode.ALT_BLOCKS
+                else -> MermaidSequenceRenderMode.entries.firstOrNull { it.name == value }
+                    ?: throw InvalidRequestParamsException(
+                        "sequenceRenderMode must be one of ${MermaidSequenceRenderMode.entries.joinToString { it.name }}, not $value"
+                    )
+            }
+
+        /** `mode` of `zenwave/preview`; absent stays the original documentation page. */
+        fun parsePreviewMode(value: String?): PreviewMode =
+            when (value) {
+                null, PreviewMode.DOCS.wireName -> PreviewMode.DOCS
+                PreviewMode.DIAGRAMS.wireName -> PreviewMode.DIAGRAMS
+                else -> throw InvalidRequestParamsException("mode must be docs or diagrams, not $value")
+            }
+    }
+}
+
+enum class PreviewMode(val wireName: String) {
+    DOCS("docs"),
+    DIAGRAMS("diagrams"),
+}
+
+/** An open document as the visualisations see it: its current text, the language serving it and its diagnostics. */
+data class VisualizedDocument(
+    val snapshot: DocumentSnapshot,
+    val languageId: String?,
+    val diagnostics: List<Diagnostic>,
+)
+
+private fun FlowPositionsReason.wireName(): String =
+    when (this) {
+        FlowPositionsReason.MISSING_NODES -> "missing-nodes"
+        FlowPositionsReason.INVALID -> "invalid"
+    }

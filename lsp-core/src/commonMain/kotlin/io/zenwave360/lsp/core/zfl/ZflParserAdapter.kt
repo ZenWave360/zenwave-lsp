@@ -3,6 +3,7 @@ package io.zenwave360.lsp.core.zfl
 import io.zenwave360.language.zfl.ZflParser as DslZflParser
 import io.zenwave360.lsp.core.model.SemanticModel
 import io.zenwave360.lsp.core.parser.ZflParser
+import io.zenwave360.lsp.core.platform.PlatformReadWriteLock
 
 /**
  * Adapter that wraps the dsl-kotlin ZflParser to implement the lsp-core ZflParser interface.
@@ -19,9 +20,12 @@ class ZflParserAdapter(
     private val dslParser: DslZflParser = DslZflParser()
 ) : ZflParser {
 
+    /** The dsl-kotlin parser is shared by every parse of this adapter, so parses exclude each other (imports parse off-thread). */
+    private val lock = PlatformReadWriteLock()
+
     override fun parse(text: String): SemanticModel {
         // Parse using dsl-kotlin parser
-        val zflModel = dslParser.parseModel(text)
+        val zflModel = lock.write { dslParser.parseModel(text) }
         
         // Wrap in semantic model adapter
         return ZflSemanticModel(zflModel)

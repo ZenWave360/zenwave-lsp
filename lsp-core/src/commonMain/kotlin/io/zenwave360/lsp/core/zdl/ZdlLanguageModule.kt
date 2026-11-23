@@ -1,8 +1,11 @@
 package io.zenwave360.lsp.core.zdl
 
 import io.zenwave360.language.zdl.formatter.ZdlFormatter
+import io.zenwave360.lsp.core.contracts.CodeAction
+import io.zenwave360.lsp.core.contracts.CompletionItem
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -10,49 +13,61 @@ import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.ParseResult
 import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
+import io.zenwave360.lsp.core.jsonpath.SemanticPointerEvaluator
+import io.zenwave360.lsp.core.spec.parseSpecDocument
+import io.zenwave360.lsp.core.spec.specDeclarationRange
 import io.zenwave360.lsp.core.model.SemanticModel
+import io.zenwave360.lsp.core.visualization.ModelVisualizations
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
+/**
+ * The ZDL language. `.zw` files are the same language with a different purpose (they configure plugins), so
+ * they are served by a second instance, [zw]: same parser, diagnostics, symbols and hierarchy, but a language id
+ * of their own, which lets `zenwave/preview` tell them apart.
+ */
 class ZdlLanguageModule(
-    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter()
+    private val parserAdapter: ZdlParserAdapter = ZdlParserAdapter(),
+    override val languageId: String = ModelVisualizations.ZDL,
+    private val extension: String = ".zdl",
 ) : LanguageModule {
 
     private val hierarchyBuilder = ZdlHierarchyBuilder()
     private val crossReferenceContributor = ZdlCrossReferenceContributor()
     private val formatter = ZdlFormatter()
 
-    override val languageId: String = "zdl"
-
     override val capabilities: LanguageCapabilities =
         LanguageCapabilities(
             languageId = languageId,
-            extensions = listOf(".zdl"),
+            extensions = listOf(extension),
             supportsHover = true,
             supportsDefinition = true,
-            supportsCompletion = false,
+            supportsCompletion = true,
             supportsDiagnostics = true,
             supportsHierarchy = true,
             supportsReferences = true,
-            supportsFormatting = true
+            supportsFormatting = true,
+            supportsCodeActions = true
         )
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val semanticModel = parseModel(snapshot)
         val model = semanticModel.asZdlMap()
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = semanticModel,
-            diagnostics = diagnosticsFromModel(snapshot.ref.uri, model)
+            diagnostics = diagnosticsFromModel(snapshot, model)
         )
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> {
         val model = parseModel(snapshot).asZdlMap()
-        return diagnosticsFromModel(snapshot.ref.uri, model)
+        return diagnosticsFromModel(snapshot, model)
     }
 
     override fun diagnostics(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<Diagnostic> =
-        diagnosticsFromModel(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+        diagnosticsFromModel(snapshot, (parsedArtifact as SemanticModel).asZdlMap())
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult? {
         val semanticModel = parseModel(snapshot)
@@ -60,13 +75,15 @@ class ZdlLanguageModule(
     }
 
     override fun hover(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): HoverResult? {
+        ZdlRules(snapshot.ref.uri, snapshot.text).let { rules -> if (rules.isRuleSite(position)) return rules.hover(position) }
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position) ?: return null
         val model = semanticModel.asZdlMap()
+        val range = model.locationTable().findSource(snapshot.ref.uri, path).range
         return HoverResult(
-            semanticId = zdlSemanticId(snapshot.ref.uri, path),
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, declarationPath(path), range),
             markdown = describeZdlNode(path, findNodeAtPath(model, path.substringBeforeLast('.', path))),
-            range = model.locationTable().findSource(snapshot.ref.uri, path).range
+            range = range
         )
     }
 
@@ -75,31 +92,30 @@ class ZdlLanguageModule(
         return definition(snapshot, position, semanticModel)
     }
 
-    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> {
+    override fun definition(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<NavigationTarget> =
+        definition(snapshot, position, parsedArtifact, RelatedDocuments.NONE)
+
+    /** The API document an `@asyncapi` or HTTP annotation at [position] points into, so the server can supply it. */
+    override fun definitionDependencies(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<String> {
+        val semanticModel = parsedArtifact as? SemanticModel ?: return emptyList()
+        val path = resolvePathAtPosition(snapshot, semanticModel, position)
+        val navigation = apiNavigation(snapshot.ref.uri, semanticModel.asZdlMap(), path)
+        return listOfNotNull(navigation?.takeIf { it.semanticPath != null }?.target?.uri)
+    }
+
+    override fun definition(
+        snapshot: DocumentSnapshot,
+        position: Position,
+        parsedArtifact: Any?,
+        related: RelatedDocuments
+    ): List<NavigationTarget> {
+        ZdlRules(snapshot.ref.uri, snapshot.text).definition(position)?.let { return it }
         val semanticModel = parsedArtifact as SemanticModel
         val path = resolvePathAtPosition(snapshot, semanticModel, position)
         val model = semanticModel.asZdlMap()
         val locations = model.locationTable()
 
-        val restMatch = Regex("""^services\.([^.]+)\.methods\.([^.]+)(?:\..+)?$""")
-            .matchEntire(path ?: "")
-        if (restMatch != null) {
-            val serviceName = restMatch.groupValues[1]
-            val methodName = restMatch.groupValues[2]
-            val target = resolveRestOperationTarget(snapshot.ref.uri, model, serviceName, methodName)
-            if (target != null) {
-                return listOf(
-                    NavigationTarget(
-                        targetKind = "definition",
-                        label = target.operationId,
-                        uri = target.api.uri,
-                        range = null,
-                        category = "openapi",
-                        relationType = "rest-operation"
-                    )
-                )
-            }
-        }
+        navigationToApis(snapshot.ref.uri, model, path, related)?.let { return it }
 
         val targetPath = path?.let { resolveDefinitionPath(model, it) }
             ?: resolveNamedType(model, tokenAtPosition(snapshot.text, position))
@@ -118,10 +134,17 @@ class ZdlLanguageModule(
     }
 
     override fun hierarchy(snapshot: DocumentSnapshot): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, parseModel(snapshot).asZdlMap())
+        hierarchy(snapshot, parseModel(snapshot))
 
     override fun hierarchy(snapshot: DocumentSnapshot, parsedArtifact: Any?): List<HierarchyNode> =
-        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
+        hierarchyBuilder.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap()) +
+            listOfNotNull(ZdlRules(snapshot.ref.uri, snapshot.text).hierarchy())
+
+    override fun completion(snapshot: DocumentSnapshot, position: Position, parsedArtifact: Any?): List<CompletionItem> =
+        ZdlRules(snapshot.ref.uri, snapshot.text).completion(position)
+
+    override fun codeActions(snapshot: DocumentSnapshot, diagnostics: List<Diagnostic>, parsedArtifact: Any?): List<CodeAction> =
+        ZdlRules(snapshot.ref.uri, snapshot.text).codeActions(diagnostics)
 
     override fun format(snapshot: DocumentSnapshot): String =
         formatter.format(snapshot.text)
@@ -133,35 +156,47 @@ class ZdlLanguageModule(
         crossReferenceContributor.build(snapshot.ref.uri, (parsedArtifact as SemanticModel).asZdlMap())
 
     override fun canHandle(uri: String, text: String?): Boolean =
-        uri.endsWith(".zdl")
+        uri.endsWith(extension)
+
+    override fun declarationRange(snapshot: DocumentSnapshot, parsedArtifact: Any?, semanticId: String): Range? {
+        val path = semanticId.substringAfter('#', "")
+        if (path.isEmpty() || semanticId.substringBefore('#') != snapshot.ref.uri) return null
+        val locations = (parsedArtifact as SemanticModel).asZdlMap().locationTable()
+        return (locations["$path.name"] ?: locations[path])?.toRange()
+    }
 
     private fun parseModel(snapshot: DocumentSnapshot): SemanticModel =
         parserAdapter.parse(snapshot.text)
 
-    private fun diagnosticsFromModel(uri: String, model: Map<String, Any?>): List<Diagnostic> =
-        model["problems"].asList().map { toDiagnostic(uri, it.asMap()) }
+    private fun diagnosticsFromModel(snapshot: DocumentSnapshot, model: Map<String, Any?>): List<Diagnostic> =
+        model["problems"].asList().map { toDiagnostic(snapshot.ref.uri, it.asMap(), snapshot.text) }
 
     private fun resolvePathAtPosition(
         snapshot: DocumentSnapshot,
         semanticModel: SemanticModel,
         position: Position
     ): String? {
-        semanticModel.getLocation(position.line, position.character)?.let { return it }
+        // dsl-kotlin numbers lines from 1, positions here from 0.
+        semanticModel.getLocation(position.line + 1, position.character)?.let { return it }
 
         val lineText = snapshot.text.lineSequence().elementAtOrNull(position.line) ?: return null
         val maxCharacter = lineText.length
         for (delta in 1..maxCharacter) {
             val left = position.character - delta
             if (left >= 0) {
-                semanticModel.getLocation(position.line, left)?.let { return it }
+                semanticModel.getLocation(position.line + 1, left)?.let { return it }
             }
             val right = position.character + delta
             if (right <= maxCharacter) {
-                semanticModel.getLocation(position.line, right)?.let { return it }
+                semanticModel.getLocation(position.line + 1, right)?.let { return it }
             }
         }
         return null
     }
+
+    /** The name of a declaration stands for it: `entities.Order.name` is `entities.Order`, a service method's too. */
+    private fun declarationPath(path: String): String =
+        Regex("""^((?:entities|enums|inputs|outputs|events|services)\.[^.]+(?:\.methods\.[^.]+)?)\.name$""").matchEntire(path)?.groupValues?.get(1) ?: path
 
     private fun tokenAtPosition(text: String, position: Position): String? {
         val line = text.lines().getOrNull(position.line) ?: return null
@@ -190,6 +225,62 @@ class ZdlLanguageModule(
             }
             ?.first
     }
+
+    private val NO_TARGET = NavigationTarget("definition", "", "", null, null, "")
+
+    private class ApiNavigation(val target: NavigationTarget, val semanticPath: String?)
+
+    /**
+     * `apis` locations, `@asyncapi` and the HTTP annotations of a method go to their API document; a type inside a method
+     * does not. [semanticPath] is where in that document the target is declared, when the annotation names it.
+     */
+    private fun apiNavigation(uri: String, model: Map<String, Any?>, path: String?): ApiNavigation? {
+        path ?: return null
+        Regex("""^apis\.([^.]+)\.uri$""").matchEntire(path)?.let { match ->
+            val api = zdlApiDescriptors(uri, model).firstOrNull { it.name == match.groupValues[1] }
+                ?: return ApiNavigation(NO_TARGET, null)
+            return ApiNavigation(apiTarget(api.uri, api.uri.substringAfterLast('/'), api.type, "references", null), null)
+        }
+        Regex("""^((?:events\.[^.]+)|(?:services\.[^.]+\.methods\.[^.]+))\.options\.asyncapi(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val options = findNodeAtPath(model, match.groupValues[1]).asMap().mapAt("options")
+            val target = resolveAsyncApiChannelTarget(uri, model, options.mapAt("asyncapi")) ?: return ApiNavigation(NO_TARGET, null)
+            val semanticPath = SemanticPointerEvaluator.appendProperty("$.channels", target.channel)
+            return ApiNavigation(apiTarget(target.api.uri, target.channel, "asyncapi", "publishes", null), semanticPath)
+        }
+        Regex("""^services\.([^.]+)\.methods\.([^.]+)\.options\.(?:get|post|put|delete|patch)(?:\..+)?$""").matchEntire(path)?.let { match ->
+            val target = resolveRestOperationTarget(uri, model, match.groupValues[1], match.groupValues[2]) ?: return ApiNavigation(NO_TARGET, null)
+            return ApiNavigation(apiTarget(target.api.uri, target.operationId, "openapi", "rest-operation", null), target.semanticPath)
+        }
+        return null
+    }
+
+    private fun navigationToApis(uri: String, model: Map<String, Any?>, path: String?, related: RelatedDocuments): List<NavigationTarget>? {
+        val navigation = apiNavigation(uri, model, path) ?: return null
+        if (navigation.target === NO_TARGET) return emptyList()
+        val range = navigation.semanticPath?.let { declaredRange(related.get(navigation.target.uri), it) }
+        // Without the document or the node there is no range: the transports open the file at the start.
+        return listOf(if (range == null) navigation.target else navigation.target.copy(range = range))
+    }
+
+    private fun declaredRange(document: DocumentSnapshot?, semanticPath: String): Range? {
+        document ?: return null
+        return try {
+            val spec = parseSpecDocument(document)
+            specDeclarationRange(spec, "${spec.model.uri}#$semanticPath")
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun apiTarget(uri: String, label: String, category: String?, relationType: String, range: Range?) =
+        NavigationTarget(
+            targetKind = "definition",
+            label = label,
+            uri = uri,
+            range = range,
+            category = category,
+            relationType = relationType
+        )
 
     private fun resolveDefinitionPath(model: Map<String, Any?>, path: String): String? {
         val fieldTypeMatch = Regex("""^(entities|inputs|outputs|events)\.([^.]+)\.fields\.([^.]+)(?:\.type)?$""").matchEntire(path)
@@ -236,5 +327,10 @@ class ZdlLanguageModule(
             }
             else -> null
         }
+    }
+
+    companion object {
+        /** The module for `.zw` files: ZDL by every means but its language id and extension. */
+        fun zw(): ZdlLanguageModule = ZdlLanguageModule(languageId = ModelVisualizations.ZW, extension = ".zw")
     }
 }

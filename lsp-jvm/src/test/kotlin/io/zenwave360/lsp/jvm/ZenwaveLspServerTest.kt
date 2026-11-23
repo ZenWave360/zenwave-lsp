@@ -3,6 +3,7 @@ package io.zenwave360.lsp.jvm
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -54,6 +55,10 @@ class ZenwaveLspServerTest {
         assertTrue(result.capabilities.documentFormattingProvider.left)
         val moduleSelectors = result.capabilities.experimental.let { it as Map<*, *> }["moduleSelectors"] as List<*>
         assertTrue(moduleSelectors.any { selector -> selector.toString().contains("manifest") })
+        val customRequests = result.capabilities.experimental.let { it as Map<*, *> }["customRequests"] as List<*>
+        assertTrue("zenwave/conceptAt" in customRequests)
+        assertTrue("zenwave/workspaceStatus" in customRequests)
+        assertEquals(true, result.capabilities.experimental.let { it as Map<*, *> }["organizeModes"])
     }
 
     @Test
@@ -62,7 +67,6 @@ class ZenwaveLspServerTest {
         val params = InitializeParams().apply {
             initializationOptions = mapOf(
                 "zenwave" to mapOf(
-                    "configUri" to "file:///workspace/.zenwave/config.yml",
                     "projectManifestUri" to "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml"
                 )
             )
@@ -70,7 +74,6 @@ class ZenwaveLspServerTest {
 
         server.initialize(params).get()
 
-        assertEquals("file:///workspace/.zenwave/config.yml", server.initializationOptions?.configUri)
         assertEquals(
             "git://github.com/acme/my-docs?ref=main#zenwave-architecture.yml",
             server.initializationOptions?.projectManifestUri
@@ -124,6 +127,83 @@ class ZenwaveLspServerTest {
         assertNotNull(hover)
         assertEquals("markdown", hover.contents.right.kind)
         assertTrue(hover.contents.right.value.contains("customerId") || hover.contents.right.value.contains("String"))
+    }
+
+    @Test
+    fun completionAndQuickFixForRules() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        val capabilities = server.initialize(InitializeParams()).get().capabilities
+        assertNotNull(capabilities.completionProvider)
+        assertNotNull(capabilities.codeActionProvider)
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { audit \"Audited\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(au)",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        server.didOpen(DidOpenTextDocumentParams(TextDocumentItem(uri, "zdl", 1, text)))
+
+        val items = server.completion(
+            org.eclipse.lsp4j.CompletionParams(TextDocumentIdentifier(uri), Position(5, 12))
+        ).get().left
+        assertEquals(listOf("audit"), items.map { it.label })
+        assertEquals("audit", items.single().insertText)
+
+        val range = org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8))
+        val actions = server.codeAction(
+            org.eclipse.lsp4j.CodeActionParams(
+                TextDocumentIdentifier(uri), range, org.eclipse.lsp4j.CodeActionContext(emptyList())
+            )
+        ).get()
+        val fix = actions.single().right
+        assertEquals("Replace 'policies' with 'rules'", fix.title)
+        assertEquals("quickfix", fix.kind)
+        val edit = fix.edit.changes.getValue(uri).single()
+        assertEquals("rules", edit.newText)
+        assertEquals(org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8)), edit.range)
+        assertEquals(org.eclipse.lsp4j.DiagnosticSeverity.Warning, fix.diagnostics.single().severity)
+    }
+
+    @Test
+    fun codeActionsHonourTheRequestedKindsAndCompletionCarriesItsEdit() {
+        val server = ZenwaveLspServer(defaultCoreLanguageServer())
+        server.initialize(InitializeParams()).get()
+        val uri = "file:///workspace/rules-kinds.zdl"
+        val text = listOf(
+            "policies { stock-first \"Stock\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(\"stock-fi\")",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        server.didOpen(DidOpenTextDocumentParams(TextDocumentItem(uri, "zdl", 1, text)))
+
+        val item = server.completion(
+            org.eclipse.lsp4j.CompletionParams(TextDocumentIdentifier(uri), Position(5, 20))
+        ).get().left.single()
+        val edit = item.textEdit.left
+        assertEquals("\"stock-first\"", edit.newText)
+        assertEquals(org.eclipse.lsp4j.Range(Position(5, 11), Position(5, 21)), edit.range)
+
+        fun actions(only: List<String>?): Int {
+            val context = org.eclipse.lsp4j.CodeActionContext(emptyList()).also { it.only = only }
+            return server.codeAction(
+                org.eclipse.lsp4j.CodeActionParams(TextDocumentIdentifier(uri), org.eclipse.lsp4j.Range(Position(0, 0), Position(0, 8)), context)
+            ).get().size
+        }
+        assertEquals(1, actions(null))
+        assertEquals(1, actions(listOf("quickfix")))
+        assertEquals(1, actions(listOf("refactor", "quickfix")))
+        assertEquals(0, actions(listOf("refactor")))
+        assertEquals(0, actions(listOf("quickfix.sub")))
     }
 
     @Test
@@ -287,7 +367,7 @@ class ZenwaveLspServerTest {
             """
             systems {
                 Orders {
-                    service OrdersService for(Order) {
+                    service OrdersService for (Order) {
                         commands: createOrder
                     }
                 }
@@ -377,7 +457,7 @@ private class FakeReferenceModule(
 
     override fun parse(snapshot: DocumentSnapshot): ParseResult =
         ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = snapshot.text,
             diagnostics = emptyList()
         )
@@ -387,7 +467,14 @@ private class FakeReferenceModule(
 
     override fun hover(snapshot: DocumentSnapshot, position: io.zenwave360.lsp.core.contracts.Position): HoverResult? =
         HoverResult(
-            semanticId = "$targetUri#entity.Target",
+            documentSymbol = DocumentSymbolRef(
+                targetUri,
+                "entity.Target",
+                io.zenwave360.lsp.core.contracts.Range(
+                    start = io.zenwave360.lsp.core.contracts.Position(0, 0),
+                    end = io.zenwave360.lsp.core.contracts.Position(0, 6)
+                ),
+            ),
             markdown = "Target",
             range = io.zenwave360.lsp.core.contracts.Range(
                 start = io.zenwave360.lsp.core.contracts.Position(0, 0),

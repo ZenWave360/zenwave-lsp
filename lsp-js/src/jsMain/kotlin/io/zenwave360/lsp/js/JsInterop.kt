@@ -1,0 +1,183 @@
+package io.zenwave360.lsp.js
+
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
+import io.zenwave360.lsp.core.contracts.HierarchyNode
+import io.zenwave360.lsp.core.contracts.NavigationTarget
+import io.zenwave360.lsp.core.contracts.Position
+import io.zenwave360.lsp.core.contracts.Range
+
+/*
+ * Conversions between lsp-core contracts and the plain JSON objects exchanged over JSON-RPC.
+ * The shapes match what lsp-jvm's ZenwaveLspServer produces through LSP4J/Gson, which omits null
+ * properties, so a client sees the same result from either server.
+ */
+
+internal fun jsonObject(vararg properties: Pair<String, Any?>): dynamic {
+    val result: dynamic = js("({})")
+    properties.forEach { (name, value) ->
+        if (value != null) {
+            result[name] = value
+        }
+    }
+    return result
+}
+
+internal fun stringMapToJson(map: Map<String, String>): dynamic {
+    val result: dynamic = js("({})")
+    map.forEach { (key, value) -> result[key] = value }
+    return result
+}
+
+internal fun isPresent(value: dynamic): Boolean =
+    value != null && value != undefined
+
+internal fun stringOrNull(value: dynamic): String? =
+    if (jsTypeOf(value) == "string") value.unsafeCast<String>() else null
+
+/**
+ * The `positions` param of `zenwave/eventFlowViews`: absent or null is no positions, anything but an object is
+ * invalid params. An entry that is not `{ x, y }` of numbers becomes a non-finite point, which the server reports
+ * as `invalid` rather than failing the request.
+ */
+internal fun positionsOrNull(value: dynamic): Map<String, io.zenwave360.lsp.core.visualization.SavedPoint>? {
+    if (!isPresent(value)) return null
+    if (jsTypeOf(value) != "object" || js("Array.isArray(value)") as Boolean) {
+        throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("positions must be an object")
+    }
+    val keys = js("Object.keys(value)").unsafeCast<Array<String>>()
+    return keys.associateWith { id ->
+        val entry = value[id]
+        val x = if (isPresent(entry)) entry.x else null
+        val y = if (isPresent(entry)) entry.y else null
+        if (jsTypeOf(x) == "number" && jsTypeOf(y) == "number") {
+            io.zenwave360.lsp.core.visualization.SavedPoint((x as Number).toDouble(), (y as Number).toDouble())
+        } else {
+            io.zenwave360.lsp.core.visualization.SavedPoint(Double.NaN, Double.NaN)
+        }
+    }
+}
+
+internal fun positionFromJson(value: dynamic): Position =
+    Position(line = (value.line as Number).toInt(), character = (value.character as Number).toInt())
+
+internal fun positionToJson(position: Position): dynamic =
+    jsonObject("line" to position.line, "character" to position.character)
+
+internal fun rangeToJson(range: Range): dynamic =
+    jsonObject("start" to positionToJson(range.start), "end" to positionToJson(range.end))
+
+/** A target with no range opens its document at the start. */
+internal fun locationToJson(target: NavigationTarget): dynamic =
+    jsonObject("uri" to target.uri, "range" to rangeToJson(target.range ?: Range(Position(0, 0), Position(0, 0))))
+
+internal fun navigationTargetToJson(target: NavigationTarget): dynamic =
+    jsonObject(
+        "targetKind" to target.targetKind,
+        "label" to target.label,
+        "uri" to target.uri,
+        "range" to target.range?.let(::rangeToJson),
+        "category" to target.category,
+        "relationType" to target.relationType,
+        "iconHint" to target.iconHint,
+    )
+
+/** Same shape as lsp-jvm's HierarchyNodeDto. */
+internal fun hierarchyNodeToJson(node: HierarchyNode): dynamic =
+    jsonObject(
+        "id" to node.id,
+        "label" to node.label,
+        "kind" to node.kind,
+        "language" to node.language,
+        "sourceUri" to node.source.uri,
+        "sourceRange" to rangeToJson(node.source.range),
+        "children" to node.children.map(::hierarchyNodeToJson).toTypedArray(),
+        "relatedResources" to node.relatedResources.map(::navigationTargetToJson).toTypedArray(),
+        "uiHints" to stringMapToJson(node.uiHints),
+        "viewNodeIds" to node.viewNodeIds.toTypedArray(),
+        "version" to node.version,
+        "address" to node.address,
+        "disabledReason" to node.disabledReason,
+    )
+
+internal fun diagnosticToJson(diagnostic: Diagnostic): dynamic =
+    jsonObject(
+        "range" to rangeToJson(diagnostic.range),
+        "severity" to when (diagnostic.severity) {
+            DiagnosticSeverity.ERROR -> 1
+            DiagnosticSeverity.WARNING -> 2
+            DiagnosticSeverity.INFO -> 3
+            DiagnosticSeverity.HINT -> 4
+        },
+        "code" to diagnostic.code,
+        "source" to diagnostic.source,
+        "message" to diagnostic.message,
+        "data" to stringMapToJson(diagnostic.data),
+    )
+
+/** LSP SymbolKind values, mapped from hierarchy node kinds as lsp-jvm's DtoMapper does. */
+internal fun symbolKind(kind: String): Int =
+    when (kind) {
+        "entity", "enum", "input", "output" -> 5 // Class
+        "service" -> 11 // Interface
+        "method", "command" -> 6 // Method
+        "event" -> 24 // Event
+        "rule" -> 14 // Constant
+        "field" -> 8 // Field
+        "flow" -> 12 // Function
+        "domain", "subdomain" -> 4 // Package
+        "manifest" -> 1 // File
+        "artifacts", "docs", "consumers" -> 3 // Namespace
+        "zdl", "zfl", "asyncapi", "asyncapi-client", "openapi" -> 1 // File
+        "consumer" -> 13 // Variable
+        else -> 19 // Object
+    }
+
+/** LSP `CompletionItemKind.EnumMember`, which is how a rule name is offered. */
+internal fun completionItemToJson(item: io.zenwave360.lsp.core.contracts.CompletionItem): dynamic =
+    jsonObject(
+        "label" to item.label,
+        "kind" to 20,
+        "detail" to item.detail,
+        "insertText" to item.insertText,
+        "documentation" to item.documentation?.let { jsonObject("kind" to "markdown", "value" to it) },
+        "textEdit" to item.textEdit?.let { jsonObject("range" to rangeToJson(it.range), "newText" to it.newText) },
+    )
+
+/** Whether a code action of [kind] is wanted when the client asks for [only] (a JS array of kinds): no filter, the kind itself or one of its parents. */
+internal fun codeActionKindRequested(kind: String, only: dynamic): Boolean {
+    if (only == null || (only.length as Int) == 0) return true
+    val kinds = (0 until (only.length as Int)).map { only[it] as String }
+    return kinds.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
+}
+
+internal fun codeActionToJson(action: io.zenwave360.lsp.core.contracts.CodeAction): dynamic {
+    val changes: dynamic = js("({})")
+    action.edits.groupBy { it.uri }.forEach { (uri, edits) ->
+        changes[uri] = edits.map { jsonObject("range" to rangeToJson(it.range), "newText" to it.newText) }.toTypedArray()
+    }
+    return jsonObject(
+        "title" to action.title,
+        "kind" to action.kind,
+        "isPreferred" to action.isPreferred,
+        "diagnostics" to action.diagnostics.map(::diagnosticToJson).toTypedArray(),
+        "edit" to jsonObject("changes" to changes),
+    )
+}
+
+internal fun documentSymbolToJson(node: HierarchyNode): dynamic =
+    jsonObject(
+        "name" to node.label,
+        "kind" to symbolKind(node.kind),
+        "range" to rangeToJson(node.source.range),
+        "selectionRange" to rangeToJson(node.source.range),
+        "children" to node.children.map(::documentSymbolToJson).toTypedArray(),
+    )
+
+internal fun fullDocumentRange(text: String): Range {
+    val lines = text.split('\n')
+    return Range(
+        start = Position(0, 0),
+        end = Position((lines.size - 1).coerceAtLeast(0), lines.lastOrNull()?.length ?: 0),
+    )
+}

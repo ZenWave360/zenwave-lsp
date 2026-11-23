@@ -1,0 +1,646 @@
+package io.zenwave360.lsp.js
+
+import io.zenwave360.lsp.core.avro.AvroLanguageModule
+import io.zenwave360.lsp.core.contracts.DocumentRef
+import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.Range
+import io.zenwave360.lsp.core.manifest.ArchitectureManifestLanguageModule
+import io.zenwave360.lsp.core.index.IndexStatusJson
+import io.zenwave360.lsp.core.platform.InMemoryDocumentSessionStore
+import io.zenwave360.lsp.core.platform.WatchedFileChange
+import io.zenwave360.lsp.core.platform.WatchedFileChangeKind
+import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import io.zenwave360.lsp.core.spec.asyncapi.AsyncApiLanguageModule
+import io.zenwave360.lsp.core.spec.openapi.OpenApiLanguageModule
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
+import io.zenwave360.lsp.core.visualization.VisualizationJson
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
+import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
+import kotlinx.coroutines.promise
+import io.zenwave360.lsp.core.resource.ResourceJson
+import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
+import io.zenwave360.lsp.core.resource.resolveRemoteManifestName
+import kotlin.js.Promise
+import io.zenwave360.lsp.core.xref.InMemoryCrossReferenceIndex
+import io.zenwave360.lsp.core.zdl.ZdlLanguageModule
+import io.zenwave360.lsp.core.zfl.ZflLanguageModule
+
+/** The files the reference index follows on disk; the server drops what its own rules skip (dot-directories, node_modules, ...). */
+private const val WATCHED_FILES = "**/*.{zdl,zfl,zw,avsc,yml,yaml,json}"
+
+/** The language modules the JS server serves; the same set as lsp-jvm's `defaultCoreLanguageServer()`. */
+fun defaultCoreLanguageServer(): ZenwaveLanguageServer =
+    ZenwaveLanguageServer(
+        modules = listOf(
+            ArchitectureManifestLanguageModule(),
+            ZdlLanguageModule(),
+            ZdlLanguageModule.zw(),
+            AsyncApiLanguageModule(),
+            OpenApiLanguageModule(),
+            AvroLanguageModule(),
+            ZflLanguageModule(),
+        ),
+        sessionStore = InMemoryDocumentSessionStore(),
+        crossReferenceIndex = InMemoryCrossReferenceIndex(),
+    )
+
+data class ZenwaveInitializationOptions(
+    val projectManifestUri: String? = null,
+    val remoteManifestName: String = io.zenwave360.lsp.core.resource.DEFAULT_REMOTE_MANIFEST_NAME,
+    val allowedDomains: List<String> = emptyList(),
+    /** Set when [remoteManifestName] was rejected and replaced by the default. The server logs it. */
+    val remoteManifestNameWarning: String? = null,
+)
+
+/**
+ * The ZenWave language server for JavaScript runtimes.
+ *
+ * It binds lsp-core to a `vscode-languageserver` connection and knows nothing about the transport: the Node
+ * entry point creates the connection over child-process IPC, the Web Worker entry point over
+ * `postMessage`. Everything it touches is available in both, so this module stays free of Node APIs.
+ *
+ * Custom requests are registered in one table; the `capabilities.experimental.customRequests` list
+ * advertised at initialisation is built from that table, so a method is advertised exactly when a handler
+ * for it is registered.
+ */
+class ZenwaveJsLanguageServer(
+    private val server: ZenwaveLanguageServer,
+    private val connection: dynamic,
+    private val serverVersion: String = LSP_JS_VERSION,
+    /** Builds a `vscode-languageserver` `ResponseError(code, message, data)`; supplied by the entry points. */
+    private val createResponseError: ((Int, String, dynamic) -> dynamic)? = null,
+) {
+    private val documentTexts = mutableMapOf<String, String>()
+    private val customRequests = linkedMapOf<String, (dynamic) -> Any?>()
+    private var shutdownRequested = false
+    private var watchesFilesDynamically = false
+
+    var initializationOptions: ZenwaveInitializationOptions? = null
+        private set
+
+    /**
+     * The opening of the manifest named by `initializationOptions.zenwave.projectManifestUri`, started at
+     * initialisation and not awaited by it: a manifest at an `http(s)` address is read by the library with
+     * `fetch`, and a slow or failing one must not hold up `initialize`. A failure is recorded in [workspaceStatus].
+     */
+    internal var workspaceOpening: Promise<Unit>? = null
+        private set
+
+    internal fun workspaceStatus() = server.workspaceStatus()
+
+    /** The latest check of a ZFL's links, for tests to await. */
+    internal var linksPublishing: Promise<Unit>? = null
+        private set
+
+    /** The latest reading of the imports of a `zenwave:` document, for tests to await. */
+    internal var importsPublishing: Promise<Unit>? = null
+        private set
+
+    init {
+        server.log = { message ->
+            val console = connection.console
+            if (isPresent(console)) console.warn(message)
+        }
+        registerCustomRequest(ZenwaveCustomRequests.HIERARCHY) { params ->
+            answer {
+                val uri = stringOrNull(if (isPresent(params)) params.uri else null)
+                    ?: throw InvalidRequestParamsException("uri is required")
+                // A document that is not open is read by the server, asynchronously (fetch, or Node's fs).
+                server.conceptualHierarchy(uri).map(::hierarchyNodeToJson).toTypedArray()
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.FORWARD_REFERENCES) { params ->
+            server.forwardReferences(params.uri as String, params.semanticId as String)
+                .map(::navigationTargetToJson).toTypedArray()
+        }
+        registerCustomRequest(ZenwaveCustomRequests.REVERSE_REFERENCES) { params ->
+            server.reverseReferences(params.uri as String, params.semanticId as String)
+                .map(::navigationTargetToJson).toTypedArray()
+        }
+        registerCustomRequest(ZenwaveCustomRequests.ORGANIZE_ZFL_SERVICES) { params ->
+            answer {
+                val mode = if (isPresent(params)) params.mode else null
+                if (isPresent(mode) && jsTypeOf(mode) != "string") {
+                    throw InvalidRequestParamsException("mode must be a string")
+                }
+                server.organizeZflServices(params.uri as String, stringOrNull(mode))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.EVENT_FLOW_VIEWS) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                val variant = params.variant
+                if (isPresent(variant) && jsTypeOf(variant) != "string") {
+                    throw InvalidRequestParamsException("variant must be a string")
+                }
+                val lanesParam = params.lanes
+                if (isPresent(lanesParam) && jsTypeOf(lanesParam) != "string") {
+                    throw InvalidRequestParamsException("lanes must be a string")
+                }
+                val lanes = stringOrNull(lanesParam)
+                val positions = positionsOrNull(params.positions)
+                JSON.parse<dynamic>(VisualizationJson.eventFlowViews(server.eventFlowViews(uri, stringOrNull(variant), positions, lanes)))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.PREVIEW) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                val mode = params.sequenceRenderMode
+                if (isPresent(mode) && jsTypeOf(mode) != "string") {
+                    throw InvalidRequestParamsException("sequenceRenderMode must be a string")
+                }
+                val previewMode = params.mode
+                if (isPresent(previewMode) && jsTypeOf(previewMode) != "string") {
+                    throw InvalidRequestParamsException("mode must be a string")
+                }
+                val representationId = params.representationId
+                if (isPresent(representationId) && jsTypeOf(representationId) != "string") {
+                    throw InvalidRequestParamsException("representationId must be a string")
+                }
+                val sequenceTree = params.sequenceTree
+                if (isPresent(sequenceTree) && jsTypeOf(sequenceTree) != "boolean") {
+                    throw InvalidRequestParamsException("sequenceTree must be a boolean")
+                }
+                JSON.parse<dynamic>(VisualizationJson.preview(server.preview(uri, stringOrNull(mode), stringOrNull(previewMode), sequenceTree == true, stringOrNull(representationId))))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.SYMBOL_AT) { params ->
+            answer {
+                val uri = textDocumentUri(params)
+                val position = params.position
+                if (!isPresent(position) || jsTypeOf(position.line) != "number" || jsTypeOf(position.character) != "number") {
+                    throw InvalidRequestParamsException("position is required")
+                }
+                server.symbolAt(uri, positionFromJson(position))?.let { symbol ->
+                    jsonObject("uri" to symbol.uri, "semanticId" to symbol.semanticId, "range" to symbol.range?.let(::rangeToJson))
+                }
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.STAT_RESOURCE) { params ->
+            answer {
+                val uri = resourceUri(params)
+                workspaceOpening?.await()
+                JSON.parse<dynamic>(ResourceJson.stat(server.statResource(uri)))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.READ_RESOURCE) { params ->
+            answer {
+                val uri = resourceUri(params)
+                workspaceOpening?.await()
+                JSON.parse<dynamic>(ResourceJson.content(server.readResource(uri)))
+            }
+        }
+        registerCustomRequest(ZenwaveCustomRequests.INDEX_STATUS) {
+            JSON.parse<dynamic>(IndexStatusJson.status(server.indexStatus()))
+        }
+    }
+
+    private fun resourceUri(params: dynamic): String =
+        stringOrNull(if (isPresent(params)) params.uri else null) ?: throw InvalidRequestParamsException("uri is required")
+
+    /**
+     * Runs a request handler as a Promise. A [DocumentRequestException] or [InvalidRequestParamsException] is
+     * rejected as a JSON-RPC `ResponseError` built by [createResponseError], so the client receives its code
+     * and `data` rather than a generic internal error.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun answer(block: suspend () -> Any?): dynamic {
+        val promise: dynamic = GlobalScope.promise { block() }
+        return promise.catch { error: dynamic -> rejected(responseErrorFor(error)) }
+    }
+
+    private fun responseErrorFor(error: dynamic): dynamic {
+        val (code, message, data) = when (val throwable = error as? Throwable) {
+            is DocumentRequestException -> Triple(
+                ZenwaveErrorCodes.REQUEST_FAILED,
+                throwable.message ?: throwable.kind.wireName,
+                JSON.parse<dynamic>(VisualizationJson.failureData(throwable)),
+            )
+            is ResourceRequestException -> Triple(
+                ZenwaveErrorCodes.REQUEST_FAILED,
+                throwable.message ?: throwable.kind.wireName,
+                JSON.parse<dynamic>(ResourceJson.failureData(throwable)),
+            )
+            is InvalidRequestParamsException -> Triple(ZenwaveErrorCodes.INVALID_PARAMS, throwable.message ?: "invalid params", null)
+            else -> return error
+        }
+        return if (createResponseError != null) {
+            // undefined, not null: ResponseError then omits `data`, as LSP4J does.
+            createResponseError.invoke(code, message, data ?: undefined)
+        } else {
+            jsonObject("code" to code, "message" to message, "data" to data)
+        }
+    }
+
+    private fun textDocumentUri(params: dynamic): String {
+        val uri = if (isPresent(params) && isPresent(params.textDocument)) params.textDocument.uri else null
+        return stringOrNull(uri) ?: throw InvalidRequestParamsException("textDocument.uri is required")
+    }
+
+    /** The custom request methods this server answers, in registration order. */
+    val customRequestMethods: List<String>
+        get() = customRequests.keys.toList()
+
+    private fun registerCustomRequest(method: String, handler: (dynamic) -> Any?) {
+        check(method !in customRequests) { "Custom request $method is registered twice" }
+        customRequests[method] = handler
+    }
+
+    /** Registers every handler on the connection and starts listening. */
+    fun listen() {
+        connection.onInitialize { params: dynamic -> initialize(params) }
+        connection.onShutdown { shutdown() }
+        connection.onDidOpenTextDocument { params: dynamic -> didOpen(params) }
+        connection.onDidChangeTextDocument { params: dynamic -> didChange(params) }
+        connection.onDidCloseTextDocument { params: dynamic -> didClose(params) }
+        connection.onHover { params: dynamic -> hover(params) }
+        connection.onDefinition { params: dynamic -> definition(params) }
+        connection.onReferences { params: dynamic -> references(params) }
+        connection.onDocumentSymbol { params: dynamic -> documentSymbol(params) }
+        connection.onDocumentFormatting { params: dynamic -> formatting(params) }
+        connection.onCompletion { params: dynamic -> completion(params) }
+        connection.onCodeAction { params: dynamic -> codeAction(params) }
+        customRequests.forEach { (method, handler) ->
+            connection.onRequest(method) { params: dynamic -> handler(params) }
+        }
+        // The fake connections of some tests do not know these two.
+        if (isPresent(connection.onDidChangeWatchedFiles)) {
+            connection.onDidChangeWatchedFiles { params: dynamic -> didChangeWatchedFiles(params) }
+        }
+        if (isPresent(connection.onInitialized)) {
+            connection.onInitialized { registerFileWatchers() }
+        }
+        connection.onNotification(ZenwaveCustomNotifications.PLUGIN_CATALOGUE) { params: dynamic ->
+            replacePluginCatalogue(if (isPresent(params)) params.catalogue else null)
+        }
+        connection.listen()
+    }
+
+    fun initialize(params: dynamic): dynamic {
+        initializationOptions = parseInitializationOptions(if (isPresent(params)) params.initializationOptions else null)
+        initializationOptions?.let { options ->
+            server.applyResourceSettings(
+                ZenwaveResourceSettings(
+                    remoteManifestName = options.remoteManifestName,
+                    allowedDomains = options.allowedDomains,
+                )
+            )
+            options.remoteManifestNameWarning?.let { warning ->
+                val console = connection.console
+                if (isPresent(console)) console.warn(warning)
+            }
+        }
+        initializationOptions?.projectManifestUri?.let { manifestUri ->
+            server.expectProjectManifest(manifestUri)
+            openWorkspace(manifestUri)
+        }
+        watchesFilesDynamically = isPresent(params) &&
+            params.capabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration == true
+        // Not awaited: the first pass of the reference index runs behind the requests that follow (NAV-R20).
+        server.startBackgroundIndex(workspaceFolderUris(params))
+        if (isPresent(params) && isPresent(params.initializationOptions)) {
+            val catalogue = params.initializationOptions.pluginCatalogue
+            if (isPresent(catalogue)) replacePluginCatalogue(catalogue)
+        }
+        return jsonObject(
+            "capabilities" to buildCapabilities(),
+            "serverInfo" to jsonObject("name" to "zenwave-lsp", "version" to serverVersion),
+        )
+    }
+
+    /** The workspace folders the client sent, or its root when it sent none. */
+    private fun workspaceFolderUris(params: dynamic): List<String> {
+        if (!isPresent(params)) return emptyList()
+        val folders = params.workspaceFolders
+        if (isPresent(folders) && js("Array.isArray(folders)") as Boolean) {
+            val uris = folders.unsafeCast<Array<dynamic>>().mapNotNull { stringOrNull(it.uri) }
+            if (uris.isNotEmpty()) return uris
+        }
+        return listOfNotNull(stringOrNull(params.rootUri))
+    }
+
+    /** NAV-R20: asks the client to tell the server about files created, changed or deleted on disk, when it can. */
+    private fun registerFileWatchers() {
+        if (!watchesFilesDynamically || !isPresent(connection.sendRequest)) return
+        val registration = jsonObject(
+            "id" to "zenwave-watched-files",
+            "method" to "workspace/didChangeWatchedFiles",
+            "registerOptions" to jsonObject(
+                "watchers" to arrayOf(jsonObject("globPattern" to WATCHED_FILES)),
+            ),
+        )
+        val pending: dynamic = connection.sendRequest("client/registerCapability", jsonObject("registrations" to arrayOf(registration)))
+        if (isPresent(pending) && isPresent(pending.catch)) {
+            pending.catch { error: dynamic ->
+                val console = connection.console
+                if (isPresent(console)) console.warn("Could not watch workspace files: ${error?.message ?: error}")
+            }
+        }
+    }
+
+    fun didChangeWatchedFiles(params: dynamic) {
+        val changes = params.changes.unsafeCast<Array<dynamic>>()
+        server.workspaceFilesChanged(
+            changes.map { change ->
+                WatchedFileChange(
+                    change.uri as String,
+                    when ((change.type as Number).toInt()) {
+                        1 -> WatchedFileChangeKind.CREATED
+                        3 -> WatchedFileChangeKind.DELETED
+                        else -> WatchedFileChangeKind.CHANGED
+                    },
+                )
+            },
+        )
+    }
+
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun openWorkspace(manifestUri: String) {
+        workspaceOpening = GlobalScope.promise {
+            try {
+                server.openWorkspace(manifestUri)
+            } catch (error: Throwable) {
+                // openWorkspace records a failure itself; anything else must not become an unhandled rejection.
+                val console = connection.console
+                if (isPresent(console)) console.warn("Could not open the workspace manifest: ${error.message}")
+            }
+            Unit
+        }
+    }
+
+    /** Uses [catalogue] for the next `.zw` previews. Anything that is not a catalogue is logged and ignored. */
+    private fun replacePluginCatalogue(catalogue: dynamic) {
+        try {
+            if (!isPresent(catalogue) || jsTypeOf(catalogue) != "object" || js("Array").isArray(catalogue) as Boolean) {
+                throw IllegalArgumentException("The plugin catalogue must be a JSON object")
+            }
+            server.replacePluginCatalogue(JSON.stringify(catalogue))
+        } catch (e: IllegalArgumentException) {
+            val console = connection.console
+            if (isPresent(console)) console.warn("Ignored the plugin catalogue sent by the client: ${e.message}")
+        }
+    }
+
+    fun shutdown(): Any? {
+        shutdownRequested = true
+        return null
+    }
+
+    fun didOpen(params: dynamic) {
+        val document = params.textDocument
+        val uri = document.uri as String
+        val text = document.text as String
+        val snapshot = DocumentSnapshot(
+            ref = DocumentRef(
+                uri = uri,
+                languageId = stringOrNull(document.languageId) ?: "",
+                version = (document.version as Number).toInt(),
+            ),
+            text = text,
+        )
+        documentTexts[uri] = text
+        server.open(snapshot)
+        logProcessingFailure(uri)
+        publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(uri)
+        publishLinkDiagnostics(uri)
+    }
+
+    fun didChange(params: dynamic) {
+        val document = params.textDocument
+        val uri = document.uri as String
+        val version = (document.version as Number).toInt()
+        val current = documentTexts[uri] ?: return
+        val nextText = params.contentChanges.unsafeCast<Array<dynamic>>()
+            .fold(current) { text, change -> applyContentChange(text, change) }
+        documentTexts[uri] = nextText
+        server.change(uri, nextText, version)
+        logProcessingFailure(uri)
+        publishDiagnosticsIfHandled(DocumentSnapshot(DocumentRef(uri, "", version), nextText))
+        publishImportDiagnostics(uri)
+        publishLinkDiagnostics(uri)
+    }
+
+    fun didClose(params: dynamic) {
+        val uri = params.textDocument.uri as String
+        documentTexts.remove(uri)
+        server.close(uri)
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        val kept = server.importedDiagnosticsFor(uri)
+        connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to (kept?.map(::diagnosticToJson) ?: emptyList()).toTypedArray()))
+        server.releaseImports(uri).forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
+    }
+
+    fun hover(params: dynamic): dynamic {
+        val hover = server.hover(params.textDocument.uri as String, positionFromJson(params.position)) ?: return null
+        return jsonObject(
+            "contents" to jsonObject("kind" to "markdown", "value" to hover.markdown),
+            "range" to hover.range?.let(::rangeToJson),
+        )
+    }
+
+    // A promise: the ZDL a ZFL command belongs to may have to be read.
+    fun definition(params: dynamic): dynamic = answer {
+        server.definitionReading(params.textDocument.uri as String, positionFromJson(params.position))
+            .mapNotNull(::locationToJson).toTypedArray()
+    }
+
+    fun completion(params: dynamic): dynamic =
+        server.completion(params.textDocument.uri as String, positionFromJson(params.position))
+            .map(::completionItemToJson).toTypedArray()
+
+    fun codeAction(params: dynamic): dynamic {
+        val range = params.range
+        return server.codeActions(
+            params.textDocument.uri as String,
+            Range(positionFromJson(range.start), positionFromJson(range.end)),
+        ).filter { codeActionKindRequested(it.kind, params.context?.only) }.map(::codeActionToJson).toTypedArray()
+    }
+
+    fun references(params: dynamic): dynamic {
+        val uri = params.textDocument.uri as String
+        val semanticId = server.hover(uri, positionFromJson(params.position))?.documentSymbol?.referenceId
+            ?: return emptyArray<Any>()
+        return server.reverseReferences(uri, semanticId).mapNotNull(::locationToJson).toTypedArray()
+    }
+
+    fun documentSymbol(params: dynamic): dynamic =
+        server.hierarchy(params.textDocument.uri as String).map(::documentSymbolToJson).toTypedArray()
+
+    fun formatting(params: dynamic): dynamic {
+        val uri = params.textDocument.uri as String
+        val current = documentTexts[uri] ?: return emptyArray<Any>()
+        val formatted = server.format(uri)
+        if (formatted == null || formatted == current) {
+            return emptyArray<Any>()
+        }
+        return arrayOf(jsonObject("range" to rangeToJson(fullDocumentRange(current)), "newText" to formatted))
+    }
+
+    private fun buildCapabilities(): dynamic {
+        val moduleCapabilities = server.capabilities()
+        return jsonObject(
+            "textDocumentSync" to 2, // TextDocumentSyncKind.Incremental
+            "hoverProvider" to moduleCapabilities.any { it.supportsHover },
+            "definitionProvider" to moduleCapabilities.any { it.supportsDefinition },
+            "referencesProvider" to moduleCapabilities.any { it.supportsReferences },
+            "documentSymbolProvider" to moduleCapabilities.any { it.supportsHierarchy },
+            "documentFormattingProvider" to moduleCapabilities.any { it.supportsFormatting },
+            "completionProvider" to if (moduleCapabilities.any { it.supportsCompletion }) {
+                jsonObject("resolveProvider" to false, "triggerCharacters" to arrayOf("(", ",", "\"", " "))
+            } else {
+                null
+            },
+            "codeActionProvider" to if (moduleCapabilities.any { it.supportsCodeActions }) {
+                jsonObject("codeActionKinds" to arrayOf("quickfix"))
+            } else {
+                null
+            },
+            "experimental" to jsonObject(
+                "moduleSelectors" to moduleCapabilities.map {
+                    jsonObject("languageId" to it.languageId, "extensions" to it.extensions.toTypedArray())
+                }.toTypedArray(),
+                "customRequests" to customRequestMethods.toTypedArray(),
+                "customNotifications" to ZenwaveCustomNotifications.ALL.toTypedArray(),
+                "previewModes" to true,
+                "organizeModes" to true,
+                "flowVariants" to true,
+                "savedPositions" to true,
+                "flowLanes" to arrayOf("none", "systems", "services"),
+            ),
+        )
+    }
+
+    /**
+     * AR-R9: the server reads what a `zenwave:` document imports itself, then publishes the document's diagnostics with
+     * the import problems, and the imported documents' own. Not awaited by the notification; a failure is logged.
+     */
+    private fun publishImportDiagnostics(uri: String) {
+        if (!uri.startsWith("zenwave:")) return
+        val publishing: Promise<Unit> = GlobalScope.promise {
+            // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+            server.publishImportDiagnostics(uri) { result ->
+                result.documents.forEach { (documentUri, diagnostics) ->
+                    connection.sendDiagnostics(
+                        jsonObject("uri" to documentUri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray())
+                    )
+                }
+                result.cleared.forEach { connection.sendDiagnostics(jsonObject("uri" to it, "diagnostics" to emptyArray<Any>())) }
+            }
+        }
+        importsPublishing = publishing
+        publishing.catch { error: dynamic ->
+            val console = connection.console
+            if (isPresent(console)) console.warn("Could not read the imports of $uri: ${error?.message ?: error}")
+        }
+    }
+
+    /** NAV-R7: a link to a document that cannot be reached (a ZFL `@zdl`) gets a diagnostic once the server has tried to read it. */
+    private fun publishLinkDiagnostics(uri: String) {
+        if (!uri.endsWith(".zfl")) return
+        val publishing: Promise<Unit> = GlobalScope.promise {
+            server.diagnosticsWithLinks(uri)?.let { diagnostics ->
+                connection.sendDiagnostics(jsonObject("uri" to uri, "diagnostics" to diagnostics.map(::diagnosticToJson).toTypedArray()))
+            }
+        }
+        linksPublishing = publishing
+        publishing.catch { error: dynamic ->
+            val console = connection.console
+            if (isPresent(console)) console.warn("Could not check the links of $uri: ${error?.message ?: error}")
+        }
+    }
+
+    private fun publishDiagnosticsIfHandled(snapshot: DocumentSnapshot) {
+        val uri = snapshot.ref.uri
+        if (!server.canHandle(snapshot) && (uri.endsWith(".json") || uri.endsWith(".yml") || uri.endsWith(".yaml"))) {
+            return
+        }
+        connection.sendDiagnostics(
+            jsonObject(
+                "uri" to uri,
+                "diagnostics" to server.diagnostics(uri).map(::diagnosticToJson).toTypedArray(),
+            )
+        )
+    }
+
+    private fun logProcessingFailure(uri: String) {
+        val failure = server.processingFailure(uri) ?: return
+        val console = connection.console
+        if (isPresent(console)) console.warn("Could not process $uri: $failure")
+    }
+
+    private fun applyContentChange(current: String, change: dynamic): String {
+        val text = change.text as String
+        if (!isPresent(change.range)) {
+            return text
+        }
+        val startOffset = offsetAt(current, positionFromJson(change.range.start))
+        val endOffset = offsetAt(current, positionFromJson(change.range.end))
+        return current.substring(0, startOffset) + text + current.substring(endOffset)
+    }
+
+    private fun offsetAt(text: String, position: io.zenwave360.lsp.core.contracts.Position): Int {
+        var line = 0
+        var index = 0
+        while (line < position.line && index < text.length) {
+            if (text[index] == '\n') {
+                line += 1
+            }
+            index += 1
+        }
+        return (index + position.character).coerceAtMost(text.length)
+    }
+}
+
+internal fun parseInitializationOptions(initializationOptions: dynamic): ZenwaveInitializationOptions? {
+    if (!isPresent(initializationOptions) || jsTypeOf(initializationOptions) != "object") return null
+    val zenwave = initializationOptions.zenwave
+    if (!isPresent(zenwave) || jsTypeOf(zenwave) != "object") return null
+    val projectManifestUri = stringOrNull(zenwave.projectManifestUri)
+    val requestedName = stringOrNull(zenwave.remoteManifestName)
+    val allowedDomains = stringListOrNull(zenwave.allowedDomains)
+    if (projectManifestUri == null && requestedName == null && allowedDomains == null) return null
+    val name = resolveRemoteManifestName(requestedName)
+    return ZenwaveInitializationOptions(
+        projectManifestUri = projectManifestUri,
+        remoteManifestName = name.name,
+        allowedDomains = allowedDomains.orEmpty(),
+        remoteManifestNameWarning = name.warning,
+    )
+}
+
+/** A JSON array of strings, or null when the field is absent or not an array. Entries that are not strings are dropped. */
+private fun stringListOrNull(value: dynamic): List<String>? {
+    if (!isPresent(value)) return null
+    if (js("Array.isArray(value)") as Boolean != true) return null
+    val length = (value.length as Number).toInt()
+    return List(length) { index -> stringOrNull(value[index]) }.filterNotNull()
+}
+
+/**
+ * Starts the ZenWave language server on a `vscode-languageserver` connection created by the caller.
+ * Used by the package's Node IPC and Web Worker entry points.
+ */
+@OptIn(ExperimentalJsExport::class)
+@JsExport
+fun startZenwaveLanguageServer(connection: dynamic, createResponseError: dynamic) {
+    val factory: ((Int, String, dynamic) -> dynamic)? =
+        if (isPresent(createResponseError)) { code, message, data -> createResponseError(code, message, data) } else null
+    ZenwaveJsLanguageServer(defaultCoreLanguageServer(), connection, LSP_JS_VERSION, factory).listen()
+}
+
+private fun rejected(reason: dynamic): dynamic {
+    val promiseConstructor: dynamic = js("Promise")
+    return promiseConstructor.reject(reason)
+}
+
+/** The version of this server, from the Gradle build. */
+@OptIn(ExperimentalJsExport::class)
+@JsExport
+fun zenwaveLanguageServerVersion(): String = LSP_JS_VERSION

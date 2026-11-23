@@ -8,15 +8,16 @@ class InMemoryDocumentSessionStore : DocumentSessionStore {
 
     override fun open(snapshot: DocumentSnapshot) {
         lock.write {
-            snapshots[snapshot.ref.uri] = snapshot
+            snapshots[FileUris.key(snapshot.ref.uri)] = snapshot
         }
     }
 
     override fun change(uri: String, text: String, version: Int) {
         lock.write {
-            val current = snapshots[uri]
+            val key = FileUris.key(uri)
+            val current = snapshots[key]
             if (current != null && version >= current.ref.version) {
-                snapshots[uri] = current.copy(
+                snapshots[key] = current.copy(
                     ref = current.ref.copy(version = version),
                     text = text
                 )
@@ -26,13 +27,13 @@ class InMemoryDocumentSessionStore : DocumentSessionStore {
 
     override fun close(uri: String) {
         lock.write {
-            snapshots.remove(uri)
+            snapshots.remove(FileUris.key(uri))
         }
     }
 
     override fun get(uri: String): DocumentSnapshot? =
         lock.read {
-            snapshots[uri]
+            snapshots[FileUris.key(uri)]
         }
 
     override fun getAll(): List<DocumentSnapshot> =

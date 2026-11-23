@@ -1,7 +1,7 @@
 package io.zenwave360.lsp.core.xref
 
+import io.zenwave360.lsp.core.platform.FileUris
 import io.zenwave360.lsp.core.contracts.NavigationTarget
-import io.zenwave360.lsp.core.contracts.SemanticId
 
 class InMemoryCrossReferenceIndex : CrossReferenceIndex {
     private val lock = io.zenwave360.lsp.core.platform.PlatformReadWriteLock()
@@ -12,7 +12,7 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
         if (contributions.isEmpty()) {
             return
         }
-        val sourceUri = contributions.first().sourceUri
+        val sourceUri = FileUris.key(contributions.first().sourceUri)
         lock.write {
             removeSourceContributions(sourceUri)
             contributionsBySourceUri[sourceUri] = contributions
@@ -25,28 +25,19 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
 
     override fun remove(uri: String) {
         lock.write {
-            removeSourceContributions(uri)
+            removeSourceContributions(FileUris.key(uri))
         }
     }
 
-    override fun forwardReferences(sourceUri: String, sourceSemanticId: SemanticId): List<NavigationTarget> =
+    override fun forwardReferences(sourceUri: String, sourceSemanticId: String): List<NavigationTarget> =
         lock.read {
-            contributionsBySourceUri[sourceUri]
+            contributionsBySourceUri[FileUris.key(sourceUri)]
                 .orEmpty()
-                .filter { it.sourceSemanticId == sourceSemanticId }
-                .map {
-                    NavigationTarget(
-                        targetKind = "reference",
-                        label = it.targetLabel ?: it.targetSemanticId ?: it.targetUri,
-                        uri = it.targetUri,
-                        range = it.targetRange,
-                        category = null,
-                        relationType = it.relationType
-                    )
-                }
+                .filter { FileUris.keyOfIdentifier(it.sourceSemanticId) == FileUris.keyOfIdentifier(sourceSemanticId) }
+                .map { it.toForwardTarget() }
         }
 
-    override fun reverseReferences(targetUri: String, targetSemanticId: SemanticId): List<NavigationTarget> =
+    override fun reverseReferences(targetUri: String, targetSemanticId: String): List<NavigationTarget> =
         lock.read {
             contributionsByTargetKey[targetKey(targetUri, targetSemanticId)]
                 .orEmpty()
@@ -81,6 +72,6 @@ class InMemoryCrossReferenceIndex : CrossReferenceIndex {
         contributionsBySourceUri.remove(sourceUri)
     }
 
-    private fun targetKey(targetUri: String, targetSemanticId: SemanticId?): String =
-        "$targetUri#${targetSemanticId.orEmpty()}"
+    private fun targetKey(targetUri: String, targetSemanticId: String?): String =
+        "${FileUris.key(targetUri)}#${FileUris.keyOfIdentifier(targetSemanticId.orEmpty())}"
 }

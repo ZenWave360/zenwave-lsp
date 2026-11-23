@@ -1,0 +1,1105 @@
+package io.zenwave360.lsp.js
+
+import io.zenwave360.architecture.graph.ArchitectureGraph
+import io.zenwave360.architecture.graph.ArchitectureGraphResult
+import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.architecture.workspace.DefaultWorkspaceQueryApi
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
+import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.await
+import kotlinx.coroutines.promise
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests
+import kotlin.js.Promise
+import kotlin.test.Test
+import kotlin.test.fail
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/** A stand-in for a vscode-languageserver connection that records handlers and sent notifications. */
+internal class RecordingConnection {
+    val handlers = mutableMapOf<String, dynamic>()
+    val diagnostics = mutableListOf<dynamic>()
+    val warnings = mutableListOf<String>()
+    var listening = false
+    val connection: dynamic = js("({})")
+
+    init {
+        listOf(
+            "onInitialize", "onShutdown", "onDidOpenTextDocument", "onDidChangeTextDocument",
+            "onDidCloseTextDocument", "onHover", "onDefinition", "onReferences", "onDocumentSymbol",
+            "onDocumentFormatting", "onCompletion", "onCodeAction",
+            "onDidChangeWatchedFiles", "onInitialized",
+        ).forEach { name ->
+            connection[name] = { handler: dynamic -> handlers[name] = handler }
+        }
+        connection["onRequest"] = { method: String, handler: dynamic -> handlers[method] = handler }
+        connection["sendDiagnostics"] = { params: dynamic -> diagnostics.add(params) }
+        connection["onNotification"] = { method: String, handler: dynamic -> handlers[method] = handler }
+        connection["console"] = jsonObject("warn" to { message: String -> warnings.add(message) })
+        connection["listen"] = { listening = true }
+    }
+
+    fun call(name: String, params: dynamic = null): dynamic = handlers.getValue(name)(params)
+}
+
+private const val ORDERS_URI = "file:///workspace/orders.zdl"
+private val ORDERS_TEXT = """
+    entity Customer {
+        name String required
+    }
+
+    entity CustomerOrder {
+        customer Customer
+        total Integer
+    }
+""".trimIndent()
+
+private fun nodeFsOrNull(): dynamic =
+    js("typeof globalThis.process === 'object' && typeof globalThis.process.getBuiltinModule === 'function' ? globalThis.process.getBuiltinModule('node:fs') : null")
+
+private fun nodePathOrNull(): dynamic =
+    js("typeof globalThis.process === 'object' && typeof globalThis.process.getBuiltinModule === 'function' ? globalThis.process.getBuiltinModule('node:path') : null")
+
+private fun pause(millis: Int): Promise<Unit> =
+    Promise { resolve, _ -> js("globalThis.setTimeout(function() { resolve(null) }, millis)") }
+
+private fun textDocumentItem(uri: String, languageId: String, version: Int, text: String): dynamic =
+    jsonObject("textDocument" to jsonObject("uri" to uri, "languageId" to languageId, "version" to version, "text" to text))
+
+class ZenwaveJsLanguageServerTest {
+
+    private fun listening(): Pair<ZenwaveJsLanguageServer, RecordingConnection> {
+        val recording = RecordingConnection()
+        val server = ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test")
+        server.listen()
+        return server to recording
+    }
+
+    // NAV-R20: a closed file's uses are found by references, through the handlers the connection registers.
+    @Test
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    fun referencesIncludeTheUsesInAClosedFileIndexedInTheBackground(): Promise<Unit> {
+        val fs = nodeFsOrNull()
+        val path = nodePathOrNull()
+        // The browser run has no file system: the worker wire test covers that case.
+        if (fs == null || path == null) return Promise.resolve(Unit)
+        val root = fs.mkdtempSync(path.join(js("globalThis.process.getBuiltinModule('node:os')").tmpdir(), "zenwave-js-index-")) as String
+        fun write(relative: String, text: String): String {
+            val file = path.join(root, relative) as String
+            fs.mkdirSync(path.dirname(file), jsonObject("recursive" to true))
+            fs.writeFileSync(file, text)
+            return "file:///" + file.replace("\\", "/").trimStart('/')
+        }
+        val zdlText = """
+            entity Order {
+                total Integer
+            }
+
+            service OrderService for (Order) {
+                createOrder(Order) Order
+            }
+        """.trimIndent()
+        val flowText = """
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                @actor(Customer)
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+            }
+        """.trimIndent()
+        val zdlUri = write("orders/model.zdl", zdlText)
+        val flowUri = write("checkout.zfl", flowText)
+        write(".claude/skills/other.zfl", flowText)
+        val (_, recording) = listening()
+
+        fun uses(): List<String> =
+            (recording.call(
+                "onReferences",
+                jsonObject("textDocument" to jsonObject("uri" to zdlUri), "position" to jsonObject("line" to 5, "character" to 6)),
+            ) as Array<dynamic>).map { it.uri as String }
+        suspend fun awaitReady() {
+            repeat(500) {
+                val status: dynamic = recording.call("zenwave/indexStatus")
+                if (status.state == "ready") return
+                pause(10).await()
+            }
+            throw AssertionError("the index never became ready")
+        }
+
+        return kotlinx.coroutines.GlobalScope.promise {
+            val rootUri = "file:///" + root.replace("\\", "/").trimStart('/')
+            recording.call("onInitialize", jsonObject("capabilities" to jsonObject(), "workspaceFolders" to arrayOf(jsonObject("uri" to rootUri, "name" to "ws"))))
+            awaitReady()
+            val status: dynamic = recording.call("zenwave/indexStatus")
+            assertEquals(2, status.files as Int)
+            recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdlText))
+            assertEquals(listOf(flowUri), uses())
+
+            // Opening and closing the flow keeps its uses.
+            recording.call("onDidOpenTextDocument", textDocumentItem(flowUri, "zfl", 1, flowText))
+            recording.call("onDidCloseTextDocument", jsonObject("textDocument" to jsonObject("uri" to flowUri)))
+            assertEquals(listOf(flowUri), uses())
+
+            fs.rmSync(path.join(root, "checkout.zfl"))
+            recording.call("onDidChangeWatchedFiles", jsonObject("changes" to arrayOf(jsonObject("uri" to flowUri, "type" to 3))))
+            assertEquals(emptyList(), uses())
+        }
+    }
+
+    @Test
+    fun definitionToAnApiDocumentWithNoRangeReachesTheClientAtTheStartOfTheFile(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("@get") }
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/openapi.yml", locations[0].uri as String)
+            assertEquals(0, locations[0].range.start.line as Int)
+            assertEquals(0, locations[0].range.start.character as Int)
+            assertEquals(0, locations[0].range.end.line as Int)
+            assertEquals(0, locations[0].range.end.character as Int)
+    
+        }
+    }
+
+    @Test
+    fun definitionOfAsyncApiAnnotationLandsOnTheChannelOfTheOpenDocument(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/models/orders.zdl"
+        val text = """
+            apis {
+                openapi(provider) default {
+                    uri "apis/openapi.yml"
+                }
+                asyncapi(provider) OrdersAsyncAPI {
+                    uri "apis/asyncapi.yml"
+                }
+            }
+
+            entity Order {
+                id String required
+            }
+
+            input OrderIn {
+                name String
+            }
+
+            @rest("/customer")
+            service CustomerService for (Order) {
+                @get("/{id}")
+                @asyncapi({api: OrdersAsyncAPI, channel: "OrderCreatedChannel"})
+                getCustomer(OrderIn) Order?
+            }
+""".trimIndent()
+        recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        recording.call(
+            "onDidOpenTextDocument",
+            textDocumentItem("file:///workspace/models/apis/asyncapi.yml", "yaml", 1, """
+            asyncapi: 3.0.0
+            info:
+              title: Orders
+              version: 1.0.0
+            channels:
+              OrderCreatedChannel:
+                address: orders.created
+""".trimIndent()),
+        )
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("channel:") }
+        val character = text.lines()[line].indexOf("channel:") + 3
+
+        return (recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+
+
+            assertEquals(1, locations.size)
+            assertEquals("file:///workspace/models/apis/asyncapi.yml", locations[0].uri as String)
+            assertEquals(6, locations[0].range.start.line as Int)
+    
+        }
+    }
+
+    @Test
+    fun registersEveryHandlerAndListens() {
+        val (server, recording) = listening()
+
+        assertTrue(recording.listening)
+        server.customRequestMethods.forEach { method -> assertTrue(method in recording.handlers, method) }
+        assertTrue("onInitialize" in recording.handlers)
+    }
+
+    @Test
+    fun advertisesCustomRequestsFromHandlerRegistration() {
+        val (server, recording) = listening()
+
+        val result = recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        val advertised = (result.capabilities.experimental.customRequests as Array<String>).toList()
+
+        assertEquals(server.customRequestMethods, advertised)
+        assertEquals(
+            listOf(
+                "zenwave/hierarchy", "zenwave/forwardReferences", "zenwave/reverseReferences", "zenwave/organizeZflServices",
+                "zenwave/eventFlowViews", "zenwave/preview", "zenwave/symbolAt", "zenwave/statResource", "zenwave/readResource",
+                "zenwave/indexStatus",
+            ),
+            advertised,
+        )
+        // The same list lsp-jvm advertises.
+        assertEquals(ZenwaveCustomRequests.ALL, advertised)
+        assertEquals(true, result.capabilities.experimental.organizeModes)
+        assertEquals("zenwave-lsp", result.serverInfo.name)
+        assertEquals("1.2.3-test", result.serverInfo.version)
+        assertEquals(2, result.capabilities.textDocumentSync)
+        val languageIds = (result.capabilities.experimental.moduleSelectors as Array<dynamic>).map { it.languageId as String }
+        assertTrue(languageIds.containsAll(listOf("zdl", "zfl")), languageIds.toString())
+    }
+
+    @Test
+    fun storesZenwaveInitializationOptions() {
+        val (server, recording) = listening()
+
+        recording.call(
+            "onInitialize",
+            jsonObject(
+                "initializationOptions" to jsonObject(
+                    "zenwave" to jsonObject(
+                        "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
+                    )
+                )
+            ),
+        )
+
+        assertEquals("file:///workspace/zenwave-architecture.yml", server.initializationOptions?.projectManifestUri)
+        assertNull(parseInitializationOptions(jsonObject("other" to 1)))
+    }
+
+    @Test
+    fun ignoresAStaleConfigUriFromAnOlderClient() {
+        val options = parseInitializationOptions(
+            jsonObject(
+                "zenwave" to jsonObject(
+                    "configUri" to "file:///workspace/.zenwave/config.yml",
+                    "projectManifestUri" to "file:///workspace/zenwave-architecture.yml",
+                )
+            )
+        )
+
+        assertEquals("file:///workspace/zenwave-architecture.yml", options?.projectManifestUri)
+        assertNull(parseInitializationOptions(jsonObject("zenwave" to jsonObject("configUri" to "file:///workspace/.zenwave/config.yml"))))
+    }
+
+    @Test
+    fun parsesRemoteManifestNameAndAllowedDomains() {
+        val options = parseInitializationOptions(
+            jsonObject(
+                "zenwave" to jsonObject(
+                    "remoteManifestName" to "architecture.yml",
+                    "allowedDomains" to arrayOf("github.com", "*.githubusercontent.com"),
+                )
+            )
+        )
+
+        assertEquals("architecture.yml", options?.remoteManifestName)
+        assertEquals(listOf("github.com", "*.githubusercontent.com"), options?.allowedDomains)
+        assertNull(options?.remoteManifestNameWarning)
+
+        val (server, recording) = listening()
+        recording.call(
+            "onInitialize",
+            jsonObject(
+                "capabilities" to jsonObject(),
+                "initializationOptions" to jsonObject(
+                    "zenwave" to jsonObject(
+                        "remoteManifestName" to "a/b.yml",
+                        "allowedDomains" to arrayOf("GitHub.com"),
+                    )
+                ),
+            ),
+        )
+        assertEquals(".zenwave-manifest.yml", server.initializationOptions?.remoteManifestName)
+        assertEquals(listOf("GitHub.com"), server.initializationOptions?.allowedDomains)
+        assertNotNull(server.initializationOptions?.remoteManifestNameWarning)
+        assertTrue(recording.warnings.any { "a/b.yml" in it && ".zenwave-manifest.yml" in it })
+    }
+
+    @Test
+    fun aFailingManifestIsRecordedAndDoesNotHoldUpInitialize(): Promise<Unit> {
+        val (server, recording) = listening()
+
+        val result = recording.call(
+            "onInitialize",
+            jsonObject("initializationOptions" to jsonObject("zenwave" to jsonObject("projectManifestUri" to "http://127.0.0.1:1/zenwave-architecture.yml"))),
+        )
+
+        assertEquals("zenwave-lsp", result.serverInfo.name)
+        return server.workspaceOpening!!.then {
+            assertEquals(io.zenwave360.lsp.core.platform.WorkspaceState.FAILED, server.workspaceStatus().state)
+            assertEquals("http://127.0.0.1:1/zenwave-architecture.yml", server.workspaceStatus().manifestUri)
+        }
+    }
+
+    @Test
+    fun servesRuleCompletionAndQuickFix() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { audit \"Audited\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(au)",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+
+        val items = recording.call(
+            "onCompletion",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to 5, "character" to 12)),
+        ) as Array<dynamic>
+        assertEquals(1, items.size)
+        assertEquals("audit", items[0].label)
+
+        val actions = recording.call(
+            "onCodeAction",
+            jsonObject(
+                "textDocument" to jsonObject("uri" to uri),
+                "range" to jsonObject("start" to jsonObject("line" to 0, "character" to 0), "end" to jsonObject("line" to 0, "character" to 8)),
+                "context" to jsonObject("diagnostics" to emptyArray<Any>()),
+            ),
+        ) as Array<dynamic>
+        assertEquals(1, actions.size)
+        assertEquals("quickfix", actions[0].kind)
+        assertEquals("rules", actions[0].edit.changes[uri][0].newText)
+    }
+
+    @Test
+    fun codeActionsHonourTheRequestedKindsAndCompletionCarriesItsEdit() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = listOf(
+            "policies { stock-first \"Stock\" }",
+            "entity Order { name String }",
+            "aggregate OrderAggregate(Order) {",
+            "}",
+            "service OrderService for (OrderAggregate) {",
+            "    @rules(\"stock-fi\")",
+            "    placeOrder(Order) Order",
+            "}",
+        ).joinToString("\n")
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+
+        val items = recording.call(
+            "onCompletion",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to 5, "character" to 20)),
+        ) as Array<dynamic>
+        assertEquals("\"stock-first\"", items[0].textEdit.newText)
+        assertEquals(11, items[0].textEdit.range.start.character)
+        assertEquals(21, items[0].textEdit.range.end.character)
+
+        fun actions(only: Array<String>?): Int {
+            val context = if (only == null) jsonObject("diagnostics" to emptyArray<Any>()) else jsonObject("diagnostics" to emptyArray<Any>(), "only" to only)
+            return (recording.call(
+                "onCodeAction",
+                jsonObject(
+                    "textDocument" to jsonObject("uri" to uri),
+                    "range" to jsonObject("start" to jsonObject("line" to 0, "character" to 0), "end" to jsonObject("line" to 0, "character" to 8)),
+                    "context" to context,
+                ),
+            ) as Array<dynamic>).size
+        }
+        assertEquals(1, actions(null))
+        assertEquals(1, actions(arrayOf("quickfix")))
+        assertEquals(1, actions(arrayOf("refactor", "quickfix")))
+        assertEquals(0, actions(arrayOf("refactor")))
+        assertEquals(0, actions(arrayOf("quickfix.sub")))
+    }
+
+    @Test
+    fun servesAnOpenedZdlDocument(): Promise<Unit> {
+        val (_, recording) = listening()
+
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val published = recording.diagnostics.single()
+        assertEquals(ORDERS_URI, published.uri)
+        assertEquals(0, (published.diagnostics as Array<dynamic>).size)
+
+        val hover = recording.call(
+            "onHover",
+            jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI), "position" to jsonObject("line" to 5, "character" to 15)),
+        )
+        assertNotNull(hover)
+        assertEquals("markdown", hover.contents.kind)
+
+        val symbols = recording.call("onDocumentSymbol", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+        assertTrue(JSON.stringify(symbols).contains("\"name\":\"CustomerOrder\""))
+
+        return (recording.call("zenwave/hierarchy", jsonObject("uri" to ORDERS_URI)) as Promise<dynamic>).then { result: dynamic ->
+            val hierarchy = result as Array<dynamic>
+            assertTrue(hierarchy.isNotEmpty())
+            assertTrue(JSON.stringify(hierarchy).contains("\"CustomerOrder\""))
+            assertEquals(ORDERS_URI, hierarchy.first().sourceUri)
+            assertTrue(isPresent(hierarchy.first().viewNodeIds))
+        }
+    }
+
+    /** NAV-R22, ZFL-R11: hover on an annotated rule shows its annotations and javadoc through the connection. */
+    @Test
+    fun hoverOnAnAnnotatedRuleShowsAnnotationsAndJavadoc() {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/rules.zdl"
+        val text = """
+            rules (Order) {
+                /** Seats first */
+                @invariant @rule(severity: high)
+                noBookingWithoutSeats "no booking without seats"
+            }
+            entity Order { name String }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zdl", 1, text))
+        val line = text.lines().indexOfFirst { it.contains("noBookingWithoutSeats") }
+
+        val hover = recording.call(
+            "onHover",
+            jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to 6)),
+        )
+
+        assertNotNull(hover)
+        val value = hover.contents.value as String
+        assertTrue(value.contains("`@invariant` `@rule(severity: high)`"), value)
+        assertTrue(value.contains("Seats first") && value.contains("no booking without seats"), value)
+    }
+
+    /** NAV-R11, NAV-R8, NAV-R22: a ZFL command and a `@zdl` string reach the ZDL through the connection's definition handler. */
+    @Test
+    fun definitionFromAZflReachesTheZdlItNames(): Promise<Unit> {
+        val (_, recording) = listening()
+        val zflUri = "file:///workspace/checkout.zfl"
+        val zdlUri = "file:///workspace/orders/model.zdl"
+        val zfl = """
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent()
+        val zdl = "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdl))
+        val lines = zfl.lines()
+        fun definitionAt(line: Int, character: Int): Promise<dynamic> = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to zflUri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        return definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(5, locations[0].range.start.line)
+            definitionAt(stringLine, lines[stringLine].indexOf("orders/model.zdl") + 3)
+        }.then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(0, locations[0].range.start.line)
+        }
+    }
+
+    /** NAV-R7: a `@zdl` that names a document that cannot be reached is a warning at its string. */
+    @Test
+    fun aMissingZdlIsAWarningAtItsLink(): Promise<Unit> {
+        val (server, recording) = listening()
+        val zflUri = "file:///workspace/missing/checkout.zfl"
+        val zfl = """
+            systems {
+                @zdl("orders/nowhere.zdl")
+                Orders {
+                    service OrderService
+                }
+            }
+
+            flow F {
+                start S {
+                }
+
+                end {
+                    completed: S
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+
+        return server.linksPublishing!!.then {
+            val link = recording.diagnostics.filter { it.uri == zflUri }
+                .flatMap { (it.diagnostics as Array<dynamic>).toList() }.single { it.code == "zfl.zdl-not-found" }
+            assertEquals(2, link.severity)
+            assertEquals(1, link.range.start.line)
+        }
+    }
+
+    /** NAV-R9: a listed `@zdl` resolves to the first location that exists, and a click on any string opens it. */
+    @Test
+    fun aListedZdlResolvesToTheFirstLocationThatExists(): Promise<Unit> {
+        val (_, recording) = listening()
+        val zflUri = "file:///workspace/list/checkout.zfl"
+        val zdlUri = "file:///workspace/list/orders/model.zdl"
+        val otherUri = "file:///workspace/list/orders/other.zdl"
+        val zfl = """
+            systems {
+                @zdl("orders/nowhere.zdl", "orders/model.zdl", "orders/other.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                }
+
+                end {
+                    completed: CheckoutStarted
+                }
+            }
+        """.trimIndent()
+        val zdl = "entity Order {\n    total Integer\n}\n\nservice OrderService for (Order) {\n    createOrder(Order) Order\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(zdlUri, "zdl", 1, zdl))
+        recording.call("onDidOpenTextDocument", textDocumentItem(otherUri, "zdl", 1, "entity Order {\n    total Integer\n}\n"))
+        val lines = zfl.lines()
+        fun definitionAt(line: Int, character: Int): Promise<dynamic> = recording.call(
+            "onDefinition",
+            jsonObject("textDocument" to jsonObject("uri" to zflUri), "position" to jsonObject("line" to line, "character" to character)),
+        ) as Promise<dynamic>
+
+        val commandLine = lines.indexOfFirst { "do createOrder" in it }
+        val stringLine = lines.indexOfFirst { "@zdl(" in it }
+        return definitionAt(commandLine, lines[commandLine].indexOf("createOrder") + 2).then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(zdlUri, locations[0].uri)
+            assertEquals(5, locations[0].range.start.line)
+            definitionAt(stringLine, lines[stringLine].indexOf("orders/other.zdl") + 3)
+        }.then { result: dynamic ->
+            val locations = result as Array<dynamic>
+            assertEquals(1, locations.size, JSON.stringify(result))
+            assertEquals(otherUri, locations[0].uri)
+        }
+    }
+
+    /** NAV-R9: when no listed location resolves, one warning at the `@zdl` names them all. */
+    @Test
+    fun aListedZdlThatResolvesNowhereIsOneWarningListingAll(): Promise<Unit> {
+        val (server, recording) = listening()
+        val zflUri = "file:///workspace/list-missing/checkout.zfl"
+        val zfl = """
+            systems {
+                @zdl("orders/a.zdl", "orders/b.zdl")
+                Orders {
+                    service OrderService
+                }
+            }
+
+            flow F {
+                start S {
+                }
+
+                end {
+                    completed: S
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(zflUri, "zfl", 1, zfl))
+
+        return server.linksPublishing!!.then {
+            val link = recording.diagnostics.filter { it.uri == zflUri }
+                .flatMap { (it.diagnostics as Array<dynamic>).toList() }.single { it.code == "zfl.zdl-not-found" }
+            assertEquals("ZDL of system Orders not found: orders/a.zdl, orders/b.zdl", link.message)
+            assertEquals(1, link.range.start.line)
+        }
+    }
+
+    @Test
+    fun answersSymbolAtWithWhatTheReferenceRequestsTake(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = """systems {
+    @zdl("orders/model.zdl")
+    Orders {
+        service OrderService {
+            commands: createOrder
+        }
+    }
+}
+
+flow CheckoutFlow {
+    start CheckoutStarted {
+    }
+    when CheckoutStarted do createOrder {
+        service Orders.OrderService
+        emits OrderCreated
+    }
+    end {
+        completed: OrderCreated
+    }
+}
+"""
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        fun symbolAt(line: Int, character: Int): Promise<dynamic> =
+            recording.call(
+                "zenwave/symbolAt",
+                jsonObject("textDocument" to jsonObject("uri" to uri), "position" to jsonObject("line" to line, "character" to character)),
+            ) as Promise<dynamic>
+
+        return symbolAt(2, 6).then { symbol: dynamic ->
+            assertEquals("$uri#systems.Orders", symbol.semanticId)
+            assertEquals(uri, symbol.uri)
+            val references = recording.call("zenwave/forwardReferences", jsonObject("uri" to symbol.uri, "semanticId" to symbol.semanticId)) as Array<dynamic>
+            assertEquals("declares-domain", references.single().relationType)
+            symbolAt(8, 0)
+        }.then { blank: dynamic ->
+            assertEquals(null, blank)
+        }
+    }
+
+    @Test
+    fun appliesIncrementalChangesAndRepublishesDiagnostics() {
+        val (_, recording) = listening()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val line = ORDERS_TEXT.lines()[5]
+        val start = line.indexOf("Customer")
+        recording.call(
+            "onDidChangeTextDocument",
+            jsonObject(
+                "textDocument" to jsonObject("uri" to ORDERS_URI, "version" to 2),
+                "contentChanges" to arrayOf(
+                    jsonObject(
+                        "range" to jsonObject(
+                            "start" to jsonObject("line" to 5, "character" to start),
+                            "end" to jsonObject("line" to 5, "character" to start + "Customer".length),
+                        ),
+                        "text" to "Client",
+                    )
+                ),
+            ),
+        )
+
+        assertEquals(2, recording.diagnostics.size)
+        val formatted = recording.call("onDocumentFormatting", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+        val edits = formatted as Array<dynamic>
+        if (edits.isNotEmpty()) {
+            assertTrue((edits.first().newText as String).contains("customer Client"))
+        }
+    }
+
+
+    private fun catalogue(summary: String?): dynamic {
+        val catalogue = jsonObject("source" to "Test SDK", "version" to "9.9", "plugins" to emptyArray<dynamic>())
+        if (summary != null) {
+            catalogue.plugins = arrayOf(jsonObject("name" to "ZDLToOpenAPIPlugin", "configClassName" to "x.P", "summary" to summary))
+        }
+        return catalogue
+    }
+
+    private fun zwContent(recording: RecordingConnection): Promise<String> {
+        recording.call(
+            "onDidOpenTextDocument",
+            textDocumentItem("file:///workspace/scripts.zw", "zw", 1, "config {\n    plugins {\n        ZDLToOpenAPIPlugin {\n            targetFile \"./openapi.yml\"\n        }\n    }\n}\n"),
+        )
+        return (recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/scripts.zw"))) as Promise<dynamic>)
+            .then { result: dynamic -> (result.representations as Array<dynamic>).single().content as String }
+    }
+
+    @Test
+    fun advertisesAndAcceptsThePluginCatalogueNotification(): Promise<Unit> {
+        val (_, recording) = listening()
+        val result = recording.call("onInitialize", jsonObject("capabilities" to jsonObject()))
+        assertEquals(listOf("zenwave/pluginCatalogue"), (result.capabilities.experimental.customNotifications as Array<String>).toList())
+        assertTrue("zenwave/pluginCatalogue" in recording.handlers)
+
+        return zwContent(recording).then { content ->
+            assertTrue(content.contains("draft OpenAPI"), "the server's own copy describes the plugin")
+            recording.call("zenwave/pluginCatalogue", jsonObject("catalogue" to catalogue("Replaced")))
+            recording.call("zenwave/pluginCatalogue", jsonObject("catalogue" to jsonObject("plugins" to 3)))
+            recording.call("zenwave/pluginCatalogue", jsonObject())
+            assertEquals(2, recording.warnings.size, recording.warnings.toString())
+            assertTrue(recording.warnings.all { it.contains("plugin catalogue") })
+        }.then {
+            (recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///workspace/scripts.zw"))) as Promise<dynamic>)
+        }.then { result: dynamic ->
+            assertTrue(((result.representations as Array<dynamic>).single().content as String).contains("Replaced"))
+        }
+    }
+
+    @Test
+    fun aCatalogueInInitializationOptionsIsUsedAndAMalformedOneNeverFailsInitialisation(): Promise<Unit> {
+        val (_, replaced) = listening()
+        replaced.call("onInitialize", jsonObject("capabilities" to jsonObject(), "initializationOptions" to jsonObject("pluginCatalogue" to catalogue("From init"))))
+        val (_, malformed) = listening()
+        val result = malformed.call("onInitialize", jsonObject("capabilities" to jsonObject(), "initializationOptions" to jsonObject("pluginCatalogue" to "nope")))
+        assertEquals("zenwave-lsp", result.serverInfo.name)
+        assertEquals(1, malformed.warnings.size)
+
+        return zwContent(replaced).then { content ->
+            assertTrue(content.contains("From init"), content)
+        }.then { zwContent(malformed) }.then { content ->
+            assertTrue(content.contains("draft OpenAPI"), content)
+        }
+    }
+    @Test
+    fun answersPreviewWithPlainObjects(): Promise<Unit> {
+        val (_, recording) = listening()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val answer = recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+
+        return (answer as Promise<dynamic>).then { result: dynamic ->
+            assertEquals("domain", result.defaultRepresentationId)
+            val representation = (result.representations as Array<dynamic>).single()
+            assertEquals("MARKDOWN", representation.format)
+            assertEquals("Domain model", representation.title)
+            assertTrue((representation.content as String).contains("Customer"))
+        }
+    }
+
+    @Test
+    fun answersEventFlowViewsWithTheViewModels(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = "flow CheckoutFlow {\n    start CheckoutStarted {\n    }\n    when CheckoutStarted do createOrder {\n" +
+            "        service Orders.OrderService\n        emits OrderCreated\n    }\n    end {\n        completed: OrderCreated\n    }\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        val answer = recording.call("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to uri)))
+
+        return (answer as Promise<dynamic>).then { result: dynamic ->
+            assertEquals("zfl.eventflow.view@1", result.flowGraph.schema)
+            assertEquals("zfl.services.view@1", result.serviceGraph.schema)
+            val nodes = result.flowGraph.nodes as Array<dynamic>
+            assertTrue(nodes.isNotEmpty())
+            assertTrue(nodes.all { isPresent(it.position) && isPresent(it.dimensions) })
+        }
+    }
+
+    @Test
+    fun answersEventFlowViewsInLanesAndRejectsInvalidLanes(): Promise<Unit> {
+        val created = mutableListOf<String>()
+        val recording = RecordingConnection()
+        ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test") { code, message, _ ->
+            created += "$code $message"
+            jsonObject("responseError" to code)
+        }.listen()
+        val uri = "file:///workspace/checkout.zfl"
+        val text = "systems {\n  Orders { service OrderService { commands: createOrder } }\n  Payments { service PaymentService { commands: authorizePayment } }\n}\n\n" +
+            "flow CheckoutFlow {\n    start CheckoutStarted {\n    }\n    when CheckoutStarted do createOrder {\n" +
+            "        service Orders.OrderService\n        emits OrderCreated\n    }\n    when OrderCreated do authorizePayment {\n" +
+            "        service Payments.PaymentService\n        emits PaymentAuthorized\n    }\n    end {\n        completed: PaymentAuthorized\n    }\n}\n"
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+        fun views(extra: dynamic): Promise<dynamic> {
+            val params = jsonObject("textDocument" to jsonObject("uri" to uri))
+            js("Object.assign")(params, extra)
+            return recording.call("zenwave/eventFlowViews", params) as Promise<dynamic>
+        }
+        fun rejection(promise: Promise<dynamic>): Promise<dynamic> =
+            promise.then<dynamic>({ _: dynamic -> fail("expected a rejection") }, { error: Throwable -> error.asDynamic() })
+
+        return views(js("({})")).then { plain: dynamic ->
+            assertTrue(!isPresent(plain.lanes))
+            assertTrue(!isPresent(plain.flowGraph.lanes))
+            views(js("({lanes: 'systems'})"))
+        }.then { systems: dynamic ->
+            assertEquals("systems", systems.lanes)
+            assertEquals(2, (systems.flowGraph.lanes as Array<dynamic>).size)
+            assertTrue((systems.flowGraph.nodes as Array<dynamic>).all { isPresent(it.lane) })
+            val positions = js("({})")
+            (systems.flowGraph.nodes as Array<dynamic>).forEach { positions[it.id] = js("({x: 7, y: 9})") }
+            views(jsonObject("lanes" to "services", "positions" to positions))
+        }.then { services: dynamic ->
+            assertEquals("services", services.lanes)
+            assertTrue((services.flowGraph.lanes as Array<dynamic>).all { it.kind == "service" })
+            assertEquals(false, services.savedPositions.applied)
+            assertEquals("lanes", services.savedPositions.reason)
+            views(js("({variant: 'sequence:completed:0', lanes: 'services'})"))
+        }.then { variant: dynamic ->
+            assertTrue((variant.flowGraph.lanes as Array<dynamic>).isNotEmpty())
+            rejection(views(js("({lanes: 'teams'})")))
+        }.then { _: dynamic ->
+            rejection(views(js("({lanes: 3})")))
+        }.then { _: dynamic ->
+            assertEquals(listOf("-32602 unknown lanes: teams", "-32602 lanes must be a string"), created)
+        }
+    }
+
+    @Test
+    fun rejectsWithTheResponseErrorBuiltByTheEntryPoint(): Promise<Unit> {
+        val recording = RecordingConnection()
+        val created = mutableListOf<Triple<Int, String, dynamic>>()
+        ZenwaveJsLanguageServer(defaultCoreLanguageServer(), recording.connection, "1.2.3-test") { code, message, data ->
+            created += Triple(code, message, data)
+            jsonObject("responseError" to code)
+        }.listen()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        val notFound = recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to "file:///missing.zdl")))
+        val unsupported = recording.call("zenwave/eventFlowViews", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+        val badMode = recording.call(
+            "zenwave/preview",
+            jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI), "sequenceRenderMode" to "SIDEWAYS"),
+        )
+
+        fun rejection(promise: dynamic): Promise<dynamic> =
+            (promise as Promise<dynamic>).then<dynamic>(
+                { _: dynamic -> fail("expected a rejection") },
+                { error: Throwable -> error.asDynamic() },
+            )
+
+        return rejection(notFound).then { error: dynamic ->
+            assertEquals(-32803, error.responseError)
+            rejection(unsupported)
+        }.then { error: dynamic ->
+            assertEquals(-32803, error.responseError)
+            rejection(badMode)
+        }.then { error: dynamic ->
+            assertEquals(-32602, error.responseError)
+            assertEquals(listOf("documentNotFound", "unsupportedDocument"), created.take(2).map { it.third.kind as String })
+            assertEquals(null, created[2].third)
+        }
+    }
+
+    @Test
+    fun closingADocumentClearsItsDiagnostics() {
+        val (_, recording) = listening()
+        recording.call("onDidOpenTextDocument", textDocumentItem(ORDERS_URI, "zdl", 1, ORDERS_TEXT))
+
+        recording.call("onDidCloseTextDocument", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI)))
+
+        assertEquals(0, (recording.diagnostics.last().diagnostics as Array<dynamic>).size)
+        assertEquals(0, (recording.call("onDocumentSymbol", jsonObject("textDocument" to jsonObject("uri" to ORDERS_URI))) as Array<dynamic>).size)
+    }
+
+    @Test
+    fun organizeZflServicesPassesTheMode(): Promise<Unit> {
+        val (_, recording) = listening()
+        val uri = "file:///workspace/organize.zfl"
+        val text = """
+            systems {
+                Orders {
+                    service OrdersService {
+                        commands: createOrder, unusedCommand
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                when CheckoutStarted do createOrder {
+                    service Orders/OrdersService/Order
+                    emits OrderCreated
+                }
+
+                when OrderCancelled do cancelOrder {
+                    service Orders/OrdersService
+                    emits OrderCancelled
+                }
+            }
+        """.trimIndent()
+        recording.call("onDidOpenTextDocument", textDocumentItem(uri, "zfl", 1, text))
+
+        return recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri)).unsafeCast<Promise<dynamic>>().then { omitted: dynamic ->
+            recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "full")).unsafeCast<Promise<dynamic>>().then { full: dynamic ->
+                assertEquals(omitted, full)
+                val rewritten = full as String
+                assertTrue(rewritten.contains("cancelOrder"), rewritten)
+                assertTrue(!rewritten.contains("unusedCommand"), rewritten)
+                recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "additive"))
+            }
+        }.then { added: dynamic ->
+            val organized = added as String
+            assertTrue(organized.contains("unusedCommand"), organized)
+            assertTrue(organized.contains("cancelOrder"), organized)
+            recording.call("zenwave/organizeZflServices", jsonObject("uri" to uri, "mode" to "sideways")).unsafeCast<Promise<dynamic>>().then<dynamic>(
+                { _: dynamic -> fail("expected a rejection") },
+                { error: Throwable -> error.asDynamic() },
+            )
+        }.then { error: dynamic ->
+            assertEquals(-32602, error.code)
+        }
+    }
+
+    /** AN/2.4, AR-R9: the same server reads the import of a `zenwave:` document itself, in Node and in the browser. */
+    @Test
+    fun readsTheImportsOfAZenwaveDocumentItselfAndNeverProcessesAnOpenApiUnderTheScheme(): Promise<Unit> {
+        val manifestUri = "https://git.example.org/arcadia/raw/.zenwave-manifest.yml"
+        val manifestText = """
+            config:
+              contentResolution: [git]
+              sources:
+                git:
+                  provider: generic
+                  server: https://git.example.org
+                  contentUrlExpression: "${'$'}{server}/${'$'}{owner.id}/raw/${'$'}{content.path}"
+            domains:
+              sales:
+                services:
+                  flows:
+                    id: flows
+                    version: 1.0.0
+                    artifacts:
+                      - { type: zfl, path: checkout.zfl, version: 0.1.0 }
+                      - { type: openapi, path: openapi.yml, version: 0.1.0 }
+        """.trimIndent()
+        val flow = """
+            @import("../../outside.zdl")
+            systems {
+                @zdl("orders/model.zdl")
+                Orders {
+                    service OrderService {
+                        commands: createOrder
+                    }
+                }
+            }
+
+            flow CheckoutFlow {
+                start CheckoutStarted {
+                }
+
+                when CheckoutStarted do createOrder {
+                    service Orders.OrderService
+                    emits OrderCreated
+                }
+
+                end {
+                    completed: OrderCreated
+                }
+            }
+        """.trimIndent() + "\n"
+        val raw = "https://git.example.org/flows/raw"
+        val openapiText = "openapi: 3.0.0\ncomponents:\n  schemas:\n    A:\n      ${'$'}ref: '#/components/schemas/A'\n"
+        val documents = mapOf(
+            "$raw/checkout.zfl" to flow,
+            "$raw/orders/model.zdl" to "entity Order {\n    total Integer\n",
+            "$raw/openapi.yml" to openapiText,
+        )
+        val loaded = mutableListOf<String>()
+        val loader = ZenWaveManifestLoader(
+            listOf(object : DocumentLoader {
+                override fun canLoad(uri: String) = true
+                override suspend fun load(uri: String): String {
+                    loaded += uri
+                    return documents[uri] ?: error("HTTP 404 for $uri")
+                }
+            }),
+            null,
+        )
+        val flowUri = "zenwave:/flows/0.1.0/checkout.zfl"
+        val zdlUri = "zenwave:/flows/0.1.0/orders/model.zdl"
+        val openapiUri = "zenwave:/flows/0.1.0/openapi.yml"
+
+        return GlobalScope.promise {
+            val service = ZenwaveResourceService(manifestUri, loader.parse(manifestUri, manifestText), loader, manifestText)
+            val plane = WorkspaceArchitecturePlane(DefaultWorkspaceQueryApi(ArchitectureGraphResult(ArchitectureGraph(emptyList(), emptyList()))), service)
+            val core = defaultCoreLanguageServer().also { it.attachWorkspace(plane) }
+            val recording = RecordingConnection()
+            val server = ZenwaveJsLanguageServer(core, recording.connection, "1.2.3-test")
+            server.listen()
+
+            recording.call("onDidOpenTextDocument", textDocumentItem(flowUri, "zfl", 1, flow))
+            (server.importsPublishing as Promise<Unit>).await()
+
+            val published = recording.diagnostics.associate { (it.uri as String) to (it.diagnostics as Array<dynamic>) }
+            assertTrue(published.getValue(zdlUri).any { it.severity == 1 }, "the imported ZDL's diagnostics: ${JSON.stringify(recording.diagnostics.toTypedArray())}")
+            assertEquals(1, published.getValue(flowUri).count { it.code == "import-not-declared" })
+            assertEquals(listOf("$raw/checkout.zfl", "$raw/orders/model.zdl"), loaded, "the document and its import, once each, by the server; nothing outside the owner")
+
+            val hierarchy = (recording.call("zenwave/hierarchy", jsonObject("uri" to flowUri)) as Promise<dynamic>).await()
+            assertTrue(JSON.stringify(hierarchy).contains("\"sourceUri\":\"$zdlUri\""), "the hierarchy draws on the imported ZDL")
+            assertNotNull((recording.call("zenwave/preview", jsonObject("textDocument" to jsonObject("uri" to flowUri))) as Promise<dynamic>).await())
+
+            recording.call("onDidOpenTextDocument", textDocumentItem(openapiUri, "yaml", 1, openapiText))
+            assertEquals(0, ((recording.call("zenwave/hierarchy", jsonObject("uri" to openapiUri)) as Promise<dynamic>).await() as Array<dynamic>).size)
+            assertTrue(loaded.none { it.endsWith("openapi.yml") }, "$loaded")
+        }
+    }
+}

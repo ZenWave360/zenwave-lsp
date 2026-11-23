@@ -1,30 +1,43 @@
 package io.zenwave360.lsp.core.manifest
 
-import io.zenwave360.manifest.ManifestDiagnosticSeverity
-import io.zenwave360.manifest.ManifestService
-import io.zenwave360.manifest.ZenWaveManifest
-import io.zenwave360.manifest.ZenWaveManifestLoader
+import io.zenwave360.architecture.manifest.ManifestDiagnosticSeverity
+import io.zenwave360.architecture.manifest.ManifestVariableInterpolator
+import io.zenwave360.architecture.manifest.ManifestService
+import io.zenwave360.architecture.manifest.ZenWaveManifest
+import io.zenwave360.architecture.manifest.ZenWaveManifestLoader
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.lsp.core.architecture.OpeningDocumentGuard
+import io.zenwave360.lsp.core.architecture.decodingLoaders
+import io.zenwave360.lsp.core.architecture.validateWorkspacePaths
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.spec.SpecParserBridge
 import io.zenwave360.lsp.core.spec.YamlDocumentModel
 import io.zenwave360.lsp.core.spec.rootLocation
-import io.zenwave360.lsp.core.config.ResourceReferenceResolver
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 
 object ArchitectureManifestParser {
-    private val loader = ZenWaveManifestLoader()
+    fun parse(uri: String, text: String): ArchitectureManifest = parseDocument(uri, text).manifest
 
-    fun parse(uri: String, text: String): ArchitectureManifest {
+    /** All manifest parsing, including the language module's location model, uses this guarded entry point. */
+    internal fun parseDocument(
+        uri: String,
+        text: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): ParsedArchitectureDocument {
+        val loaders = guardedLoaders(uri, documentLoaders)
+        val loader = ZenWaveManifestLoader(loaders, archiveEntryLoader = null)
         val normalizedText = normalizeSourceText(text)
-        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri)
+        // The location model dereferences too: it must use the same guarded chain, not the parser's default loaders.
+        val parsedDocument = SpecParserBridge.parseText(normalizedText, uri, loaders = loaders)
         val document = YamlDocumentModel.fromParsedDocument(uri, parsedDocument)
         val manifest = runImmediate { loader.parse(uri, normalizedText) }
-        return ArchitectureManifest(
+        validateWorkspacePaths(manifest)
+        val architectureManifest = ArchitectureManifest(
             uri = manifest.uri,
             properties = manifest.config.properties,
-            services = manifest.services.map { toArchitectureService(manifest, it) },
+            services = manifest.services.map { toArchitectureService(loader, manifest, it) },
             diagnostics = manifest.diagnostics.map { diagnostic ->
                 val semanticPath = diagnostic.location?.let(::manifestLocationToSemanticPath)
                 val range = semanticPath
@@ -43,11 +56,26 @@ object ArchitectureManifestParser {
                         diagnostic.location?.let { put("manifestLocation", it) }
                     }
                 )
-            }
+            },
+            source = manifest,
         )
+        return ParsedArchitectureDocument(architectureManifest, document)
     }
 
-    private fun toArchitectureService(manifest: ZenWaveManifest, service: ManifestService): ArchitectureService {
+    /**
+     * This parser resolves manifest `$refs` for diagnostics and resource locations. Use the same guarded,
+     * decoding chain as workspace opening so a ref cannot turn into a UNC path before validation.
+     */
+    internal fun guardedLoaders(
+        manifestUri: String,
+        documentLoaders: List<DocumentLoader> = decodingLoaders(),
+    ): List<DocumentLoader> = listOf(OpeningDocumentGuard(manifestUri, documentLoaders, followManifestOrigin = true))
+
+    private fun toArchitectureService(
+        loader: ZenWaveManifestLoader,
+        manifest: ZenWaveManifest,
+        service: ManifestService,
+    ): ArchitectureService {
         val repositoryUri = resolveRepositoryUri(manifest, service)
         return ArchitectureService(
             domainKey = service.domainKey,
@@ -74,17 +102,10 @@ object ArchitectureManifestParser {
         )
     }
 
-    private fun resolveRepositoryUri(manifest: ZenWaveManifest, service: ManifestService): String? {
-        val probeKey = "__zenwave_repository_root__"
-        val probePath = ".zenwave-repository-root"
-        val probeService = service.copy(docs = service.docs + (probeKey to probePath))
-        return runCatching {
-            loader.buildDocumentCandidates(manifest, probeService, probeKey)
-                .firstOrNull()
-                ?.uri
-                ?.let { ResourceReferenceResolver.resolveReference(it, ".") }
-        }.getOrNull()
-    }
+    private fun resolveRepositoryUri(manifest: ZenWaveManifest, service: ManifestService): String? =
+        service.repository?.let { expression ->
+            ManifestVariableInterpolator.interpolate(expression, manifest.config.properties).value
+        }
 
     private fun manifestLocationToSemanticPath(location: String): String? {
         val suffixIndex = location.lastIndexOf('.')
@@ -123,7 +144,7 @@ object ArchitectureManifestParser {
         text
             .replace(Regex("""(^[ \t]*-[ \t]*)\${'$'}ref:""", RegexOption.MULTILINE), "$1service:")
             .replace(Regex("""(^[ \t]*)specs:""", RegexOption.MULTILINE), "$1artifacts:")
-            .replace(Regex("""\{\{([A-Za-z_][A-Za-z0-9_.-]*)}}""")) { match ->
+            .replace(Regex("""\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}""")) { match ->
                 "\${${match.groupValues[1]}}"
             }
 
@@ -142,6 +163,11 @@ object ArchitectureManifestParser {
             ?: error("Manifest parsing suspended unexpectedly")
     }
 }
+
+internal data class ParsedArchitectureDocument(
+    val manifest: ArchitectureManifest,
+    val document: YamlDocumentModel,
+)
 
 private fun Map<String, Any?>.stringMap(): Map<String, String> =
     entries.mapNotNull { (key, value) ->

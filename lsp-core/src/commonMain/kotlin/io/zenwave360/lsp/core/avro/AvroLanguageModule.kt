@@ -1,7 +1,11 @@
 package io.zenwave360.lsp.core.avro
 
+import io.zenwave360.jsonrefparser.io.DocumentLoader
+import io.zenwave360.jsonrefparser.model.OnMissing
+import io.zenwave360.jsonrefparser.model.RefParserOptions
 import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
@@ -17,7 +21,8 @@ import io.zenwave360.lsp.core.spec.rootLocation
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 class AvroLanguageModule(
-    private val hierarchyBuilder: AvroHierarchyBuilder = AvroHierarchyBuilder()
+    private val hierarchyBuilder: AvroHierarchyBuilder = AvroHierarchyBuilder(),
+    private val documentLoaders: List<DocumentLoader>? = null,
 ) : LanguageModule {
     override val languageId: String = "avro"
 
@@ -37,7 +42,7 @@ class AvroLanguageModule(
     override fun parse(snapshot: DocumentSnapshot): ParseResult {
         val model = parseModel(snapshot)
         return ParseResult(
-            semanticId = "${snapshot.ref.uri}#document",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "document"),
             model = model,
             diagnostics = diagnosticsFromModel(model)
         )
@@ -81,10 +86,11 @@ class AvroLanguageModule(
             }
             else -> "### ${path.substringAfterLast('.')}\n\n`${stringifyType(node)}`"
         }
+        val range = model.locationOf(path)?.range
         return HoverResult(
-            semanticId = "${snapshot.ref.uri}#$path",
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, path, range),
             markdown = markdown,
-            range = model.locationOf(path)?.range
+            range = range
         )
     }
 
@@ -165,7 +171,8 @@ class AvroLanguageModule(
         uri.endsWith(".avsc")
 
     private fun parseModel(snapshot: DocumentSnapshot): YamlDocumentModel =
-        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri).let { parsed ->
+        SpecParserBridge.parseText(snapshot.text, snapshot.ref.uri,
+            RefParserOptions(onMissing = OnMissing.SKIP), loaders = documentLoaders).let { parsed ->
             YamlDocumentModel.fromRawModel(
                 uri = snapshot.ref.uri,
                 rawModel = parseAvroJson(snapshot.text),

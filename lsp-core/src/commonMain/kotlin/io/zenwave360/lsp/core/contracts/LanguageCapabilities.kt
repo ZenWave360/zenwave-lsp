@@ -9,5 +9,6 @@ data class LanguageCapabilities(
     val supportsDiagnostics: Boolean,
     val supportsHierarchy: Boolean,
     val supportsReferences: Boolean,
-    val supportsFormatting: Boolean
+    val supportsFormatting: Boolean,
+    val supportsCodeActions: Boolean = false
 )

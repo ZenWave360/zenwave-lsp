@@ -1,23 +1,13 @@
 plugins {
     kotlin("multiplatform")
-    `maven-publish`
+    kotlin("plugin.serialization")
+    id("com.vanniktech.maven.publish")
+    id("org.jetbrains.kotlinx.kover")
     id("com.goncalossilva.resources") version "0.14.0"
 }
 
-val dslKotlinGeneratedSrc = rootProject.projectDir.resolve("../dsl-kotlin/build/generated/antlr/commonMain/kotlin")
-val dslKotlinSharedSrcRoots = listOf(
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/formatter/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/source"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/utils"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zdl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/formatter"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/internal"),
-    rootProject.projectDir.resolve("../dsl-kotlin/src/commonMain/kotlin/io/zenwave360/language/zfl/semantic"),
-)
+// Use the DSL Kotlin library once. Embedding its sources duplicates the classes
+// pulled in transitively by workspace-runtime and breaks Kotlin/JS linking.
 
 kotlin {
     jvmToolchain(21)
@@ -28,19 +18,34 @@ kotlin {
 
     js(IR) {
         nodejs()
+        // The browser target makes browser use checkable: jsBrowserTest (part of check) loads lsp-core and
+        // its dependencies in headless Chromium, so a Node-only import fails the build here, not in a consumer.
+        browser {
+            testTask {
+                // The common test suite reads fixtures from the filesystem, so it runs on Node only.
+                filter.includeTestsMatching("io.zenwave360.lsp.core.LspCoreBrowserSmokeTest")
+                useKarma {
+                    useChromeHeadless()
+                }
+            }
+        }
         binaries.executable()
+        // ES modules, as dsl-kotlin and lsp-js use: the elkjs binding compiled from dsl-kotlin (@JsModule without
+        // @JsNonModule) cannot be compiled to UMD.
+        useEsModules()
     }
 
     sourceSets {
         val commonMain by getting {
-            dslKotlinSharedSrcRoots.forEach(kotlin::srcDir)
-            kotlin.srcDir(dslKotlinGeneratedSrc)
             dependencies {
                 implementation(kotlin("stdlib-common"))
 
-                // DSL Kotlin parser sources are compiled directly via srcDir above.
-                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.1.0-SNAPSHOT")
-                implementation("io.zenwave360.manifest:manifest-core:0.1.0-SNAPSHOT")
+                implementation("io.zenwave360.dsl:dsl-kotlin:1.11.0")
+                implementation("io.zenwave360.dsl:dsl-views:1.11.0")
+                implementation("io.zenwave360.dsl:dsl-docs:1.11.0")
+                implementation("io.zenwave360.jsonrefparser:json-schema-ref-parser-kmp:0.9.24")
+                implementation("io.zenwave360.architecture:architecture-manifest:0.9.6")
+                implementation("io.zenwave360.architecture:workspace-runtime:0.9.6")
                 implementation("com.strumenta:antlr-kotlin-runtime:1.0.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
@@ -61,6 +66,8 @@ kotlin {
 
         val jvmMain by getting {
             dependencies {
+                // Same version as dsl-kotlin's jvmMain.
+                implementation("org.eclipse.elk:org.eclipse.elk.alg.layered:0.10.0")
                 implementation(kotlin("stdlib-jdk8"))
             }
         }
@@ -73,8 +80,11 @@ kotlin {
 
         val jsMain by getting {
             dependencies {
+                // Same version as dsl-kotlin's jsMain. Bundlers targeting a Web Worker must keep elkjs'
+                // worker script from taking over the worker's message handler (see lsp-js/npm/build.mjs).
+                implementation(npm("elkjs", "0.9.3"))
                 implementation(kotlin("stdlib-js"))
-                implementation("org.jetbrains.kotlin-wrappers:kotlin-node:18.16.12-pre.610")
+                // No Node API here: lsp-core's JS artifact must load in a browser and a Web Worker.
             }
         }
 
@@ -99,3 +109,12 @@ publishing {
         }
     }
 }
+
+// Parsing and ELK layout exceed Mocha's default 2s when a full build keeps Node busy.
+tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>()
+    .matching { it.name == "jsNodeTest" }
+    .configureEach {
+        useMocha {
+            timeout = "20s"
+        }
+    }

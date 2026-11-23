@@ -1,11 +1,12 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.KnownDocuments
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 
 internal class ZflCrossReferenceContributor {
-    fun build(uri: String, model: Map<String, Any?>): List<CrossReferenceContribution> {
+    fun build(uri: String, model: Map<String, Any?>, known: KnownDocuments = KnownDocuments.NONE): List<CrossReferenceContribution> {
         val locations = model.locationTable()
-        val zdlUris = declaredZdlUris(uri, model)
+        val zdlUris = declaredZdlUris(uri, model) { known.isKnown(it) }
 
         val declaresDomain = zdlUris.map { (systemName, targetUri) ->
             CrossReferenceContribution(
@@ -23,10 +24,11 @@ internal class ZflCrossReferenceContributor {
 
         val flowRefs = model.mapAt("flows").entries.flatMap { (flowName, rawFlow) ->
             rawFlow.asZflMap()["whens"].asZflList().flatMapIndexed { index, rawWhen ->
-                val whenModel = rawWhen.asZflMap()
-                val targetUri = zdlUris[whenModel["system"].asZflString()] ?: return@flatMapIndexed emptyList()
+                val whenModel = rawWhen.normalizedWhen()
+                val targetUri = zdlUris[whenModel.system] ?: return@flatMapIndexed emptyList()
                 buildList {
-                    whenModel["command"].asZflString()?.let { commandName ->
+                    whenModel.command?.let { commandName ->
+                        val serviceName = whenModel.service?.substringAfterLast('.')
                         add(
                             CrossReferenceContribution(
                                 sourceUri = uri,
@@ -34,14 +36,14 @@ internal class ZflCrossReferenceContributor {
                                 sourceRange = locations.findSource(uri, "flows.$flowName.whens[$index].command").range,
                                 sourceLabel = commandName,
                                 targetUri = targetUri,
-                                targetSemanticId = null,
+                                targetSemanticId = serviceName?.let { "$targetUri#services.$it.methods.$commandName" },
                                 targetRange = null,
                                 targetLabel = commandName,
                                 relationType = "uses"
                             )
                         )
                     }
-                    whenModel["events"].asZflList().mapNotNull { it.asZflString() }.forEach { eventName ->
+                    whenModel.events.forEach { eventName ->
                         add(
                             CrossReferenceContribution(
                                 sourceUri = uri,
@@ -49,7 +51,7 @@ internal class ZflCrossReferenceContributor {
                                 sourceRange = locations.findSource(uri, "flows.$flowName.whens[$index].events.$eventName").range,
                                 sourceLabel = eventName,
                                 targetUri = targetUri,
-                                targetSemanticId = null,
+                                targetSemanticId = "$targetUri#events.$eventName",
                                 targetRange = null,
                                 targetLabel = eventName,
                                 relationType = "references"

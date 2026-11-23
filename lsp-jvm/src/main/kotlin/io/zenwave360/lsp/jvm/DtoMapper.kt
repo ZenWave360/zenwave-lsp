@@ -5,6 +5,11 @@ import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
 import io.zenwave360.lsp.core.contracts.Range
+import com.google.gson.JsonElement
+import org.eclipse.lsp4j.CodeAction
+import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionItemKind
+import org.eclipse.lsp4j.WorkspaceEdit
 import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DocumentSymbol
 import org.eclipse.lsp4j.DiagnosticSeverity as LspDiagnosticSeverity
@@ -13,9 +18,11 @@ import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
 import org.eclipse.lsp4j.SymbolKind
 import org.eclipse.lsp4j.TextEdit
+import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.Position as LspPosition
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range as LspRange
+import io.zenwave360.lsp.core.platform.WorkspaceStatus
 
 internal object DtoMapper {
     fun toPosition(position: LspPosition): Position =
@@ -32,14 +39,43 @@ internal object DtoMapper {
             )
         }
 
+    fun fromLspRange(range: LspRange): Range =
+        Range(toPosition(range.start), toPosition(range.end))
+
+    fun toCompletionItem(item: io.zenwave360.lsp.core.contracts.CompletionItem): CompletionItem =
+        CompletionItem(item.label).apply {
+            kind = CompletionItemKind.EnumMember
+            detail = item.detail
+            insertText = item.insertText
+            item.textEdit?.let { edit -> textEdit = Either.forLeft(TextEdit(requireNotNull(toLspRange(edit.range)), edit.newText)) }
+            item.documentation?.let { setDocumentation(MarkupContent(MarkupKind.MARKDOWN, it)) }
+        }
+
+    /** Whether a code action of [kind] is wanted when the client asks for [only]: no filter, the kind itself or one of its parents. */
+    fun kindRequested(kind: String, only: List<String>?): Boolean =
+        only.isNullOrEmpty() || only.any { it.isEmpty() || kind == it || kind.startsWith("$it.") }
+
+    fun toCodeAction(action: io.zenwave360.lsp.core.contracts.CodeAction): CodeAction =
+        CodeAction(action.title).apply {
+            kind = action.kind
+            isPreferred = action.isPreferred
+            diagnostics = action.diagnostics.map { toLspDiagnostic(it) }
+            edit = WorkspaceEdit(
+                action.edits.groupBy { it.uri }.mapValues { (_, edits) ->
+                    edits.map { TextEdit(requireNotNull(toLspRange(it.range)), it.newText) }
+                }
+            )
+        }
+
     fun toHoverContent(markdown: String): MarkupContent =
         MarkupContent(MarkupKind.MARKDOWN, markdown)
 
     fun toFullDocumentEdit(text: String, replacement: String): TextEdit =
         TextEdit(fullDocumentRange(text), replacement)
 
-    fun toLocation(target: NavigationTarget): Location? =
-        toLspRange(target.range)?.let { range -> Location(target.uri, range) }
+    /** A target with no range opens its document at the start. */
+    fun toLocation(target: NavigationTarget): Location =
+        Location(target.uri, toLspRange(target.range) ?: LspRange(LspPosition(0, 0), LspPosition(0, 0)))
 
     fun toDocumentSymbol(node: HierarchyNode): DocumentSymbol =
         DocumentSymbol(
@@ -52,20 +88,18 @@ internal object DtoMapper {
         )
 
     fun toPublishDiagnostics(uri: String, diagnostics: List<io.zenwave360.lsp.core.contracts.Diagnostic>): PublishDiagnosticsParams =
-        PublishDiagnosticsParams(
-            uri,
-            diagnostics.map { diagnostic ->
-                Diagnostic(
-                    requireNotNull(toLspRange(diagnostic.range)),
-                    diagnostic.message
-                ).apply {
-                    severity = diagnostic.severity.toLspSeverity()
-                    source = diagnostic.source
-                    setCode(diagnostic.code)
-                    data = diagnostic.data
-                }
-            }
-        )
+        PublishDiagnosticsParams(uri, diagnostics.map(::toLspDiagnostic))
+
+    fun toLspDiagnostic(diagnostic: io.zenwave360.lsp.core.contracts.Diagnostic): Diagnostic =
+        Diagnostic(
+            requireNotNull(toLspRange(diagnostic.range)),
+            diagnostic.message
+        ).apply {
+            severity = diagnostic.severity.toLspSeverity()
+            source = diagnostic.source
+            setCode(diagnostic.code)
+            data = diagnostic.data
+        }
 
     private fun DiagnosticSeverity.toLspSeverity(): LspDiagnosticSeverity =
         when (this) {
@@ -81,10 +115,14 @@ internal object DtoMapper {
             "service" -> SymbolKind.Interface
             "method", "command" -> SymbolKind.Method
             "event" -> SymbolKind.Event
+            "rule" -> SymbolKind.Constant
             "field" -> SymbolKind.Field
             "flow" -> SymbolKind.Function
             "domain", "subdomain" -> SymbolKind.Package
             "manifest" -> SymbolKind.File
+            "artifacts", "docs", "consumers" -> SymbolKind.Namespace
+            "zdl", "zfl", "asyncapi", "asyncapi-client", "openapi" -> SymbolKind.File
+            "consumer" -> SymbolKind.Variable
             else -> SymbolKind.Object
         }
 
@@ -108,8 +146,62 @@ data class SemanticReferenceRequest(
     val semanticId: String
 )
 
+/** Params of `zenwave/organizeZflServices`. `mode` is `full` (default) or `additive`. */
 data class OrganizeZflServicesRequest(
-    val uri: String
+    val uri: String,
+    val mode: com.google.gson.JsonElement? = null,
+)
+
+data class ConceptAtRequest(
+    val uri: String,
+    val semanticPath: String? = null,
+    val position: LspPosition? = null,
+)
+
+data class WorkspaceStatusDto(
+    val state: String,
+    val manifestUri: String?,
+    val message: String?,
+)
+
+internal fun WorkspaceStatus.toDto(): WorkspaceStatusDto =
+    WorkspaceStatusDto(
+        state = state.name.lowercase(),
+        manifestUri = manifestUri,
+        message = message,
+    )
+
+/** Params of `zenwave/eventFlowViews`. Nullable: Gson leaves absent properties null, reported as InvalidParams. */
+data class TextDocumentRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val variant: com.google.gson.JsonElement? = null,
+    val positions: com.google.gson.JsonElement? = null,
+    val lanes: com.google.gson.JsonElement? = null,
+)
+
+/** Params of `zenwave/preview`; `mode` is docs (default) or diagrams for ZDL. */
+data class PreviewRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val sequenceRenderMode: String? = null,
+    val mode: com.google.gson.JsonElement? = null,
+    val sequenceTree: com.google.gson.JsonElement? = null,
+    val representationId: com.google.gson.JsonElement? = null,
+)
+
+/** Params of `zenwave/symbolAt`: LSP's TextDocumentPositionParams. Nullable, reported as InvalidParams when absent. */
+data class SymbolAtRequest(
+    val textDocument: org.eclipse.lsp4j.TextDocumentIdentifier?,
+    val position: org.eclipse.lsp4j.Position?
+)
+
+/** Params of `zenwave/statResource` and `zenwave/readResource`. Nullable, reported as InvalidParams when absent. */
+data class ResourceRequest(val uri: com.google.gson.JsonElement?)
+
+/** Result of `zenwave/symbolAt`: what `forwardReferences` and `reverseReferences` take, and where the symbol is. */
+data class SymbolAtResult(
+    val uri: String,
+    val semanticId: String,
+    val range: Range?
 )
 
 data class ModuleSelector(
@@ -126,7 +218,12 @@ data class HierarchyNodeDto(
     val sourceRange: Range,
     val children: List<HierarchyNodeDto>,
     val relatedResources: List<NavigationTarget>,
-    val uiHints: Map<String, String>
+    val uiHints: Map<String, String>,
+    /** Ids of the nodes and service groups in the same document's `zenwave/eventFlowViews` that stand for this concept. */
+    val viewNodeIds: List<String> = emptyList(),
+    val version: String? = null,
+    val address: String? = null,
+    val disabledReason: String? = null,
 )
 
 internal fun HierarchyNode.toDto(): HierarchyNodeDto =
@@ -139,5 +236,67 @@ internal fun HierarchyNode.toDto(): HierarchyNodeDto =
         sourceRange = source.range,
         children = children.map { it.toDto() },
         relatedResources = relatedResources,
-        uiHints = uiHints
+        uiHints = uiHints,
+        viewNodeIds = viewNodeIds,
+        version = version,
+        address = address,
+        disabledReason = disabledReason,
     )
+
+/** Params of the `zenwave/pluginCatalogue` notification: the catalogue as a JSON object. Nullable: Gson leaves absent properties null. */
+data class PluginCatalogueParams(
+    val catalogue: JsonElement? = null
+)
+
+/** The `mode` param as lsp-js reads it: absent or null is the default, any other non-string is InvalidParams. */
+internal fun modeOrNull(mode: com.google.gson.JsonElement?): String? {
+    if (mode == null || mode.isJsonNull) return null
+    if (!mode.isJsonPrimitive || !mode.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("mode must be a string")
+    return mode.asString
+}
+
+/** The `sequenceTree` param as lsp-js reads it: absent or null is false, any other non-boolean is InvalidParams. */
+internal fun sequenceTreeOrFalse(value: com.google.gson.JsonElement?): Boolean {
+    if (value == null || value.isJsonNull) return false
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("sequenceTree must be a boolean")
+    return value.asBoolean
+}
+
+/** The `representationId` param as lsp-js reads it: absent or null is none, any other non-string is InvalidParams. */
+internal fun representationIdOrNull(value: com.google.gson.JsonElement?): String? {
+    if (value == null || value.isJsonNull) return null
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("representationId must be a string")
+    return value.asString
+}
+
+/** The `variant` param as lsp-js reads it: absent or null selects the full flow. */
+internal fun variantOrNull(variant: com.google.gson.JsonElement?): String? {
+    if (variant == null || variant.isJsonNull) return null
+    if (!variant.isJsonPrimitive || !variant.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("variant must be a string")
+    return variant.asString
+}
+
+/** The `lanes` param as lsp-js reads it: absent or null is not named (answered as `none`); an unknown value is rejected by the server as invalid params. */
+internal fun lanesOrNull(lanes: com.google.gson.JsonElement?): String? {
+    if (lanes == null || lanes.isJsonNull) return null
+    if (!lanes.isJsonPrimitive || !lanes.asJsonPrimitive.isString) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("lanes must be a string")
+    return lanes.asString
+}
+
+/**
+ * The `positions` param as lsp-js reads it: absent or null is no positions, anything but an object is invalid
+ * params, and an entry that is not `{ x, y }` of numbers becomes a non-finite point (reported as `invalid`).
+ */
+internal fun positionsOrNull(positions: JsonElement?): Map<String, io.zenwave360.lsp.core.visualization.SavedPoint>? {
+    if (positions == null || positions.isJsonNull) return null
+    if (!positions.isJsonObject) throw io.zenwave360.lsp.core.visualization.InvalidRequestParamsException("positions must be an object")
+    fun number(entry: JsonElement?): Double? =
+        entry?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asDouble
+    return positions.asJsonObject.entrySet().associate { (id, entry) ->
+        val obj = entry.takeIf { it.isJsonObject }?.asJsonObject
+        val x = number(obj?.get("x"))
+        val y = number(obj?.get("y"))
+        id to if (x != null && y != null) io.zenwave360.lsp.core.visualization.SavedPoint(x, y)
+        else io.zenwave360.lsp.core.visualization.SavedPoint(Double.NaN, Double.NaN)
+    }
+}

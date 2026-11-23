@@ -1,8 +1,10 @@
 package io.zenwave360.lsp.core.zfl
 
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
+
 internal class ZflModelEnricher {
-    fun enrich(uri: String, model: Map<String, Any?>): EnrichedZflModel {
-        val zdlUris = declaredZdlUris(uri, model)
+    fun enrich(uri: String, model: Map<String, Any?>, related: RelatedDocuments = RelatedDocuments.NONE): EnrichedZflModel {
+        val zdlUris = declaredZdlUris(uri, model, related)
         val flows = readFlows(model.mapAt("flows"))
         val commandIndex = buildCommandIndex(flows)
         val systems = readSystems(model.mapAt("systems"), zdlUris, commandIndex)
@@ -16,22 +18,40 @@ internal class ZflModelEnricher {
                 name = flowName,
                 starts = flow.mapAt("starts").keys.toList(),
                 whens = flow["whens"].asZflList().mapIndexed { index, rawWhen ->
-                    val whenModel = rawWhen.asZflMap()
+                    val whenModel = rawWhen.normalizedWhen()
                     EnrichedWhen(
                         index = index,
-                        triggers = whenModel["triggers"].asZflList().mapNotNull { it.asZflString() },
-                        systemName = whenModel["system"].asZflString(),
-                        service = whenModel["service"].asZflString(),
-                        command = whenModel["command"].asZflString(),
-                        events = whenModel["events"].asZflList().mapNotNull { it.asZflString() },
+                        triggers = whenModel.triggers,
+                        systemName = whenModel.system,
+                        service = whenModel.service,
+                        command = whenModel.command,
+                        events = whenModel.events,
                         sourcePath = "flows.$flowName.whens[$index]"
                     )
                 },
                 end = EnrichedEnd(
-                    outcomes = flow["end"].asZflMap().mapValues { (_, rawValue) -> normalizeStrings(rawValue) },
+                    outcomes = flow["end"].endOutcomes().mapValues { (_, rawValue) -> normalizeStrings(rawValue) },
                     sourcePath = "flows.$flowName.end"
                 ),
-                sourcePath = "flows.$flowName"
+                sourcePath = "flows.$flowName",
+                views = flow["views"].asZflList().mapIndexed { index, rawView ->
+                    val view = rawView.asZflMap()
+                    EnrichedView(
+                        name = view["name"]?.toString().orEmpty(),
+                        members = view["members"].asZflList().map { it.asZflMap()["aggregate"]?.toString().orEmpty() },
+                        sourcePath = "flows.$flowName.views[$index]"
+                    )
+                },
+                timers = flow["timers"].asZflList().mapIndexed { index, rawTimer ->
+                    val timer = rawTimer.asZflMap()
+                    val after = timer["after"]?.toString()
+                    EnrichedTimer(
+                        label = after?.let { "timer after $it" } ?: "timer at ${timer["at"]}",
+                        command = timer["action"]?.toString(),
+                        triggers = listOfNotNull(after),
+                        sourcePath = "flows.$flowName.timers[$index]"
+                    )
+                }
             )
         }
 
@@ -86,6 +106,12 @@ internal class ZflModelEnricher {
                 sourcePath = "systems.$systemName"
             )
         }
+
+    /** Current dsl-kotlin models nest the outcomes under `endOutcomes`; earlier ones put them on `end` itself. */
+    private fun Any?.endOutcomes(): Map<String, Any?> {
+        val end = asZflMap()
+        return if ("endOutcomes" in end) end.mapAt("endOutcomes") else end
+    }
 
     private fun normalizeStrings(rawValue: Any?): List<String> =
         when (val value = rawValue.asZflString()) {

@@ -1,5 +1,8 @@
 package io.zenwave360.lsp.core.platform
 
+import io.zenwave360.lsp.core.catalogue.PluginCatalogues
+import io.zenwave360.lsp.core.contracts.CodeAction
+import io.zenwave360.lsp.core.contracts.CompletionItem
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
@@ -7,18 +10,177 @@ import io.zenwave360.lsp.core.contracts.LanguageCapabilities
 import io.zenwave360.lsp.core.contracts.LanguageModule
 import io.zenwave360.lsp.core.contracts.NavigationTarget
 import io.zenwave360.lsp.core.contracts.Position
-import io.zenwave360.lsp.core.contracts.SemanticId
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
+import io.zenwave360.lsp.core.architecture.WorkspaceArchitecturePlane
+import io.zenwave360.lsp.core.resource.AbsoluteHttpFetch
+import io.zenwave360.lsp.core.resource.AbsoluteHttpReads
+import io.zenwave360.lsp.core.resource.AbsoluteUriNotAllowed
+import io.zenwave360.lsp.core.resource.AbsoluteUriPolicy
+import io.zenwave360.lsp.core.resource.ResourceContent
+import io.zenwave360.lsp.core.resource.ResourceFailureKind
+import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ResourceStat
+import io.zenwave360.lsp.core.resource.DocumentImport
+import io.zenwave360.lsp.core.resource.DocumentImports
+import io.zenwave360.lsp.core.resource.ZenwaveResourceService
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
+import io.zenwave360.lsp.core.resource.ZenwaveResources
+import io.zenwave360.lsp.core.resource.platformAbsoluteHttpFetch
+import io.zenwave360.lsp.core.contracts.DocumentRef
+import io.zenwave360.lsp.core.contracts.KnownDocuments
+import io.zenwave360.lsp.core.contracts.RelatedDocuments
+import io.zenwave360.lsp.core.contracts.Range
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import io.zenwave360.lsp.core.visualization.SavedPoint
+import io.zenwave360.lsp.core.visualization.DocumentFailureKind
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.language.eventflow.view.FlowLanes
+import io.zenwave360.lsp.core.visualization.EventFlowViews
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
+import io.zenwave360.lsp.core.visualization.ModelVisualizations
+import io.zenwave360.lsp.core.visualization.PreviewResult
+import io.zenwave360.lsp.core.visualization.VisualizedDocument
+import io.zenwave360.lsp.core.zfl.parseOrganizeMode
 import io.zenwave360.lsp.core.xref.CrossReferenceContribution
 import io.zenwave360.lsp.core.xref.CrossReferenceIndex
+import io.zenwave360.lsp.core.xref.toForwardTarget
+import io.zenwave360.lsp.core.index.BackgroundIndexSettings
+import io.zenwave360.lsp.core.index.BackgroundReferenceIndexer
+import io.zenwave360.lsp.core.index.ClosedFileIndexing
+import io.zenwave360.lsp.core.index.ClosedRead
+import io.zenwave360.lsp.core.index.IndexStatus
+import io.zenwave360.lsp.core.index.PreparedClosedIndex
+import io.zenwave360.lsp.core.index.WorkspaceDirectories
+import io.zenwave360.lsp.core.index.platformWorkspaceDirectories
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlin.concurrent.Volatile
 
 class ZenwaveLanguageServer(
     private val modules: List<LanguageModule>,
     private val sessionStore: DocumentSessionStore,
-    private val crossReferenceIndex: CrossReferenceIndex
+    private val crossReferenceIndex: CrossReferenceIndex,
+    architecturePlane: WorkspaceArchitecturePlane? = null,
+    private val workspaceOpener: suspend (String, ZenwaveResourceSettings) -> WorkspaceArchitecturePlane = { manifestUri, settings ->
+        WorkspaceArchitecturePlane.open(manifestUri, resourceSettings = settings)
+    },
+    /** Reads documents that are not open, for conceptualHierarchy. Absolute `http(s)` URIs do not use this. */
+    private val documentReader: DocumentReader = LoaderDocumentReader(),
+    /** Absolute `http(s)` reads for hierarchy, its dependencies and imports. Does not follow redirects. */
+    private val absoluteHttp: AbsoluteHttpFetch = platformAbsoluteHttpFetch(),
+    /**
+     * Where a failed workspace open is reported. The line is already redacted. The JS and JVM servers point
+     * this at the client log; a test collects the line by passing its own.
+     */
+    var log: (String) -> Unit = {},
+    /** Lists local directories for the background reference index (NAV-R20). */
+    workspaceDirectories: WorkspaceDirectories = platformWorkspaceDirectories(),
+    /** Where the background reference index runs. */
+    indexScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    indexSettings: BackgroundIndexSettings = BackgroundIndexSettings(),
 ) {
     private val lock = PlatformReadWriteLock()
+    private var resourceSettings = ZenwaveResourceSettings()
     private val parsedCache = linkedMapOf<String, DocumentCacheEntry>()
+    private var architecturePlane: WorkspaceArchitecturePlane? = architecturePlane
+    private var workspaceStatus = if (architecturePlane == null) {
+        WorkspaceStatus(WorkspaceState.NONE)
+    } else {
+        WorkspaceStatus(WorkspaceState.READY)
+    }
+
+    /**
+     * Completed with the project manifest text when [openWorkspace] finishes, or with null when it fails.
+     * Hierarchy of that URI waits on this while the manifest is still loading.
+     */
+    private var manifestOpening: CompletableDeferred<String?>? = null
+    /** The documents each open `zenwave:` document imports, and the diagnostics last found for them (AR-R9). */
+    private val importedBy = mutableMapOf<String, Set<String>>()
+    private val importedDiagnostics = mutableMapOf<String, List<Diagnostic>>()
+    private val importRuns = mutableMapOf<String, Int>()
+    private var importRunCounter = 0
+    private val pluginCatalogues = PluginCatalogues()
+    private val visualizations = ModelVisualizations(pluginCatalogues)
+
+    private val indexer = BackgroundReferenceIndexer(
+        scope = indexScope,
+        directories = workspaceDirectories,
+        extensions = modules.flatMap { it.capabilities.extensions }.map { it.lowercase() }.toSet(),
+        host = object : ClosedFileIndexing {
+            override fun isOpen(uri: String) = sessionStore.get(uri) != null
+
+            override suspend fun read(uri: String) = readClosedFile(uri)
+
+            override fun prepare(uri: String, text: String) = prepareClosedDocument(uri, text)
+
+            override fun forget(uri: String) = forgetContributions(uri)
+
+            override fun scanned() = refreshAllLinked()
+
+            override fun gone(uri: String) = refreshLinkedTo(uri)
+        },
+        settings = indexSettings,
+    )
+
+    /** NAV-R9: a location a ZFL `@zdl` lists is known when open, or a local file the index has seen on disk. */
+    private val knownDocuments = KnownDocuments { uri -> sessionStore.get(uri) != null || (uri.startsWith("file:") && indexer.knows(uri)) }
+
+    /** The ZFL documents that list a location in their `@zdl`, by location key: they are contributed again when it appears or goes. */
+    private val linkedBy = mutableMapOf<String, MutableSet<String>>()
+
+    /** For each such document, the locations it lists and whether each was known when it was contributed. */
+    private val linkState = mutableMapOf<String, Pair<List<String>, List<Boolean>>>()
+    private val linkLock = PlatformReadWriteLock()
+
+    /** What a document contributes and the locations it lists, with whether each was known when it was worked out. */
+    private class Contributed(val contributions: List<CrossReferenceContribution>, val links: List<String>, val flags: List<Boolean>)
+
+    private fun recordLinks(uri: String, contributed: Contributed) {
+        val links = contributed.links
+        val flags = contributed.flags
+        linkLock.write {
+            linkedBy.values.forEach { it.remove(uri) }
+            linkState.remove(uri)
+            if (links.isNotEmpty()) linkState[uri] = links to flags
+            links.forEach { linkedBy.getOrPut(FileUris.key(it)) { mutableSetOf() } += uri }
+            linkedBy.values.removeAll { it.isEmpty() }
+        }
+    }
+
+    /** The document no longer contributes: neither its references nor its links are kept. */
+    private fun forgetContributions(uri: String) {
+        crossReferenceIndex.remove(uri)
+        linkLock.write {
+            linkedBy.values.forEach { it.remove(uri) }
+            linkedBy.values.removeAll { it.isEmpty() }
+            linkState.remove(uri)
+        }
+    }
+
+    /** The documents that list [uri] are contributed again, if what is known of their locations changed. */
+    private fun refreshLinkedTo(uri: String) =
+        refreshLinks(linkLock.read { linkedBy[FileUris.key(uri)]?.toList().orEmpty() })
+
+    private fun refreshAllLinked() =
+        refreshLinks(linkLock.read { linkState.keys.toList() })
+
+    private fun refreshLinks(documents: List<String>) {
+        for (document in documents) {
+            val (links, flags) = linkLock.read { linkState[document] } ?: continue
+            if (links.map { knownDocuments.isKnown(it) } == flags) continue
+            if (sessionStore.get(document) != null) rebuildCache(document) else indexer.refresh(document)
+        }
+    }
+
+    private fun contributionsOf(module: LanguageModule, snapshot: DocumentSnapshot, parsedArtifact: Any?): Contributed {
+        val links = module.linkDependencies(snapshot, parsedArtifact)
+        val flags = links.map { knownDocuments.isKnown(it) }
+        return Contributed(module.crossReferenceContributions(snapshot, parsedArtifact, knownDocuments), links, flags)
+    }
 
     fun capabilities(): List<LanguageCapabilities> =
         modules.map { it.capabilities }
@@ -26,6 +188,8 @@ class ZenwaveLanguageServer(
     fun open(snapshot: DocumentSnapshot) {
         sessionStore.open(snapshot)
         rebuildCache(snapshot.ref.uri)
+        indexer.opened(snapshot.ref.uri)
+        refreshLinkedTo(snapshot.ref.uri)
     }
 
     fun change(uri: String, text: String, version: Int) {
@@ -38,9 +202,62 @@ class ZenwaveLanguageServer(
     fun close(uri: String) {
         sessionStore.close(uri)
         lock.write {
-            parsedCache.remove(uri)
+            parsedCache.remove(FileUris.key(uri))
+            importRuns.remove(uri)
         }
-        crossReferenceIndex.remove(uri)
+        // NAV-R20: a closed local file keeps the references it contributes; the file on disk is read again for
+        // whatever the editor discarded. Any other address (zenwave:, a virtual file system) is dropped as before.
+        if (uri.startsWith("file:")) indexer.closed(uri) else forgetContributions(uri)
+        // No longer open: a location that is not on disk stops being known.
+        refreshLinkedTo(uri)
+    }
+
+    /**
+     * Starts indexing the local files under [workspaceFolders] in the background (NAV-R20, NAV-Q11): files of the
+     * supported languages, skipping dot-directories, `node_modules`, `target` and `build`; at most
+     * [BackgroundIndexSettings.maxFiles] in the first pass. Returns at once. Open documents index themselves.
+     */
+    fun startBackgroundIndex(workspaceFolders: List<String>) = indexer.start(workspaceFolders)
+
+    /**
+     * Files created, changed or deleted on disk, from `workspace/didChangeWatchedFiles`. An open document is never
+     * re-read, but a deletion is remembered so its references leave the index when it is closed.
+     */
+    fun workspaceFilesChanged(changes: List<WatchedFileChange>) {
+        for (change in changes) {
+            when (change.kind) {
+                WatchedFileChangeKind.DELETED -> indexer.deletedOnDisk(change.uri)
+                else -> indexer.changedOnDisk(change.uri)
+            }
+            if (change.kind != WatchedFileChangeKind.CHANGED) refreshLinkedTo(change.uri)
+        }
+    }
+
+    /** Whether the reference index is still being built, and whether it is partial (`zenwave/indexStatus`). */
+    fun indexStatus(): IndexStatus = indexer.status()
+
+    /**
+     * Works out the references of [uri] from [text], read from disk, without the server's lock and without keeping
+     * what the parse produced. Null when no module handles it; throws when the document cannot be processed.
+     * The result is put into the index under the write lock, unless an editor opened the file meanwhile.
+     */
+    private fun prepareClosedDocument(uri: String, text: String): PreparedClosedIndex? {
+        val snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
+        val entry = buildCacheEntry(snapshot)
+        val module = entry.module ?: return null
+        entry.processingFailure?.let { throw IllegalStateException(it) }
+        val contributed = contributionsOf(module, snapshot, entry.parsedArtifact)
+        val contributions = contributed.contributions
+        return PreparedClosedIndex(contributions.map { it.targetUri }.distinct()) {
+            lock.write {
+                // An editor may have opened the file since it was read: its snapshot indexes it, and keeps its own links.
+                if (sessionStore.get(uri) != null) return@write false
+                forgetContributions(uri)
+                if (contributions.isNotEmpty()) crossReferenceIndex.index(contributions)
+                recordLinks(uri, contributed)
+                true
+            }
+        }
     }
 
     fun canHandle(snapshot: DocumentSnapshot): Boolean =
@@ -49,42 +266,656 @@ class ZenwaveLanguageServer(
     fun canHandle(uri: String): Boolean =
         sessionStore.get(uri)?.let(::getOrBuildCacheEntry)?.module != null
 
+    /** The reason the latest version of an open document could not be processed, if any. */
+    fun processingFailure(uri: String): String? =
+        withEntry(uri) { entry, _ -> entry.processingFailure }
+
     fun diagnostics(uri: String): List<Diagnostic> =
         withEntry(uri) { entry, _ -> entry.diagnostics } ?: emptyList()
 
     fun hover(uri: String, position: Position): HoverResult? =
         withEntry(uri) { entry, snapshot ->
-            entry.module?.hover(snapshot, position, entry.parsedArtifact)
+            entry.module?.takeUnless { entry.processingFailure != null }?.hover(snapshot, position, entry.parsedArtifact)
         }
 
+    /** Definition with the other documents it draws on taken from the open ones only; [definitionReading] also reads. */
     fun definition(uri: String, position: Position): List<NavigationTarget> =
         withEntry(uri) { entry, snapshot ->
-            entry.module?.definition(snapshot, position, entry.parsedArtifact)
+            val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return@withEntry null
+            val related = module.definitionDependencies(snapshot, position, entry.parsedArtifact).distinct().filter { it != uri }
+                .mapNotNull { dependency -> sessionStore.get(dependency)?.let { dependency to it } }.toMap()
+            module.definition(snapshot, position, entry.parsedArtifact, RelatedDocuments(related))
         } ?: emptyList()
+
+    /**
+     * Definition for `textDocument/definition`: the documents it draws on (the ZDL a ZFL command belongs to) come from
+     * the editor when open and are otherwise read, as for [conceptualHierarchy]. One that cannot be reached is absent.
+     */
+    suspend fun definitionReading(uri: String, position: Position): List<NavigationTarget> {
+        val snapshot = sessionStore.get(uri) ?: return emptyList()
+        val entry = getOrBuildCacheEntry(snapshot)
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return emptyList()
+        val related = module.definitionDependencies(snapshot, position, entry.parsedArtifact).distinct().filter { it != uri }
+            .mapNotNull { dependency ->
+                val document = sessionStore.get(dependency)
+                    ?: readUnopened(dependency)?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+                document?.let { dependency to it }
+            }.toMap()
+        return module.definition(snapshot, position, entry.parsedArtifact, RelatedDocuments(related))
+    }
+
+    /**
+     * The diagnostics of an open document with those for its links to documents that cannot be reached (a ZFL `@zdl`
+     * naming a missing ZDL, NAV-R7), or null when there are none or the document changed while the links were read.
+     * Reading is why this is apart from [diagnostics], which answers at once.
+     */
+    suspend fun diagnosticsWithLinks(uri: String): List<Diagnostic>? {
+        val snapshot = sessionStore.get(uri) ?: return null
+        val entry = getOrBuildCacheEntry(snapshot)
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return null
+        val dependencies = module.linkDependencies(snapshot, entry.parsedArtifact).distinct().filter { it != uri }
+        if (dependencies.isEmpty()) return null
+        val related = dependencies.mapNotNull { dependency ->
+            val document = sessionStore.get(dependency)
+                ?: readUnopened(dependency)?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+            document?.let { dependency to it }
+        }.toMap()
+        val links = module.linkDiagnostics(snapshot, entry.parsedArtifact, RelatedDocuments(related))
+        if (links.isEmpty() || sessionStore.get(uri)?.ref?.version != snapshot.ref.version) return null
+        return entry.diagnostics + links
+    }
+
+    fun completion(uri: String, position: Position): List<CompletionItem> =
+        withEntry(uri) { entry, snapshot ->
+            entry.module?.takeUnless { entry.processingFailure != null || !it.capabilities.supportsCompletion }
+                ?.completion(snapshot, position, entry.parsedArtifact)
+        } ?: emptyList()
+
+    /** The code actions for the diagnostics of an open document that touch [range]. */
+    fun codeActions(uri: String, range: Range): List<CodeAction> =
+        withEntry(uri) { entry, snapshot ->
+            val touching = entry.diagnostics.filter { it.range.touches(range) }
+            if (touching.isEmpty()) return@withEntry emptyList()
+            entry.module?.takeUnless { entry.processingFailure != null || !it.capabilities.supportsCodeActions }
+                ?.codeActions(snapshot, touching, entry.parsedArtifact)
+        } ?: emptyList()
+
+    private fun Range.touches(other: Range): Boolean {
+        fun Position.after(o: Position) = line > o.line || (line == o.line && character > o.character)
+        return !start.after(other.end) && !other.start.after(end)
+    }
 
     fun hierarchy(uri: String): List<HierarchyNode> =
         withEntry(uri) { entry, snapshot ->
             getOrComputeHierarchy(entry, snapshot)
         } ?: emptyList()
 
-    fun format(uri: String): String? =
-        withEntry(uri) { entry, snapshot -> entry.module?.format(snapshot) }
+    /**
+     * The conceptual hierarchy of a document for `zenwave/hierarchy`, open or not.
+     *
+     * An open document is answered from the editor's content; any other document the server reads itself
+     * through its [DocumentReader]. Nodes may point at other documents the hierarchy draws on (a ZFL system's
+     * services in the ZDL it annotates); those too come from the editor when open and are otherwise read, and a
+     * related document that cannot be reached leaves its nodes where the requested document declares them.
+     *
+     * A document no language module builds hierarchies for answers with an empty list, without being read.
+     *
+     * @throws DocumentRequestException `documentNotFound` when the document is not open and cannot be read
+     */
+    suspend fun conceptualHierarchy(uri: String): List<HierarchyNode> {
+        val open = sessionStore.get(uri)
+        val snapshot: DocumentSnapshot
+        val entry: DocumentCacheEntry
+        if (open != null) {
+            snapshot = open
+            entry = getOrBuildCacheEntry(open)
+        } else {
+            if (!mayHaveHierarchy(uri)) return emptyList()
+            val text = readUnopened(uri) ?: throw DocumentRequestException(
+                DocumentFailureKind.DOCUMENT_NOT_FOUND,
+                unopenedFailure(uri),
+            )
+            snapshot = DocumentSnapshot(DocumentRef(uri, "", UNOPENED_VERSION), text)
+            entry = buildCacheEntry(snapshot)
+        }
+        val module = entry.module?.takeUnless { entry.processingFailure != null } ?: return emptyList()
+        if (!module.capabilities.supportsHierarchy) return emptyList()
+        val dependencies = module.hierarchyDependencies(snapshot, entry.parsedArtifact).distinct().filter { it != uri }
+        if (dependencies.isEmpty()) {
+            return if (open != null) getOrComputeHierarchy(entry, snapshot) else module.hierarchy(snapshot, entry.parsedArtifact)
+        }
+        // A `zenwave:` document draws only on what it imports (AR-R9); the others are read as any unopened document.
+        val fromZenwave = uri.startsWith(ZENWAVE_SCHEME)
+        val imported = if (fromZenwave) readImports(snapshot) else emptyMap()
+        val related = dependencies.mapNotNull { dependency ->
+            val document = sessionStore.get(dependency)
+                ?: (if (fromZenwave) imported[ZenwaveResources.parse(dependency)?.address ?: dependency] else readUnopened(dependency))
+                    ?.let { DocumentSnapshot(DocumentRef(dependency, "", UNOPENED_VERSION), it) }
+            document?.let { dependency to it }
+        }.toMap()
+        // Not cached: the result depends on documents whose changes this entry does not track.
+        return module.hierarchy(snapshot, entry.parsedArtifact, RelatedDocuments(related))
+    }
 
-    fun organizeZflServices(uri: String): String? =
-        withEntry(uri) { entry, snapshot ->
-            (entry.module as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)?.organizeServices(snapshot, entry.parsedArtifact)
+    /**
+     * The symbol declared or referenced at a position of an open document (`zenwave/symbolAt`), as the
+     * `(uri, semanticId)` pair `forwardReferences` and `reverseReferences` take; null when there is none.
+     *
+     * The language module's symbol at the position (what hover reports) is used when the cross-reference index
+     * records nothing around the position, records that same symbol, or records only something enclosing it;
+     * otherwise the innermost cross-reference recorded at the position is used, so the id is one the reference
+     * requests know.
+     *
+     * @throws DocumentRequestException `documentNotFound` when the document is not open
+     */
+    fun symbolAt(uri: String, position: Position): SymbolAtPosition? {
+        val snapshot = sessionStore.get(uri)
+            ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open")
+        val entry = getOrBuildCacheEntry(snapshot)
+        val hover = entry.module?.takeUnless { entry.processingFailure != null }?.hover(snapshot, position, entry.parsedArtifact)
+        val indexed = getOrComputeCrossReferenceContributions(entry, snapshot)
+            .filter { it.sourceUri == uri && it.sourceRange?.contains(position) == true }
+            .minByOrNull { it.sourceRange!!.size() }
+        val preferHover = hover != null && (
+            indexed == null ||
+                hover.documentSymbol.referenceId == indexed.sourceSemanticId ||
+                hover.range?.let { indexed.sourceRange!!.encloses(it) && it != indexed.sourceRange } == true
+            )
+        return when {
+            preferHover -> SymbolAtPosition(uri = uri, semanticId = hover!!.documentSymbol.referenceId, range = hover.range)
+            indexed != null -> SymbolAtPosition(uri = uri, semanticId = indexed.sourceSemanticId, range = indexed.sourceRange)
+            else -> null
+        }
+    }
+
+    private fun mayHaveHierarchy(uri: String): Boolean {
+        if (uri.startsWith(ZENWAVE_SCHEME) && !DocumentImports.isModelDocument(uri)) return false
+        val path = uri.substringBefore('#').substringBefore('?')
+        return modules.any { module ->
+            module.capabilities.supportsHierarchy && module.capabilities.extensions.any { path.endsWith(it) }
+        }
+    }
+
+    /** A closed local file as the background index reads it: its text, or whether it is missing or unreadable. */
+    private suspend fun readClosedFile(uri: String): ClosedRead =
+        try {
+            ClosedRead.Text(documentReader.read(uri))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (e is Error && e !is NotImplementedError) throw e
+            if (isMissingFile(e)) ClosedRead.Missing else ClosedRead.Failed
         }
 
-    fun forwardReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
-        crossReferenceIndex.forwardReferences(uri, semanticId)
+    /** The content of a document that is not open, or null when it cannot be reached. */
+    private suspend fun readUnopened(uri: String): String? =
+        try {
+            when {
+                // AR-R9: a `zenwave:` address is read by the server itself, through the declared-only check and the cache.
+                uri.startsWith(ZENWAVE_SCHEME) -> resources().read(uri).content
+                // The same allow-list as stat/read, including every redirect. A refusal returns null and fetches nothing.
+                // The one exception is the project manifest itself: the client named that address, and openWorkspace
+                // already loaded it. Hierarchy uses that text, so an empty allow-list does not hide the open manifest.
+                AbsoluteUriPolicy.isAbsoluteHttp(uri) -> {
+                    openedProjectManifest(uri) ?: run {
+                        val canonical = AbsoluteUriPolicy.parse(uri) ?: throw AbsoluteUriNotAllowed(uri, null)
+                        AbsoluteHttpReads.read(absoluteHttp, resourceSettings.allowedDomains, canonical)
+                    }
+                }
+                // A file: URI whose path is an http(s) URL is not a file and is not fetched, even when the host is allowed.
+                LoaderDocumentReader.refusesHttp(uri) -> throw DocumentUnreachableException(
+                    ZenwaveResourceService.redact(LoaderDocumentReader.displayUri(uri)),
+                    "an http(s) URL is not read as a file",
+                )
+                else -> documentReader.read(uri)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } catch (e: Throwable) {
+            // Kotlin/JS: a JavaScript error thrown by a loader (no fs, a failed fetch) is not an Exception.
+            if (e is Error && e !is NotImplementedError) throw e
+            null
+        }
 
-    fun reverseReferences(uri: String, semanticId: SemanticId): List<NavigationTarget> =
+    /** A missing document. A disguised `http(s)` URL is decoded once before redaction, so an encoded user info or query does not survive. */
+    private fun unopenedFailure(uri: String): String {
+        val shown = if (LoaderDocumentReader.refusesHttp(uri)) LoaderDocumentReader.displayUri(uri) else uri
+        return ZenwaveResourceService.redact("$shown is not open and cannot be read")
+    }
+
+    private class ImportRun {
+        var reads = 0
+        val visited = mutableSetOf<String>()
+
+        /** The documents read or about to be read, counted against the cap before anything is read. */
+        val reserved = mutableSetOf<String>()
+        val failures = mutableMapOf<String, Throwable>()
+    }
+
+    private class Followed(val import: DocumentImport, val content: ResourceContent?, val failure: Throwable?)
+
+    private class Followings(val followed: List<Followed>, val skipped: DocumentImport?)
+
+    private suspend fun <T> orNull(block: suspend () -> T): T? =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Kotlin/JS: a JavaScript error thrown by a loader is not an Exception.
+            if (e is Error && e !is NotImplementedError) throw e
+            null
+        }
+
+    /**
+     * Reads the imports written in [text], the content the server itself read for [base] (never the editor's text:
+     * AR-R3 opens its door only for content already read). A reference is read once per document, and no more than
+     * [MAX_IMPORTS_PER_DOCUMENT] per document, [MAX_IMPORT_READS] per [run] and [MAX_IMPORTED_DOCUMENTS] documents:
+     * the caps are checked before anything is read, and the first import left alone is reported in `skipped`. A
+     * failure is remembered for the run, so a target that failed is not asked for again by another document.
+     */
+    private suspend fun follow(base: String, text: String, run: ImportRun): Followings {
+        run.reserved += base
+        val seen = mutableSetOf<String>()
+        val followed = mutableListOf<Followed>()
+        var skipped: DocumentImport? = null
+        var perDocument = 0
+        for (import in DocumentImports.inText(text)) {
+            if (!DocumentImports.isModelDocument(import.reference) || !seen.add(import.reference)) continue
+            val target = ZenwaveResources.resolveReference(base, import.reference)
+            if (target != null && target in run.visited) continue
+            if (perDocument >= MAX_IMPORTS_PER_DOCUMENT || run.reads >= MAX_IMPORT_READS || run.reserved.size >= MAX_IMPORTED_DOCUMENTS) {
+                if (skipped == null) skipped = import
+                continue
+            }
+            val key = target ?: "$base ${import.reference}"
+            run.failures[key]?.let {
+                followed += Followed(import, null, it)
+                continue
+            }
+            perDocument += 1
+            run.reads += 1
+            if (target != null) run.reserved += target
+            try {
+                if (AbsoluteUriPolicy.isAbsoluteHttp(import.reference)) {
+                    throw absoluteImportRefusal(import.reference)
+                }
+                followed += Followed(import, resources().readImport(base, import.reference), null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e is Error && e !is NotImplementedError) throw e
+                run.failures[key] = e
+                followed += Followed(import, null, e)
+            }
+        }
+        return Followings(followed, skipped)
+    }
+
+    /** The texts of the documents [snapshot] imports, by normalised address; one that cannot be read is left out. */
+    private suspend fun readImports(snapshot: DocumentSnapshot): Map<String, String> {
+        val base = snapshot.ref.uri
+        val text = orNull { resources().read(base).content } ?: return emptyMap()
+        return follow(base, text, ImportRun()).followed.mapNotNull { followed ->
+            followed.content?.let { (ZenwaveResources.parse(it.uri)?.address ?: it.uri) to it.content }
+        }.toMap()
+    }
+
+    /**
+     * The diagnostics of a `zenwave:` document with the documents it imports, directly or not (AR-R9).
+     *
+     * The imports are those of the content the server read for the document, not of the editor's text. Each is read
+     * by the server itself through [ZenwaveResourceService.readImport]: the importing document is the base of the
+     * reference, and the declared-only check and the cache are those of `zenwave/readResource`. An import that is
+     * not allowed, or cannot be read, is a diagnostic on the import; so is the first import left unread by a limit.
+     * Only `zdl`, `zfl` and `zw` imports are read and processed (AR-R8).
+     *
+     * The result holds the full list for [uri] (its own diagnostics and the import problems), and the list of each
+     * imported document the client has not opened, which the client shows as the documents' own.
+     * [ImportDiagnostics.cleared] holds the documents an earlier result listed that no open document imports any more.
+     * Empty for another scheme, for a document that is not open, and when a newer run or change superseded this one.
+     */
+    suspend fun importDiagnostics(uri: String): ImportDiagnostics = computeImportDiagnostics(uri, null)
+
+    /**
+     * As [importDiagnostics], handing the result to [publish] while it is still the latest for [uri], so that two
+     * runs never publish out of order. [publish] must not call back into the server.
+     */
+    suspend fun publishImportDiagnostics(uri: String, publish: (ImportDiagnostics) -> Unit) {
+        computeImportDiagnostics(uri, publish)
+    }
+
+    private suspend fun computeImportDiagnostics(uri: String, publish: ((ImportDiagnostics) -> Unit)?): ImportDiagnostics {
+        // A document that is not a model document is neither read nor processed (AR-R8).
+        if (!uri.startsWith(ZENWAVE_SCHEME) || !DocumentImports.isModelDocument(uri)) return ImportDiagnostics()
+        val root = sessionStore.get(uri) ?: return ImportDiagnostics()
+        val version = root.ref.version
+        val token = lock.write {
+            importRunCounter += 1
+            importRuns[uri] = importRunCounter
+            importRunCounter
+        }
+        fun current() = lock.read { importRuns[uri] == token } && sessionStore.get(uri)?.ref?.version == version
+
+        val run = ImportRun().also { it.visited += uri }
+        val all = linkedMapOf<String, List<Diagnostic>>()
+        val queue = ArrayDeque<Triple<DocumentSnapshot, DocumentCacheEntry, String?>>()
+        queue.add(Triple(root, getOrBuildCacheEntry(root), orNull { resources().read(uri).content }))
+        while (queue.isNotEmpty()) {
+            if (!current()) return ImportDiagnostics()
+            val (snapshot, entry, text) = queue.removeFirst()
+            val problems = mutableListOf<Diagnostic>()
+            if (text != null && entry.module != null && entry.processingFailure == null) {
+                val followings = follow(snapshot.ref.uri, text, run)
+                for (item in followings.followed) {
+                    val content = item.content
+                    if (content == null) {
+                        problems += importProblem(snapshot.ref.uri, item.import, item.failure!!)
+                        continue
+                    }
+                    if (!run.visited.add(content.uri)) continue
+                    val open = sessionStore.get(content.uri)
+                    val imported = open ?: DocumentSnapshot(DocumentRef(content.uri, "", UNOPENED_VERSION), content.content)
+                    queue.add(Triple(imported, if (open != null) getOrBuildCacheEntry(open) else buildCacheEntry(imported), content.content))
+                }
+                followings.skipped?.let { problems += limitProblem(snapshot.ref.uri, it) }
+            }
+            all[snapshot.ref.uri] = entry.diagnostics + problems
+        }
+        return lock.write {
+            if (importRuns[uri] != token || sessionStore.get(uri)?.ref?.version != version) return@write ImportDiagnostics()
+            val now = all.keys - uri
+            val before = importedBy[uri].orEmpty()
+            importedBy[uri] = now
+            now.forEach { importedDiagnostics[it] = all.getValue(it) }
+            // Another root's retained copy of this document is refreshed by this document's own reading.
+            if (importedBy.values.any { uri in it }) importedDiagnostics[uri] = all.getValue(uri)
+            val cleared = (before - now).filterTo(linkedSetOf()) { releasable(it) }
+            val published = linkedMapOf<String, List<Diagnostic>>()
+            all.forEach { (address, diagnostics) -> if (address == uri || sessionStore.get(address) == null) published[address] = diagnostics }
+            ImportDiagnostics(published, cleared).also { publish?.invoke(it) }
+        }
+    }
+
+    /** True when no open document imports [address] any more and the client has not opened it: it is forgotten. Under the lock. */
+    private fun releasable(address: String): Boolean {
+        if (importedBy.values.any { address in it } || sessionStore.get(address) != null) return false
+        importedDiagnostics.remove(address)
+        return true
+    }
+
+    /**
+     * Ends the imports of [uri] when it closes, so that nothing leaks and a run still in flight is dropped. Returns the
+     * imported documents to clear: those no other open document imports and the client has not opened.
+     */
+    fun releaseImports(uri: String): Set<String> =
+        lock.write {
+            importRuns.remove(uri)
+            importedBy.remove(uri).orEmpty().filterTo(linkedSetOf()) { releasable(it) }
+        }
+
+    /**
+     * What an open document still imports of [uri] says about it: the diagnostics to show for [uri] when the client
+     * closes it, instead of clearing them. Null when no open document imports it.
+     */
+    fun importedDiagnosticsFor(uri: String): List<Diagnostic>? =
+        lock.read { if (importedBy.values.any { uri in it }) importedDiagnostics[uri] else null }
+
+    /**
+     * An import whose reference is an absolute `http(s)` URI. Owner-relative imports never fetch one. A reference
+     * the policy rejects is `resourceNotAllowed` and is not requested; one it accepts is still not an owner-relative
+     * path, so it stays `resourceNotDeclared` and is not requested either.
+     */
+    private fun absoluteImportRefusal(reference: String): ResourceRequestException {
+        val canonical = AbsoluteUriPolicy.parse(reference)
+        if (canonical == null || !AbsoluteUriPolicy.allows(resourceSettings.allowedDomains, canonical)) {
+            val host = canonical?.host ?: "(none)"
+            return ResourceRequestException(
+                ResourceFailureKind.NOT_ALLOWED,
+                "The absolute URI is not served: host '$host' is not an allowed domain",
+            )
+        }
+        return ResourceRequestException(
+            ResourceFailureKind.NOT_DECLARED,
+            "The address is not served: the reference leaves the owner's content",
+        )
+    }
+
+    private fun limitProblem(uri: String, import: DocumentImport) = Diagnostic(
+        uri = uri,
+        range = Range(Position(import.line, import.start), Position(import.line, import.end)),
+        severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.WARNING,
+        message = "Further imports were not followed: at most $MAX_IMPORTS_PER_DOCUMENT per document, " +
+            "$MAX_IMPORT_READS per reading and $MAX_IMPORTED_DOCUMENTS documents",
+        code = "import-limit",
+    )
+
+    private fun importProblem(uri: String, import: DocumentImport, error: Throwable): Diagnostic {
+        val denied = (error as? ResourceRequestException)?.kind == ResourceFailureKind.NOT_DECLARED
+        val reason = error.message ?: error::class.simpleName.orEmpty()
+        return Diagnostic(
+            uri = uri,
+            range = Range(Position(import.line, import.start), Position(import.line, import.end)),
+            severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.ERROR,
+            // The reference is client-written text and may carry user info or a token: redact the whole message.
+            message = ZenwaveResourceService.redact(
+                if (denied) "Import ${import.reference} is not allowed: $reason" else "Import ${import.reference} cannot be read: $reason",
+            ),
+            code = if (denied) "import-not-declared" else "import-unreadable",
+        )
+    }
+
+    fun format(uri: String): String? =
+        withEntry(uri) { entry, snapshot -> entry.module?.takeUnless { entry.processingFailure != null }?.format(snapshot) }
+
+    /**
+     * Rewrites the systems block of an open ZFL document (`zenwave/organizeZflServices`).
+     *
+     * [mode] is `full` (the default, including when it is absent) or `additive`.
+     * Null when the document is not open, is not ZFL, or has errors.
+     *
+     * @throws io.zenwave360.lsp.core.visualization.InvalidRequestParamsException for an unknown mode
+     */
+    fun organizeZflServices(uri: String, mode: String? = null): String? {
+        val organizationMode = parseOrganizeMode(mode)
+        return withEntry(uri) { entry, snapshot ->
+            (entry.module.takeUnless { entry.processingFailure != null } as? io.zenwave360.lsp.core.zfl.ZflLanguageModule)
+                ?.organizeServices(snapshot, entry.parsedArtifact, organizationMode)
+        }
+    }
+
+    /**
+     * The ordered preview representations of an open ZDL or ZFL document (`zenwave/preview`).
+     *
+     * @throws DocumentRequestException when the document is not open, not ZDL or ZFL, or cannot be read
+     * @throws io.zenwave360.lsp.core.visualization.InvalidRequestParamsException for an unknown sequence render mode
+     */
+    fun preview(uri: String, sequenceRenderMode: String? = null, mode: String? = null, sequenceTree: Boolean = false, representationId: String? = null): PreviewResult {
+        ModelVisualizations.parseSequenceRenderMode(sequenceRenderMode)
+        ModelVisualizations.parsePreviewMode(mode)
+        return visualizations.preview(visualizedDocument(uri), sequenceRenderMode, mode, sequenceTree, representationId)
+    }
+
+    /**
+     * Makes the plugin catalogue in [catalogueJson] the one `.zw` previews describe plugins with (MP-R16); previews are
+     * not cached, so the next one uses it.
+     *
+     * @throws IllegalArgumentException when it is not a plugin catalogue; the current one is kept
+     */
+    fun replacePluginCatalogue(catalogueJson: String) = pluginCatalogues.replace(catalogueJson)
+
+    /**
+     * The laid-out flow and service view models of an open ZFL document (`zenwave/eventFlowViews`).
+     *
+     * @throws DocumentRequestException when the document is not open, not ZFL, or cannot be read
+     */
+    suspend fun eventFlowViews(uri: String, variant: String? = null, positions: Map<String, SavedPoint>? = null, lanes: String? = null): EventFlowViews =
+        visualizations.eventFlowViews(visualizedDocument(uri), variant, positions, lanes?.let {
+            FlowLanes.fromWire(it) ?: throw InvalidRequestParamsException("unknown lanes: $it")
+        })
+
+    private fun visualizedDocument(uri: String): VisualizedDocument {
+        val snapshot = sessionStore.get(uri)
+            ?: throw DocumentRequestException(DocumentFailureKind.DOCUMENT_NOT_FOUND, "$uri is not open")
+        val entry = getOrBuildCacheEntry(snapshot)
+        entry.processingFailure?.let { failure ->
+            throw DocumentRequestException(
+                DocumentFailureKind.DOCUMENT_UNREADABLE,
+                "$uri could not be processed: $failure",
+                entry.diagnostics,
+            )
+        }
+        return VisualizedDocument(snapshot, entry.module?.languageId, entry.diagnostics)
+    }
+
+    /**
+     * What the symbol references. Each result carries the place in its document when it is known: recorded with
+     * the reference, or declared in the target document when that is open.
+     */
+    fun forwardReferences(uri: String, semanticId: String): List<NavigationTarget> {
+        val snapshot = sessionStore.get(uri) ?: return crossReferenceIndex.forwardReferences(uri, semanticId)
+        val entry = getOrBuildCacheEntry(snapshot)
+        return getOrComputeCrossReferenceContributions(entry, snapshot)
+            .filter { it.sourceUri == uri && it.sourceSemanticId == semanticId }
+            .map { it.toForwardTarget(it.targetRange ?: declaredTargetRange(it)) }
+    }
+
+    private fun declaredTargetRange(contribution: CrossReferenceContribution): Range? {
+        val semanticId = contribution.targetSemanticId ?: return null
+        val target = sessionStore.get(contribution.targetUri) ?: return null
+        val entry = getOrBuildCacheEntry(target)
+        return entry.module?.takeUnless { entry.processingFailure != null }?.declarationRange(target, entry.parsedArtifact, semanticId)
+    }
+
+    fun reverseReferences(uri: String, semanticId: String): List<NavigationTarget> =
         crossReferenceIndex.reverseReferences(uri, semanticId)
+
+    fun attachWorkspace(workspace: WorkspaceArchitecturePlane) {
+        lock.write {
+            architecturePlane = workspace
+            workspaceStatus = WorkspaceStatus(WorkspaceState.READY, workspaceStatus.manifestUri)
+        }
+    }
+
+    /** The remote manifest name and allowed domains from `initializationOptions.zenwave` (AR-Q1, AR-Q4). */
+    fun applyResourceSettings(settings: ZenwaveResourceSettings) {
+        resourceSettings = settings
+    }
+
+    /**
+     * Records [manifestUri] before [openWorkspace] runs.
+     *
+     * `initialize` starts the open and returns without waiting, and `zenwave/hierarchy` of that same address
+     * can arrive while the fetch is still in flight. The hierarchy waits for the text the open produces.
+     */
+    fun expectProjectManifest(manifestUri: String) {
+        lock.write {
+            workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri)
+            val opening = manifestOpening
+            if (opening == null || opening.isCompleted) manifestOpening = CompletableDeferred()
+        }
+    }
+
+    suspend fun openWorkspace(manifestUri: String): WorkspaceStatus {
+        val settings = resourceSettings
+        val opening = lock.write {
+            workspaceStatus = WorkspaceStatus(WorkspaceState.BUILDING, manifestUri)
+            val current = manifestOpening
+            if (current != null && !current.isCompleted) current
+            else CompletableDeferred<String?>().also { manifestOpening = it }
+        }
+        return try {
+            val workspace = workspaceOpener(manifestUri, settings)
+            val text = workspace.resources?.openedManifestText(manifestUri)
+            lock.write {
+                architecturePlane = workspace
+                workspaceStatus = WorkspaceStatus(WorkspaceState.READY, manifestUri)
+                workspaceStatus
+            }.also { opening.complete(text) }
+        } catch (error: CancellationException) {
+            opening.complete(null)
+            throw error
+        } catch (error: Throwable) {
+            // Throwable: a failed fetch in JavaScript is not an Exception, and must not leave the status BUILDING.
+            // The reason is redacted before it is stored or logged: an http(s) manifest URL can carry user info.
+            val reason = ZenwaveResourceService.redact(
+                error.message ?: error::class.simpleName ?: "the workspace could not be opened",
+            )
+            val status = lock.write {
+                architecturePlane = null
+                workspaceStatus = WorkspaceStatus(
+                    state = WorkspaceState.FAILED,
+                    manifestUri = manifestUri,
+                    message = reason,
+                )
+                workspaceStatus
+            }
+            opening.complete(null)
+            log("Could not open the workspace manifest: $reason")
+            status
+        }
+    }
+
+    /**
+     * The text [openWorkspace] loaded for the project manifest, when [uri] is that address.
+     * Any other absolute URL stays on the allow-list. The document reader never fetches this URL.
+     */
+    private suspend fun openedProjectManifest(uri: String): String? {
+        val (status, opening) = lock.read { workspaceStatus to manifestOpening }
+        val manifest = status.manifestUri ?: return null
+        if (!isProjectManifest(uri, manifest)) return null
+        return when (status.state) {
+            WorkspaceState.READY -> lock.read { architecturePlane }?.resources?.openedManifestText(uri)
+            WorkspaceState.BUILDING -> opening?.await()
+            else -> null
+        }
+    }
+
+    private fun isProjectManifest(uri: String, manifest: String): Boolean {
+        if (uri == manifest) return true
+        val asked = AbsoluteUriPolicy.identity(uri) ?: return false
+        val opened = AbsoluteUriPolicy.identity(manifest) ?: return false
+        return asked == opened
+    }
+
+    fun workspaceStatus(): WorkspaceStatus = lock.read { workspaceStatus }
+
+    /** `zenwave/statResource` (AR-R4). With no manifest open, nothing is declared, so every address is refused. */
+    suspend fun statResource(uri: String): ResourceStat = resources().stat(uri)
+
+    /** `zenwave/readResource` (AR-R5). */
+    suspend fun readResource(uri: String): ResourceContent = resources().read(uri)
+
+    private fun resources(): ZenwaveResourceService {
+        val (plane, status) = lock.read { architecturePlane to workspaceStatus }
+        return plane?.resources ?: throw ResourceRequestException(
+            ResourceFailureKind.NOT_DECLARED,
+            closedManifestMessage(status),
+        )
+    }
+
+    /**
+     * The refusal used when no manifest is open. A failed open appends its redacted reason, so the client
+     * sees why `file:///c%3A/...` did not open instead of only "no architecture manifest is open".
+     */
+    private fun closedManifestMessage(status: WorkspaceStatus): String {
+        val base = "The address is not served: no architecture manifest is open"
+        val reason = status.message?.takeIf { status.state == WorkspaceState.FAILED && it.isNotBlank() }
+        return if (reason == null) base else "$base: $reason"
+    }
+
+    suspend fun conceptsAt(documentSymbol: DocumentSymbolRef): List<ArchitectureConceptRef> =
+        lock.read { architecturePlane }?.conceptsAt(documentSymbol)?.elements.orEmpty()
+
+    suspend fun conceptsAt(uri: String, position: Position): List<ArchitectureConceptRef> =
+        hover(uri, position)?.documentSymbol?.let { conceptsAt(it) }.orEmpty()
 
     private fun rebuildCache(uri: String) {
         val snapshot = sessionStore.get(uri) ?: return
         val entry = getOrBuildCacheEntry(snapshot, forceRefresh = true)
-        crossReferenceIndex.remove(uri)
+        forgetContributions(uri)
         val contributions = getOrComputeCrossReferenceContributions(entry, snapshot)
         if (contributions.isNotEmpty()) {
             crossReferenceIndex.index(contributions)
@@ -119,33 +950,78 @@ class ZenwaveLanguageServer(
         run {
             if (!forceRefresh) {
                 lock.read {
-                    parsedCache[snapshot.ref.uri]
+                    parsedCache[FileUris.key(snapshot.ref.uri)]
                         ?.takeIf { it.version == snapshot.ref.version }
                 }?.let { return it }
             }
             lock.write {
                 if (!forceRefresh) {
-                    parsedCache[snapshot.ref.uri]
+                    parsedCache[FileUris.key(snapshot.ref.uri)]
                         ?.takeIf { it.version == snapshot.ref.version }
                         ?.let { return@write it }
                 }
-                val module = resolveModule(snapshot)
-                val parsed = module?.parse(snapshot)
-                DocumentCacheEntry(
-                    uri = snapshot.ref.uri,
-                    version = snapshot.ref.version,
-                    module = module,
-                    diagnostics = parsed?.diagnostics.orEmpty(),
-                    parsedArtifact = parsed?.model
-                ).also { parsedCache[snapshot.ref.uri] = it }
+                buildCacheEntry(snapshot).also { parsedCache[FileUris.key(snapshot.ref.uri)] = it }
             }
         }
+
+    private fun buildCacheEntry(snapshot: DocumentSnapshot): DocumentCacheEntry {
+        // AR-R8: only zdl, zfl and zw documents under the scheme are model documents; OpenAPI, AsyncAPI and Markdown
+        // are never parsed (LVR-R15: an OpenAPI file once stalled lsp-js).
+        if (snapshot.ref.uri.startsWith(ZENWAVE_SCHEME) && !DocumentImports.isModelDocument(snapshot.ref.uri)) {
+            return DocumentCacheEntry(snapshot.ref.uri, snapshot.ref.version, null, emptyList(), null)
+        }
+        val module = try {
+            resolveModule(snapshot)
+        } catch (error: Throwable) {
+            return failedCacheEntry(snapshot, null, error)
+        }
+        val parsed = try {
+            module?.parse(snapshot)
+        } catch (error: Throwable) {
+            return failedCacheEntry(snapshot, module, error)
+        }
+        return DocumentCacheEntry(snapshot.ref.uri, snapshot.ref.version, module, parsed?.diagnostics.orEmpty(), parsed?.model)
+    }
+
+    private fun failedCacheEntry(
+        snapshot: DocumentSnapshot,
+        module: LanguageModule?,
+        error: Throwable,
+    ): DocumentCacheEntry {
+        if (error is CancellationException) throw error
+        val reason = error.message ?: "unexpected processing error"
+        return DocumentCacheEntry(
+            uri = snapshot.ref.uri,
+            version = snapshot.ref.version,
+            module = module,
+            diagnostics = listOf(
+                Diagnostic(
+                    uri = snapshot.ref.uri,
+                    range = Range(Position(0, 0), Position(0, 0)),
+                    severity = io.zenwave360.lsp.core.contracts.DiagnosticSeverity.ERROR,
+                    message = "Could not process this document: $reason",
+                    code = "document-processing-failed",
+                    data = mapOf("language" to snapshot.ref.languageId),
+                )
+            ),
+            parsedArtifact = null,
+            processingFailure = reason,
+        )
+    }
+
+    private companion object {
+        const val UNOPENED_VERSION = 0
+        const val ZENWAVE_SCHEME = "zenwave:"
+        const val MAX_IMPORTED_DOCUMENTS = 50
+        const val MAX_IMPORTS_PER_DOCUMENT = 20
+        const val MAX_IMPORT_READS = 100
+    }
 
     private fun getOrComputeHierarchy(entry: DocumentCacheEntry, snapshot: DocumentSnapshot): List<HierarchyNode> =
         run {
             lock.read { entry.hierarchy }?.let { return it }
             lock.write {
-                entry.hierarchy ?: entry.module?.hierarchy(snapshot, entry.parsedArtifact).orEmpty().also {
+                entry.hierarchy ?: entry.module?.takeUnless { entry.processingFailure != null }?.hierarchy(snapshot, entry.parsedArtifact).orEmpty().also {
                     entry.hierarchy = it
                 }
             }
@@ -158,12 +1034,50 @@ class ZenwaveLanguageServer(
         run {
             lock.read { entry.xrefContributions }?.let { return it }
             lock.write {
-                entry.xrefContributions ?: entry.module?.crossReferenceContributions(snapshot, entry.parsedArtifact).orEmpty().also {
+                entry.xrefContributions ?: entry.module?.takeUnless { entry.processingFailure != null }?.let { contributionsOf(it, snapshot, entry.parsedArtifact).also { contributed -> recordLinks(snapshot.ref.uri, contributed) }.contributions }.orEmpty().also {
                     entry.xrefContributions = it
                 }
             }
         }
 }
+
+/** What [ZenwaveLanguageServer.importDiagnostics] found: diagnostics by document address, and documents to clear. */
+data class ImportDiagnostics(
+    val documents: Map<String, List<Diagnostic>> = emptyMap(),
+    val cleared: Set<String> = emptySet(),
+)
+
+enum class WatchedFileChangeKind { CREATED, CHANGED, DELETED }
+
+/** One entry of `workspace/didChangeWatchedFiles`. */
+data class WatchedFileChange(val uri: String, val kind: WatchedFileChangeKind)
+
+enum class WorkspaceState { NONE, BUILDING, READY, STALE, FAILED }
+
+data class WorkspaceStatus(
+    val state: WorkspaceState,
+    val manifestUri: String? = null,
+    val message: String? = null,
+)
+
+/** A symbol at a position: what `forwardReferences` and `reverseReferences` take, and where it is. */
+data class SymbolAtPosition(
+    val uri: String,
+    val semanticId: String,
+    val range: Range?,
+)
+
+private fun Range.contains(position: Position): Boolean =
+    comparePositions(start, position) <= 0 && comparePositions(position, end) <= 0
+
+private fun Range.encloses(other: Range): Boolean =
+    comparePositions(start, other.start) <= 0 && comparePositions(other.end, end) <= 0
+
+private fun Range.size(): Long =
+    (end.line - start.line).toLong() * 100_000L + (end.character - start.character)
+
+private fun comparePositions(a: Position, b: Position): Int =
+    if (a.line != b.line) a.line.compareTo(b.line) else a.character.compareTo(b.character)
 
 private class DocumentCacheEntry(
     val uri: String,
@@ -171,6 +1085,7 @@ private class DocumentCacheEntry(
     val module: LanguageModule?,
     val diagnostics: List<Diagnostic>,
     val parsedArtifact: Any?,
-    @Volatile var hierarchy: List<HierarchyNode>? = null,
-    @Volatile var xrefContributions: List<CrossReferenceContribution>? = null,
+    val processingFailure: String? = null,
+    var hierarchy: List<HierarchyNode>? = null,
+    var xrefContributions: List<CrossReferenceContribution>? = null,
 )

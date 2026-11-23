@@ -2,11 +2,41 @@ package io.zenwave360.lsp.jvm
 
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
+import io.zenwave360.lsp.core.architecture.ArchitectureConceptRef
+import com.google.gson.JsonElement
+import com.google.gson.JsonParser
+import io.zenwave360.lsp.core.index.IndexStatusJson
+import io.zenwave360.lsp.core.platform.WatchedFileChange
+import io.zenwave360.lsp.core.platform.WatchedFileChangeKind
 import io.zenwave360.lsp.core.platform.ZenwaveLanguageServer
+import io.zenwave360.lsp.core.resource.ResourceJson
+import io.zenwave360.lsp.core.resource.ResourceRequestException
+import io.zenwave360.lsp.core.resource.ZenwaveResourceSettings
+import io.zenwave360.lsp.core.visualization.DocumentRequestException
+import io.zenwave360.lsp.core.visualization.InvalidRequestParamsException
+import io.zenwave360.lsp.core.visualization.VisualizationJson
+import io.zenwave360.lsp.core.visualization.ZenwaveErrorCodes
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomRequests as CustomRequestMethods
+import io.zenwave360.lsp.core.visualization.ZenwaveCustomNotifications
+import kotlinx.coroutines.runBlocking
+import org.eclipse.lsp4j.CodeActionKind
+import org.eclipse.lsp4j.CodeActionOptions
+import org.eclipse.lsp4j.CodeActionParams
+import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionList
+import org.eclipse.lsp4j.CompletionOptions
+import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DidChangeConfigurationParams
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidChangeWatchedFilesParams
+import org.eclipse.lsp4j.DidChangeWatchedFilesRegistrationOptions
+import org.eclipse.lsp4j.FileChangeType
+import org.eclipse.lsp4j.FileSystemWatcher
+import org.eclipse.lsp4j.InitializedParams
+import org.eclipse.lsp4j.Registration
+import org.eclipse.lsp4j.RegistrationParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DidSaveTextDocumentParams
@@ -22,9 +52,15 @@ import org.eclipse.lsp4j.ServerCapabilities
 import org.eclipse.lsp4j.ServerInfo
 import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
+import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentSyncKind
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
+import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
+import org.eclipse.lsp4j.MessageParams
+import org.eclipse.lsp4j.MessageType
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -33,7 +69,16 @@ import org.eclipse.lsp4j.services.WorkspaceService
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * The ZenWave custom requests. Their methods are advertised in `capabilities.experimental.customRequests` from
+ * lsp-core's `ZenwaveCustomRequests.ALL`, the list lsp-js registers its handlers from; a test checks that the
+ * annotations below and that list name the same methods.
+ */
 interface ZenwaveCustomRequests {
+    /**
+     * The conceptual hierarchy of a document, open or not; a document that is not open is read by the server.
+     * A -32803 error with `data.kind` `documentNotFound` when it is neither open nor readable.
+     */
     @JsonRequest("zenwave/hierarchy")
     fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>>
 
@@ -43,31 +88,140 @@ interface ZenwaveCustomRequests {
     @JsonRequest("zenwave/reverseReferences")
     fun reverseReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>>
 
+    /** The rewritten ZFL document, or null. `mode` is `full` (default) or `additive`. */
     @JsonRequest("zenwave/organizeZflServices")
     fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?>
+
+    @JsonRequest("zenwave/conceptAt")
+    fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>>
+
+    @JsonRequest("zenwave/workspaceStatus")
+    fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto>
+
+    /**
+     * Whether the background reference index (NAV-R20) is still being built: `{state: "idle" | "indexing" | "ready",
+     * files, candidates, partial}`. `partial` is true while some workspace files are beyond the cap of the first pass
+     * and not indexed yet; those are indexed when opened or referenced.
+     */
+    @JsonRequest("zenwave/indexStatus")
+    fun indexStatus(): CompletableFuture<JsonElement>
+
+    /** `{flowGraph, serviceGraph, variants, savedPositions?, lanes?}`, or a -32803 error whose `data.kind` says why the document cannot answer. */
+    @JsonRequest("zenwave/eventFlowViews")
+    fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement>
+
+    /** `{representations: [{id, title, format, content}], defaultRepresentationId}`, or a -32803 error. */
+    @JsonRequest("zenwave/preview")
+    fun preview(request: PreviewRequest): CompletableFuture<JsonElement>
+
+    /**
+     * The symbol at a position, `{uri, semanticId, range?}` or null, in the form `forwardReferences` and
+     * `reverseReferences` take. A -32803 `documentNotFound` error when the document is not open.
+     */
+    @JsonRequest("zenwave/symbolAt")
+    fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?>
+
+    /** `{uri, type: "file", size, readonly, source: {kind, fileUri?}}`, or a -32803 `resourceNotDeclared` or `resourceUnresolved` error. */
+    @JsonRequest("zenwave/statResource")
+    fun statResource(request: ResourceRequest): CompletableFuture<JsonElement>
+
+    /** `{uri, encoding, content}`, or a -32803 `resourceNotDeclared` or `resourceUnresolved` error. */
+    @JsonRequest("zenwave/readResource")
+    fun readResource(request: ResourceRequest): CompletableFuture<JsonElement>
+
+    /**
+     * Replaces the plugin catalogue `.zw` previews use (MP-R16). Params `{catalogue: <catalogue JSON object>}`; one that is
+     * not a catalogue is ignored and logged, and the previous one stays.
+     */
+    @JsonNotification("zenwave/pluginCatalogue")
+    fun pluginCatalogue(params: PluginCatalogueParams)
 }
+
+/** The files the reference index follows on disk; the server drops what its own rules skip (dot-directories, node_modules, ...). */
+private const val WATCHED_FILES = "**/*.{zdl,zfl,zw,avsc,yml,yaml,json}"
 
 class ZenwaveLspServer(
     private val server: ZenwaveLanguageServer
 ) : LanguageServer, TextDocumentService, WorkspaceService, LanguageClientAware, ZenwaveCustomRequests {
 
     private val documentTexts = ConcurrentHashMap<String, String>()
+    private val gson = com.google.gson.Gson()
     private var client: LanguageClient? = null
     private var shutdownRequested = false
+    private var watchesFilesDynamically = false
     internal var initializationOptions: ZenwaveInitializationOptions? = null
         private set
 
     override fun connect(client: LanguageClient) {
         this.client = client
+        server.log = { message -> client.logMessage(MessageParams(MessageType.Warning, message)) }
     }
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> =
-        CompletableFuture.completedFuture(
+        CompletableFuture.supplyAsync {
+            initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
+            initializationOptions?.let { options ->
+                server.applyResourceSettings(
+                    ZenwaveResourceSettings(
+                        remoteManifestName = options.remoteManifestName,
+                        allowedDomains = options.allowedDomains,
+                    )
+                )
+                options.remoteManifestNameWarning?.let { warning ->
+                    client?.logMessage(MessageParams(MessageType.Warning, warning))
+                }
+            }
+            watchesFilesDynamically = params.capabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration == true
+            pluginCatalogueFrom(params.initializationOptions)?.let(::replacePluginCatalogue)
+            initializationOptions?.projectManifestUri?.let { manifestUri ->
+                server.expectProjectManifest(manifestUri)
+                runBlocking { server.openWorkspace(manifestUri) }
+            }
+            // Not awaited: the first pass of the reference index runs behind the requests that follow (NAV-R20).
+            server.startBackgroundIndex(workspaceFolderUris(params))
             InitializeResult(buildCapabilities()).apply {
-                initializationOptions = parseZenwaveInitializationOptions(params.initializationOptions)
                 serverInfo = ServerInfo("zenwave-lsp", "0.1.0-SNAPSHOT")
             }
-        )
+        }
+
+    /** The workspace folders the client sent, or its root when it sent none. */
+    private fun workspaceFolderUris(params: InitializeParams): List<String> =
+        params.workspaceFolders?.mapNotNull { it.uri }?.takeIf { it.isNotEmpty() }
+            ?: listOfNotNull(params.rootUri)
+
+    /** NAV-R20: asks the client to tell the server about files created, changed or deleted on disk, when it can. */
+    override fun initialized(params: InitializedParams) {
+        if (!watchesFilesDynamically) return
+        val watchers = listOf(FileSystemWatcher(Either.forLeft(WATCHED_FILES)))
+        val registration = Registration("zenwave-watched-files", "workspace/didChangeWatchedFiles", DidChangeWatchedFilesRegistrationOptions(watchers))
+        client?.registerCapability(RegistrationParams(listOf(registration)))
+    }
+
+    override fun pluginCatalogue(params: PluginCatalogueParams) {
+        replacePluginCatalogue(params.catalogue)
+    }
+
+    /** Uses [catalogue] for the next `.zw` previews. Anything that is not a catalogue is logged and ignored. */
+    private fun replacePluginCatalogue(catalogue: JsonElement?) {
+        try {
+            if (catalogue == null || !catalogue.isJsonObject) {
+                throw IllegalArgumentException("The plugin catalogue must be a JSON object")
+            }
+            server.replacePluginCatalogue(catalogue.toString())
+        } catch (e: IllegalArgumentException) {
+            client?.logMessage(MessageParams(MessageType.Warning, "Ignored the plugin catalogue sent by the client: ${e.message}"))
+        }
+    }
+
+    /** `initializationOptions.pluginCatalogue`, as JSON, when the client sent one. */
+    private fun pluginCatalogueFrom(initializationOptions: Any?): JsonElement? {
+        val options = when (initializationOptions) {
+            is JsonElement -> initializationOptions
+            null -> return null
+            else -> gson.toJsonTree(initializationOptions)
+        }
+        return options.takeIf { it.isJsonObject }?.asJsonObject?.get("pluginCatalogue")?.takeIf { !it.isJsonNull }
+    }
 
     override fun shutdown(): CompletableFuture<Any> {
         shutdownRequested = true
@@ -96,7 +250,10 @@ class ZenwaveLspServer(
         )
         documentTexts[document.uri] = document.text
         server.open(snapshot)
+        logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didChange(params: DidChangeTextDocumentParams) {
@@ -113,14 +270,19 @@ class ZenwaveLspServer(
             ),
             text = nextText
         )
+        logProcessingFailure(document.uri)
         publishDiagnosticsIfHandled(snapshot)
+        publishImportDiagnostics(document.uri)
+        publishLinkDiagnostics(document.uri)
     }
 
     override fun didClose(params: DidCloseTextDocumentParams) {
         val uri = params.textDocument.uri
         documentTexts.remove(uri)
         server.close(uri)
-        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, emptyList()))
+        // A document an open `zenwave:` document still imports keeps the diagnostics found for it.
+        client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, server.importedDiagnosticsFor(uri) ?: emptyList()))
+        server.releaseImports(uri).forEach { client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(it, emptyList())) }
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
@@ -140,20 +302,36 @@ class ZenwaveLspServer(
         )
     }
 
+    override fun completion(params: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> =
+        CompletableFuture.completedFuture(
+            Either.forLeft(
+                server.completion(params.textDocument.uri, DtoMapper.toPosition(params.position)).map(DtoMapper::toCompletionItem)
+            )
+        )
+
+    override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>>> =
+        CompletableFuture.completedFuture(
+            server.codeActions(params.textDocument.uri, DtoMapper.fromLspRange(params.range))
+                .filter { DtoMapper.kindRequested(it.kind, params.context?.only) }
+                .map { Either.forRight<org.eclipse.lsp4j.Command, org.eclipse.lsp4j.CodeAction>(DtoMapper.toCodeAction(it)) }
+        )
+
     override fun definition(params: DefinitionParams): CompletableFuture<Either<List<org.eclipse.lsp4j.Location>, List<org.eclipse.lsp4j.LocationLink>>> {
-        val locations = server.definition(
-            params.textDocument.uri,
-            DtoMapper.toPosition(params.position)
-        ).mapNotNull(DtoMapper::toLocation)
+        val locations = runBlocking {
+            server.definitionReading(params.textDocument.uri, DtoMapper.toPosition(params.position))
+        }.mapNotNull(DtoMapper::toLocation)
         return CompletableFuture.completedFuture(Either.forLeft(locations))
     }
 
     override fun references(params: ReferenceParams): CompletableFuture<List<org.eclipse.lsp4j.Location>> {
         val uri = params.textDocument.uri
         val position = DtoMapper.toPosition(params.position)
-        val semanticId = server.hover(uri, position)?.semanticId
+        val documentSymbol = server.hover(uri, position)?.documentSymbol
             ?: return CompletableFuture.completedFuture(emptyList())
-        val refs = server.reverseReferences(uri, semanticId)
+        val refs = server.reverseReferences(
+            documentSymbol.uri,
+            "${documentSymbol.uri}#${documentSymbol.semanticPath}",
+        )
         return CompletableFuture.completedFuture(refs.mapNotNull(DtoMapper::toLocation))
     }
 
@@ -176,9 +354,39 @@ class ZenwaveLspServer(
     }
 
     override fun hierarchy(request: HierarchyRequest): CompletableFuture<List<HierarchyNodeDto>> =
-        CompletableFuture.completedFuture(
-            server.hierarchy(request.uri).map { it.toDto() }
-        )
+        answer {
+            @Suppress("SENSELESS_COMPARISON") // Gson leaves an absent uri null
+            val uri = request.uri.takeIf { it != null } ?: throw InvalidRequestParamsException("uri is required")
+            runBlocking { server.conceptualHierarchy(uri) }.map { it.toDto() }
+        }
+
+    override fun symbolAt(request: SymbolAtRequest): CompletableFuture<SymbolAtResult?> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            val position = request.position ?: throw InvalidRequestParamsException("position is required")
+            server.symbolAt(uri, DtoMapper.toPosition(position))?.let { SymbolAtResult(it.uri, it.semanticId, it.range) }
+        }
+
+    override fun statResource(request: ResourceRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireResourceUri(request)
+            JsonParser.parseString(ResourceJson.stat(runBlocking { server.statResource(uri) }))
+        }
+
+    override fun readResource(request: ResourceRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireResourceUri(request)
+            JsonParser.parseString(ResourceJson.content(runBlocking { server.readResource(uri) }))
+        }
+
+    /** The uri must be a JSON string: Gson would otherwise coerce a number to "3". */
+    private fun requireResourceUri(request: ResourceRequest?): String {
+        val uri = request?.uri
+        if (uri == null || !uri.isJsonPrimitive || !uri.asJsonPrimitive.isString) {
+            throw InvalidRequestParamsException("uri is required")
+        }
+        return uri.asString
+    }
 
     override fun forwardReferences(request: SemanticReferenceRequest): CompletableFuture<List<io.zenwave360.lsp.core.contracts.NavigationTarget>> =
         CompletableFuture.completedFuture(
@@ -191,15 +399,98 @@ class ZenwaveLspServer(
         )
 
     override fun organizeZflServices(request: OrganizeZflServicesRequest): CompletableFuture<String?> =
-        CompletableFuture.completedFuture(
-            server.organizeZflServices(request.uri)
-        )
+        answer {
+            server.organizeZflServices(request.uri, modeOrNull(request.mode))
+        }
+
+    override fun conceptAt(request: ConceptAtRequest): CompletableFuture<List<ArchitectureConceptRef>> =
+        CompletableFuture.supplyAsync {
+            runBlocking {
+                when {
+                    request.semanticPath != null -> server.conceptsAt(
+                        DocumentSymbolRef(
+                            uri = request.uri,
+                            semanticPath = request.semanticPath,
+                        ),
+                    )
+                    request.position != null -> server.conceptsAt(
+                        request.uri,
+                        DtoMapper.toPosition(request.position),
+                    )
+                    else -> emptyList()
+                }
+            }
+        }
+
+    override fun workspaceStatus(): CompletableFuture<WorkspaceStatusDto> =
+        CompletableFuture.completedFuture(server.workspaceStatus().toDto())
+    override fun eventFlowViews(request: TextDocumentRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            val views = runBlocking { server.eventFlowViews(uri, variantOrNull(request.variant), positionsOrNull(request.positions), lanesOrNull(request.lanes)) }
+            JsonParser.parseString(VisualizationJson.eventFlowViews(views))
+        }
+
+    override fun preview(request: PreviewRequest): CompletableFuture<JsonElement> =
+        answer {
+            val uri = requireTextDocumentUri(request.textDocument)
+            JsonParser.parseString(VisualizationJson.preview(server.preview(uri, request.sequenceRenderMode, modeOrNull(request.mode), sequenceTreeOrFalse(request.sequenceTree), representationIdOrNull(request.representationId))))
+        }
+
+    /**
+     * Runs a visualisation request off the message-reading thread (layout can take a while) and turns the
+     * lsp-core failures into JSON-RPC errors carrying their code and `data`.
+     */
+    private fun <T> answer(block: () -> T): CompletableFuture<T> =
+        CompletableFuture.supplyAsync {
+            try {
+                block()
+            } catch (failure: DocumentRequestException) {
+                throw ResponseErrorException(
+                    ResponseError(
+                        ZenwaveErrorCodes.REQUEST_FAILED,
+                        failure.message ?: failure.kind.wireName,
+                        JsonParser.parseString(VisualizationJson.failureData(failure))
+                    )
+                )
+            } catch (failure: ResourceRequestException) {
+                throw ResponseErrorException(
+                    ResponseError(
+                        ZenwaveErrorCodes.REQUEST_FAILED,
+                        failure.message ?: failure.kind.wireName,
+                        JsonParser.parseString(ResourceJson.failureData(failure))
+                    )
+                )
+            } catch (invalid: InvalidRequestParamsException) {
+                throw ResponseErrorException(
+                    ResponseError(ZenwaveErrorCodes.INVALID_PARAMS, invalid.message ?: "invalid params", null)
+                )
+            }
+        }
+
+    private fun requireTextDocumentUri(textDocument: TextDocumentIdentifier?): String =
+        textDocument?.uri ?: throw InvalidRequestParamsException("textDocument.uri is required")
 
     override fun didChangeConfiguration(params: DidChangeConfigurationParams) {
     }
 
     override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
+        server.workspaceFilesChanged(
+            params.changes.map { change ->
+                WatchedFileChange(
+                    change.uri,
+                    when (change.type) {
+                        FileChangeType.Created -> WatchedFileChangeKind.CREATED
+                        FileChangeType.Deleted -> WatchedFileChangeKind.DELETED
+                        else -> WatchedFileChangeKind.CHANGED
+                    },
+                )
+            },
+        )
     }
+
+    override fun indexStatus(): CompletableFuture<JsonElement> =
+        CompletableFuture.completedFuture(JsonParser.parseString(IndexStatusJson.status(server.indexStatus())))
 
     fun diagnostics(uri: String): List<org.eclipse.lsp4j.Diagnostic> =
         DtoMapper.toPublishDiagnostics(uri, server.diagnostics(uri)).diagnostics
@@ -209,6 +500,12 @@ class ZenwaveLspServer(
         return ServerCapabilities().apply {
             setTextDocumentSync(TextDocumentSyncKind.Incremental)
             setHoverProvider(moduleCapabilities.any { it.supportsHover })
+            if (moduleCapabilities.any { it.supportsCompletion }) {
+                completionProvider = CompletionOptions(false, listOf("(", ",", "\"", " "))
+            }
+            if (moduleCapabilities.any { it.supportsCodeActions }) {
+                codeActionProvider = Either.forRight(CodeActionOptions(listOf(CodeActionKind.QuickFix)))
+            }
             setDefinitionProvider(moduleCapabilities.any { it.supportsDefinition })
             setReferencesProvider(moduleCapabilities.any { it.supportsReferences })
             setDocumentSymbolProvider(moduleCapabilities.any { it.supportsHierarchy })
@@ -220,13 +517,54 @@ class ZenwaveLspServer(
                         extensions = it.extensions
                     )
                 },
-                "customRequests" to listOf(
-                    "zenwave/hierarchy",
-                    "zenwave/forwardReferences",
-                    "zenwave/reverseReferences",
-                    "zenwave/organizeZflServices"
-                )
+                "customRequests" to (CustomRequestMethods.ALL + listOf("zenwave/conceptAt", "zenwave/workspaceStatus")),
+                "customNotifications" to ZenwaveCustomNotifications.ALL,
+                "previewModes" to true,
+                "organizeModes" to true,
+                "flowVariants" to true,
+                "savedPositions" to true,
+                "flowLanes" to listOf("none", "systems", "services"),
             )
+        }
+    }
+
+    /**
+     * AR-R9: the server reads what a `zenwave:` document imports itself, then publishes the document's diagnostics with
+     * the import problems, and the imported documents' own. Off the message thread; a failure is logged.
+     */
+    private fun publishImportDiagnostics(uri: String) {
+        if (!uri.startsWith("zenwave:")) return
+        CompletableFuture.runAsync {
+            try {
+                // Published only while this is the latest reading of the document; a superseded one publishes nothing.
+                runBlocking {
+                    server.publishImportDiagnostics(uri) { result ->
+                        result.documents.forEach { (documentUri, diagnostics) ->
+                            client?.publishDiagnostics(
+                                org.eclipse.lsp4j.PublishDiagnosticsParams(documentUri, DtoMapper.toPublishDiagnostics(documentUri, diagnostics).diagnostics)
+                            )
+                        }
+                        result.cleared.forEach {
+                            client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(it, emptyList()))
+                        }
+                    }
+                }
+            } catch (failure: Exception) {
+                client?.logMessage(MessageParams(MessageType.Warning, "Could not read the imports of $uri: ${failure.message}"))
+            }
+        }
+    }
+
+    /** NAV-R7: a link to a document that cannot be reached (a ZFL `@zdl`) gets a diagnostic once the server has tried to read it. */
+    private fun publishLinkDiagnostics(uri: String) {
+        if (!uri.endsWith(".zfl")) return
+        CompletableFuture.runAsync {
+            try {
+                val diagnostics = runBlocking { server.diagnosticsWithLinks(uri) } ?: return@runAsync
+                client?.publishDiagnostics(DtoMapper.toPublishDiagnostics(uri, diagnostics))
+            } catch (failure: Exception) {
+                client?.logMessage(MessageParams(MessageType.Warning, "Could not check the links of $uri: ${failure.message}"))
+            }
         }
     }
 
@@ -238,6 +576,11 @@ class ZenwaveLspServer(
             }
         }
         client?.publishDiagnostics(org.eclipse.lsp4j.PublishDiagnosticsParams(snapshot.ref.uri, diagnostics))
+    }
+
+    private fun logProcessingFailure(uri: String) {
+        val failure = server.processingFailure(uri) ?: return
+        client?.logMessage(MessageParams(MessageType.Warning, "Could not process $uri: $failure"))
     }
 
     private fun applyContentChanges(current: String, changes: List<TextDocumentContentChangeEvent>): String =

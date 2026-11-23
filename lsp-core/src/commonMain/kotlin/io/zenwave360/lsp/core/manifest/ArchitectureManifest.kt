@@ -1,5 +1,6 @@
 package io.zenwave360.lsp.core.manifest
 
+import io.zenwave360.architecture.manifest.ZenWaveManifest
 import io.zenwave360.lsp.core.contracts.Diagnostic
 
 data class ArchitectureManifest(
@@ -7,6 +8,8 @@ data class ArchitectureManifest(
     val properties: Map<String, String>,
     val services: List<ArchitectureService>,
     val diagnostics: List<Diagnostic> = emptyList(),
+    /** The manifest-library model used for resource addresses and ownership. */
+    val source: ZenWaveManifest? = null,
 )
 
 data class ArchitectureService(

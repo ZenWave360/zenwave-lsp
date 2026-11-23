@@ -1,0 +1,5 @@
+domains:
+  sales:
+    services:
+      orders:
+        id: orders

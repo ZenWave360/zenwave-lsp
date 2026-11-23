@@ -1,6 +1,7 @@
 package io.zenwave360.lsp.core.spec
 
 import io.zenwave360.jsonrefparser.RefParser
+import io.zenwave360.jsonrefparser.io.DocumentLoader
 import io.zenwave360.jsonrefparser.model.ParsedDocument
 import io.zenwave360.jsonrefparser.model.ResolvedRef
 import io.zenwave360.jsonrefparser.model.getOriginalRef
@@ -16,6 +17,7 @@ class YamlDocumentModel(
     val resolvedRefs: Map<String, String>,
     val referenceTable: Map<String, String> = emptyMap(),
     private val documentLocationTables: Map<String, Map<String, SourceLocation>> = mapOf(uri to locationTable),
+    internal val documentLoaders: List<DocumentLoader>? = null,
 ) {
     fun pathAtPosition(position: Position): String? =
         SemanticPointerEvaluator.pathAtPosition(locationTable, position)
@@ -33,9 +35,14 @@ class YamlDocumentModel(
         SemanticPointerEvaluator.evaluate(rawModel, path)
 
     companion object {
-        fun fromParsedDocument(uri: String, parsedDocument: ParsedDocument): YamlDocumentModel =
+        fun fromParsedDocument(
+            uri: String,
+            parsedDocument: ParsedDocument,
+            documentLoaders: List<DocumentLoader>? = null,
+        ): YamlDocumentModel =
             YamlDocumentModel(
                 uri = uri,
+                documentLoaders = documentLoaders,
                 rawModel = parsedDocument.schema,
                 locationTable = buildCanonicalLocationTable(parsedDocument.schema, parsedDocument.locations),
                 resolvedRefs = parsedDocument.resolvedRefs.associateResolvedRefs(uri),
@@ -81,6 +88,7 @@ class YamlDocumentModel(
                 pointer = "",
                 rawLocations = locations,
                 output = canonicalLocations,
+                ancestors = mutableListOf(),
             )
             return canonicalLocations
         }
@@ -99,7 +107,8 @@ class YamlDocumentModel(
                 value = parsedDocument.schema,
                 canonicalPath = "$",
                 parsedDocument = parsedDocument,
-                output = refs
+                output = refs,
+                ancestors = mutableListOf(),
             )
             return refs
         }
@@ -109,30 +118,41 @@ class YamlDocumentModel(
             canonicalPath: String,
             parsedDocument: ParsedDocument,
             output: MutableMap<String, String>,
+            ancestors: MutableList<Any>,
         ) {
             parsedDocument.getOriginalRef(value)?.refString?.let { output[canonicalPath] = it }
 
-            when (value) {
-                is Map<*, *> -> value.forEach { (rawKey, child) ->
-                    val key = rawKey as? String ?: return@forEach
-                    visitReferences(
-                        value = child,
-                        canonicalPath = SemanticPointerEvaluator.appendProperty(canonicalPath, key),
-                        parsedDocument = parsedDocument,
-                        output = output
-                    )
-                }
-                is List<*> -> {
-                    val namedPaths = namedListPaths(canonicalPath, value)
-                    value.forEachIndexed { index, child ->
+            if (value !is Map<*, *> && value !is List<*>) return
+            if (ancestors.any { it === value }) return
+            ancestors += value
+
+            try {
+                when (value) {
+                    is Map<*, *> -> value.forEach { (rawKey, child) ->
+                        val key = rawKey as? String ?: return@forEach
                         visitReferences(
                             value = child,
-                            canonicalPath = namedPaths[index] ?: SemanticPointerEvaluator.appendIndex(canonicalPath, index),
+                            canonicalPath = SemanticPointerEvaluator.appendProperty(canonicalPath, key),
                             parsedDocument = parsedDocument,
-                            output = output
+                            output = output,
+                            ancestors = ancestors,
                         )
                     }
+                    is List<*> -> {
+                        val namedPaths = namedListPaths(canonicalPath, value)
+                        value.forEachIndexed { index, child ->
+                            visitReferences(
+                                value = child,
+                                canonicalPath = namedPaths[index] ?: SemanticPointerEvaluator.appendIndex(canonicalPath, index),
+                                parsedDocument = parsedDocument,
+                                output = output,
+                                ancestors = ancestors,
+                            )
+                        }
+                    }
                 }
+            } finally {
+                ancestors.removeAt(ancestors.lastIndex)
             }
         }
 
@@ -142,27 +162,36 @@ class YamlDocumentModel(
             pointer: String,
             rawLocations: Map<String, io.zenwave360.jsonrefparser.model.SourceLocation>,
             output: MutableMap<String, SourceLocation>,
+            ancestors: MutableList<Any>,
         ) {
             rawLocations[pointer]?.let { output[canonicalPath] = it.toContractsLocation() }
 
-            when (value) {
-                is Map<*, *> -> {
-                    value.forEach { (rawKey, child) ->
-                        val key = rawKey as? String ?: return@forEach
-                        val childPointer = appendPointer(pointer, key)
-                        val childPath = SemanticPointerEvaluator.appendProperty(canonicalPath, key)
-                        visitNode(child, childPath, childPointer, rawLocations, output)
-                    }
-                }
+            if (value !is Map<*, *> && value !is List<*>) return
+            if (ancestors.any { it === value }) return
+            ancestors += value
 
-                is List<*> -> {
-                    val namedPaths = namedListPaths(canonicalPath, value)
-                    value.forEachIndexed { index, child ->
-                        val childPointer = appendPointer(pointer, index.toString())
-                        val childPath = namedPaths[index] ?: SemanticPointerEvaluator.appendIndex(canonicalPath, index)
-                        visitNode(child, childPath, childPointer, rawLocations, output)
+            try {
+                when (value) {
+                    is Map<*, *> -> {
+                        value.forEach { (rawKey, child) ->
+                            val key = rawKey as? String ?: return@forEach
+                            val childPointer = appendPointer(pointer, key)
+                            val childPath = SemanticPointerEvaluator.appendProperty(canonicalPath, key)
+                            visitNode(child, childPath, childPointer, rawLocations, output, ancestors)
+                        }
+                    }
+
+                    is List<*> -> {
+                        val namedPaths = namedListPaths(canonicalPath, value)
+                        value.forEachIndexed { index, child ->
+                            val childPointer = appendPointer(pointer, index.toString())
+                            val childPath = namedPaths[index] ?: SemanticPointerEvaluator.appendIndex(canonicalPath, index)
+                            visitNode(child, childPath, childPointer, rawLocations, output, ancestors)
+                        }
                     }
                 }
+            } finally {
+                ancestors.removeAt(ancestors.lastIndex)
             }
         }
 

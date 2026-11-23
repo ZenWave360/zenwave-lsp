@@ -1,0 +1,21 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ZenWave360/release-workflows/.github/workflows/main-gradle.yml@e1f06ae5734cf790487acfa1f48f39f3e78aef39
+    with:
+      java-version: "21"
+      node-version: "24"
+      gradle-arguments: "--refresh-dependencies -PuseLocalDependencies=false"
+      kover-xml-files: >-
+        ./lsp-core/build/reports/kover/report.xml
+        ./lsp-jvm/build/reports/kover/report.xml

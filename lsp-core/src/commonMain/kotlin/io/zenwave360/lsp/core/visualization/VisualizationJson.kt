@@ -1,0 +1,136 @@
+package io.zenwave360.lsp.core.visualization
+
+import io.zenwave360.language.eventflow.view.FlowVariantGroup
+import io.zenwave360.language.eventflow.view.FlowVariantNode
+import io.zenwave360.language.eventflow.view.FlowViewModel
+import io.zenwave360.language.eventflow.view.ServiceViewModel
+import io.zenwave360.lsp.core.contracts.Diagnostic
+import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
+import io.zenwave360.lsp.core.contracts.Range
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * The JSON both servers send for the visualisation requests. It is built here, once, so lsp-jvm and lsp-js
+ * put the same bytes' worth of structure on the wire: each server only parses the string into its own JSON
+ * representation (Gson on the JVM, a plain object in JavaScript).
+ *
+ * View models are dsl-kotlin's own serialisation (`toJson`, with defaults, so `schema` is always present),
+ * except that null properties are omitted: LSP4J drops them on the wire, and omitting them in both servers
+ * keeps the two identical. The EventFlow renderer treats a missing property as it treats null.
+ */
+object VisualizationJson {
+
+    private val viewModelJson = Json {
+        encodeDefaults = true
+        explicitNulls = false
+    }
+
+    fun eventFlowViews(views: EventFlowViews): String =
+        buildJsonObject {
+            put("flowGraph", viewModelJson.encodeToJsonElement(FlowViewModel.serializer(), views.flowGraph))
+            put("serviceGraph", viewModelJson.encodeToJsonElement(ServiceViewModel.serializer(), views.serviceGraph))
+            views.lanes?.let { put("lanes", it.wire) }
+            views.savedPositions?.let { saved ->
+                put("savedPositions", buildJsonObject {
+                    when (saved) {
+                        SavedPositions.Applied -> put("applied", true)
+                        is SavedPositions.NotApplied -> {
+                            put("applied", false)
+                            put("reason", saved.reason)
+                            put("missing", buildJsonArray { saved.missing.forEach { add(JsonPrimitive(it)) } })
+                        }
+                    }
+                })
+            }
+            put("variants", buildJsonArray {
+                views.variants.forEach { variant ->
+                    add(buildJsonObject {
+                        put("id", variant.id)
+                        put("title", variant.title)
+                        if (variant.outcome.isNotEmpty()) put("outcome", variant.outcome)
+                        put("steps", buildJsonArray { variant.steps.forEach { add(JsonPrimitive(it)) } })
+                    })
+                }
+            })
+            put("variantTree", variantTree(views.variantTree))
+        }.toString()
+
+    /** `[{outcome, nodes: [{id, steps, title, count, children}]}]`: a line's `steps` are those it adds to its parent. */
+    private fun variantTree(groups: List<FlowVariantGroup>) = buildJsonArray {
+        fun node(node: FlowVariantNode): JsonObject = buildJsonObject {
+            put("id", node.id)
+            put("steps", buildJsonArray { node.steps.forEach { add(JsonPrimitive(it)) } })
+            put("title", node.title)
+            put("count", node.variantIds.size)
+            put("children", buildJsonArray { node.children.forEach { add(node(it)) } })
+        }
+        groups.forEach { group ->
+            add(buildJsonObject {
+                put("outcome", group.outcome)
+                put("nodes", buildJsonArray { group.nodes.forEach { add(node(it)) } })
+            })
+        }
+    }
+
+    fun preview(result: PreviewResult): String =
+        buildJsonObject {
+            put(
+                "representations",
+                buildJsonArray {
+                    result.representations.forEach { representation ->
+                        add(
+                            buildJsonObject {
+                                put("id", representation.id)
+                                put("title", representation.title)
+                                put("format", representation.format.name)
+                                put("content", representation.content)
+                                representation.group?.let { put("group", it) }
+                                representation.outcome?.let { put("outcome", it) }
+                            }
+                        )
+                    }
+                }
+            )
+            result.defaultRepresentationId?.let { put("defaultRepresentationId", it) }
+            result.sequenceTree?.let { put("sequenceTree", variantTree(it)) }
+        }.toString()
+
+    /** The `data` of a [ZenwaveErrorCodes.REQUEST_FAILED] error: `{kind, diagnostics?}`. */
+    fun failureData(failure: DocumentRequestException): String =
+        buildJsonObject {
+            put("kind", failure.kind.wireName)
+            if (failure.kind == DocumentFailureKind.DOCUMENT_UNREADABLE) {
+                put("diagnostics", buildJsonArray { failure.diagnostics.forEach { add(diagnostic(it)) } })
+            }
+        }.toString()
+
+    /** An LSP `Diagnostic`, in the shape both servers publish diagnostics in. */
+    private fun diagnostic(diagnostic: Diagnostic): JsonObject =
+        buildJsonObject {
+            put("range", range(diagnostic.range))
+            put(
+                "severity",
+                when (diagnostic.severity) {
+                    DiagnosticSeverity.ERROR -> 1
+                    DiagnosticSeverity.WARNING -> 2
+                    DiagnosticSeverity.INFO -> 3
+                    DiagnosticSeverity.HINT -> 4
+                }
+            )
+            diagnostic.code?.let { put("code", it) }
+            put("source", diagnostic.source)
+            put("message", diagnostic.message)
+            put("data", buildJsonObject { diagnostic.data.forEach { (key, value) -> put(key, value) } })
+        }
+
+    private fun range(range: Range): JsonObject =
+        buildJsonObject {
+            put("start", buildJsonObject { put("line", range.start.line); put("character", range.start.character) })
+            put("end", buildJsonObject { put("line", range.end.line); put("character", range.end.character) })
+        }
+}

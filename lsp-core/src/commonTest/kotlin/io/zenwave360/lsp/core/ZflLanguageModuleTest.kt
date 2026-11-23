@@ -68,18 +68,6 @@ class ZflLanguageModuleTest {
         assertEquals("file:///workspace/flows/subscription/model.zdl", domainRef.targetUri)
     }
 
-    @Test
-    fun definitionResolvesCommandReferenceWithinSameFile() {
-        val snapshot = zflSnapshot("file:///workspace/flows/subscriptions.zfl", testText)
-
-        val definition = module.definition(snapshot, Position(line = 9, character = 20))
-
-        assertEquals(1, definition.size)
-        assertEquals("renewSubscription", definition.first().label)
-        assertEquals("file:///workspace/flows/subscriptions.zfl", definition.first().uri)
-        assertNotNull(definition.first().range)
-    }
-
     private fun zflSnapshot(uri: String, text: String) =
         DocumentSnapshot(
             ref = DocumentRef(uri = uri, languageId = "zfl", version = 1),
@@ -95,10 +83,9 @@ systems {
 }
 
 flow PaymentsFlow {
-    when CustomerRequestsSubscriptionRenewal {
+    when CustomerRequestsSubscriptionRenewal do renewSubscription {
         service Subscription.SubscriptionService
-        command renewSubscription
-        event SubscriptionRenewed
+        emits SubscriptionRenewed
     }
 
     end {

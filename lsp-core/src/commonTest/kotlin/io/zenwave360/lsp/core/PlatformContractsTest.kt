@@ -5,6 +5,7 @@ import io.zenwave360.lsp.core.contracts.Diagnostic
 import io.zenwave360.lsp.core.contracts.DiagnosticSeverity
 import io.zenwave360.lsp.core.contracts.DocumentRef
 import io.zenwave360.lsp.core.contracts.DocumentSnapshot
+import io.zenwave360.lsp.core.contracts.DocumentSymbolRef
 import io.zenwave360.lsp.core.contracts.HierarchyNode
 import io.zenwave360.lsp.core.contracts.HoverResult
 import io.zenwave360.lsp.core.contracts.LanguageCapabilities
@@ -142,7 +143,7 @@ class PlatformContractsTest {
 
         val hover = server.hover(snapshot.ref.uri, Position(0, 0))
         assertNotNull(hover)
-        assertEquals("${snapshot.ref.uri}#entities.Order", hover.semanticId)
+        assertEquals(DocumentSymbolRef(snapshot.ref.uri, "entities.Order", hover.range), hover.documentSymbol)
 
         val hierarchy = server.hierarchy(snapshot.ref.uri)
         assertEquals(1, hierarchy.size)
@@ -183,6 +184,27 @@ class PlatformContractsTest {
         assertEquals(2, module.parseCalls)
     }
 
+    @Test
+    fun processingFailurePublishesADiagnosticAndDoesNotPreventOtherDocumentsBeingServed() {
+        val server = ZenwaveLanguageServer(
+            modules = listOf(FakeLanguageModule("bad", parsingFailure = true), FakeLanguageModule()),
+            sessionStore = InMemoryDocumentSessionStore(),
+            crossReferenceIndex = InMemoryCrossReferenceIndex()
+        )
+        val bad = DocumentSnapshot(DocumentRef("file:///workspace/bad.bad", "bad", 1), "bad")
+        val good = DocumentSnapshot(DocumentRef("file:///workspace/orders.zdl", "zdl", 1), "entity Order {}")
+
+        server.open(bad)
+
+        assertEquals("document-processing-failed", server.diagnostics(bad.ref.uri).single().code)
+        assertNotNull(server.processingFailure(bad.ref.uri))
+        assertNull(server.hover(bad.ref.uri, Position(0, 0)))
+
+        server.open(good)
+
+        assertNotNull(server.hover(good.ref.uri, Position(0, 0)))
+    }
+
     private fun sampleRange() =
         Range(
             start = Position(0, 0),
@@ -190,15 +212,16 @@ class PlatformContractsTest {
         )
 }
 
-private class FakeLanguageModule : LanguageModule {
+private class FakeLanguageModule(
+    override val languageId: String = "zdl",
+    private val parsingFailure: Boolean = false,
+) : LanguageModule {
     var parseCalls: Int = 0
-
-    override val languageId: String = "zdl"
 
     override val capabilities: LanguageCapabilities =
         LanguageCapabilities(
             languageId = languageId,
-            extensions = listOf(".zdl"),
+            extensions = listOf(".$languageId"),
             supportsHover = true,
             supportsDefinition = true,
             supportsCompletion = false,
@@ -208,14 +231,16 @@ private class FakeLanguageModule : LanguageModule {
             supportsFormatting = true
         )
 
-    override fun parse(snapshot: DocumentSnapshot): ParseResult =
-        ParseResult(
-            semanticId = "${snapshot.ref.uri}#entities.Order",
+    override fun parse(snapshot: DocumentSnapshot): ParseResult {
+        if (parsingFailure) throw IllegalStateException("test processing failure")
+        return ParseResult(
+            documentSymbol = DocumentSymbolRef(snapshot.ref.uri, "entities.Order"),
             model = mapOf("name" to "Order"),
             diagnostics = diagnostics(snapshot)
         ).also {
             parseCalls += 1
         }
+    }
 
     override fun diagnostics(snapshot: DocumentSnapshot): List<Diagnostic> =
         listOf(
@@ -230,7 +255,11 @@ private class FakeLanguageModule : LanguageModule {
 
     override fun hover(snapshot: DocumentSnapshot, position: Position): HoverResult =
         HoverResult(
-            semanticId = "${snapshot.ref.uri}#entities.Order",
+            documentSymbol = DocumentSymbolRef(
+                snapshot.ref.uri,
+                "entities.Order",
+                Range(Position(0, 0), Position(0, 5)),
+            ),
             markdown = "Order",
             range = Range(Position(0, 0), Position(0, 5))
         )
